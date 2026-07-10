@@ -65,7 +65,7 @@
                                     <listOptionValue value="DebugP_ASSERT_ENABLED"/>
                                     <listOptionValue value="_LITTLE_ENDIAN"/>
 
-                                    <listOptionValue value="APP_RESOURCE_FILE=''&quot;local_inc/mmw_res.h&quot;''"/>
+                                    <listOptionValue value="APP_RESOURCE_FILE=&quot;&lt;local_inc/mmw_res.h&gt;&quot;"/>
                                 </option>
                                 <option id="com.ti.ccstudio.buildDefinitions.TMS470_16.9.compilerID.OPT_LEVEL.990747180" superClass="com.ti.ccstudio.buildDefinitions.TMS470_16.9.compilerID.OPT_LEVEL" value="com.ti.ccstudio.buildDefinitions.TMS470_16.9.compilerID.OPT_LEVEL.3" valueType="enumerated"/>
                                 <option id="com.ti.ccstudio.buildDefinitions.TMS470_16.9.compilerID.OBJ_EXTENSION.1882534631" superClass="com.ti.ccstudio.buildDefinitions.TMS470_16.9.compilerID.OBJ_EXTENSION" value=".oer4f" valueType="string"/>
@@ -245,7 +245,7 @@
                                     <listOptionValue value="DebugP_ASSERT_ENABLED"/>
                                     <listOptionValue value="_LITTLE_ENDIAN"/>
 
-                                    <listOptionValue value="APP_RESOURCE_FILE=''&quot;local_inc/mmw_res.h&quot;''"/>
+                                    <listOptionValue value="APP_RESOURCE_FILE=&quot;&lt;local_inc/mmw_res.h&gt;&quot;"/>
                                     <listOptionValue value="USE_2D_AOA_DPU"/>
                                     <listOptionValue value="XWR18XX_AOP_ANTENNA_PATTERN"/>
                                 </option>

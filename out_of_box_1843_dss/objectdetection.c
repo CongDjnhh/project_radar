@@ -44,6 +44,8 @@
 #include <string.h>
 #include <stdio.h>
 
+#include <xdc/runtime/System.h>
+
 /* mmWave SDK Include Files: */
 #include <ti/drivers/soc/soc.h>
 #include <ti/common/sys_common.h>

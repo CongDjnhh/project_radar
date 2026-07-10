@@ -59,7 +59,7 @@
                                     <listOptionValue value="DebugP_ASSERT_ENABLED"/>
                                     <listOptionValue value="_LITTLE_ENDIAN"/>
                                     
-                                    <listOptionValue value="APP_RESOURCE_FILE=''&quot;local_inc/mmw_res.h&quot;''"/>
+                                    <listOptionValue value="APP_RESOURCE_FILE=&quot;&lt;local_inc/mmw_res.h&gt;&quot;"/>
                                 </option>
                                 <option id="com.ti.ccstudio.buildDefinitions.C6000_8.3.compilerID.OPT_FOR_SPEED.1761635564" superClass="com.ti.ccstudio.buildDefinitions.C6000_8.3.compilerID.OPT_FOR_SPEED" value="com.ti.ccstudio.buildDefinitions.C6000_8.3.compilerID.OPT_FOR_SPEED.3" valueType="enumerated"/>
                                 <option id="com.ti.ccstudio.buildDefinitions.C6000_8.3.compilerID.GEN_FUNC_SUBSECTIONS.290359662" superClass="com.ti.ccstudio.buildDefinitions.C6000_8.3.compilerID.GEN_FUNC_SUBSECTIONS" value="com.ti.ccstudio.buildDefinitions.C6000_8.3.compilerID.GEN_FUNC_SUBSECTIONS.on" valueType="enumerated"/>
@@ -106,6 +106,8 @@
                                     <listOptionValue value="${COM_TI_MMWAVE_SDK_INSTALL_DIR}/packages/ti/datapath/dpu/rangeproc/lib"/>
                                     <listOptionValue value="${COM_TI_MMWAVE_SDK_INSTALL_DIR}/packages/ti/datapath/dpedma/lib"/>
                                     <listOptionValue value="${TI_MATHLIB_C674X_INSTALL_DIR}/packages/ti/mathlib/lib"/>
+                                      <listOptionValue value="C:/TI/dsplib_c64Px_3_4_0_0/packages/ti/dsplib/lib"/>
+                                      <listOptionValue value="C:/TI/dsplib_c674x_3_4_0_0/packages/ti/dsplib/lib"/>
                                     <listOptionValue value="${COM_TI_MMWAVE_SDK_INSTALL_DIR}/packages/ti/datapath/dpc/dpu/aoaproc/lib"/>
                                     <listOptionValue value="${CG_TOOL_ROOT}/include"/>
                                 </option>
@@ -114,6 +116,8 @@
                                     <listOptionValue value="${COM_TI_MMWAVE_SDK_LIBRARIES}"/>
                                     <listOptionValue value="${COM_TI_MATHLIB_C674X_LIBRARIES}"/>
                                     <listOptionValue value="mathlib.ae674"/>
+                                      <listOptionValue value="dsplib.ae64P"/>
+                                      <listOptionValue value="dsplib.ae674"/>
                                     <listOptionValue value="libmathutils.ae674"/>
                                     <listOptionValue value="libsoc_xwr18xx.ae674"/>
                                     <listOptionValue value="libosal_xwr18xx.ae674"/>
@@ -230,7 +234,7 @@
                                     <listOptionValue value="DebugP_ASSERT_ENABLED"/>
                                     <listOptionValue value="_LITTLE_ENDIAN"/>
                                     
-                                    <listOptionValue value="APP_RESOURCE_FILE=''&quot;local_inc/mmw_res.h&quot;''"/>
+                                    <listOptionValue value="APP_RESOURCE_FILE=&quot;&lt;local_inc/mmw_res.h&gt;&quot;"/>
                                     <listOptionValue value="USE_2D_AOA_DPU"/>
                                     <listOptionValue value="XWR18XX_AOP_ANTENNA_PATTERN"/>
                                 </option>
@@ -279,6 +283,8 @@
                                     <listOptionValue value="${COM_TI_MMWAVE_SDK_INSTALL_DIR}/packages/ti/datapath/dpu/rangeproc/lib"/>
                                     <listOptionValue value="${COM_TI_MMWAVE_SDK_INSTALL_DIR}/packages/ti/datapath/dpedma/lib"/>
                                     <listOptionValue value="${TI_MATHLIB_C674X_INSTALL_DIR}/packages/ti/mathlib/lib"/>
+                                      <listOptionValue value="C:/TI/dsplib_c64Px_3_4_0_0/packages/ti/dsplib/lib"/>
+                                      <listOptionValue value="C:/TI/dsplib_c674x_3_4_0_0/packages/ti/dsplib/lib"/>
                                     <listOptionValue value="${COM_TI_MMWAVE_SDK_INSTALL_DIR}/packages/ti/datapath/dpc/dpu/aoa2dproc/lib"/>
                                     <listOptionValue value="${CG_TOOL_ROOT}/include"/>
                                 </option>
@@ -287,6 +293,8 @@
                                     <listOptionValue value="${COM_TI_MMWAVE_SDK_LIBRARIES}"/>
                                     <listOptionValue value="${COM_TI_MATHLIB_C674X_LIBRARIES}"/>
                                     <listOptionValue value="mathlib.ae674"/>
+                                      <listOptionValue value="dsplib.ae64P"/>
+                                      <listOptionValue value="dsplib.ae674"/>
                                     <listOptionValue value="libmathutils.ae674"/>
                                     <listOptionValue value="libsoc_xwr18xx.ae674"/>
                                     <listOptionValue value="libosal_xwr18xx.ae674"/>
