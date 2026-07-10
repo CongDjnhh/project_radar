@@ -1,0 +1,37 @@
+# VS Code
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+*.egg-info/
+
+# Build artifacts
+Debug/
+Release/
+*.out
+*.map
+*.obj
+*.d
+*.ae674
+*.aer4f
+
+# clangd/ISK generated
+isk/
+.clangd/
+
+# SYSBIOS generated
+**/src/SYSBIOS
+configPkg/
+makefile.**
+*.exclude
+
+# CCS settings
+.settings/
+.theia/
+
+# compile commands
+**/compile_commands.json
