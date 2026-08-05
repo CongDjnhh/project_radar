@@ -2218,6 +2218,8 @@ int32_t DPC_ObjectDetection_execute
         result->objOutSideInfo       = subFrmObj->dpuCfg.aoaCfg.res.detObjOutSideInfo;
         result->azimuthStaticHeatMap = subFrmObj->dpuCfg.aoaCfg.res.azimuthStaticHeatMap;
         result->azimuthStaticHeatMapSize = subFrmObj->dpuCfg.aoaCfg.res.azimuthStaticHeatMapSize;
+        /* Export the L3 radar cube descriptor to MSS. The buffer is valid until
+         * MSS acknowledges DPC_OBJDET_IOCTL__DYNAMIC_EXECUTE_RESULT_EXPORTED. */
         result->radarCube            = subFrmObj->dpuCfg.aoaCfg.res.radarCube;
         result->detMatrix            = subFrmObj->dpuCfg.dopplerCfg.hwRes.detMatrix;
         if (objDetObj->commonCfg.measureRxChannelBiasCfg.enabled == 1)
@@ -2915,4 +2917,3 @@ DPM_ProcChainCfg gDPC_ObjectDetectionCfg =
 };
 
 /* @} */
-

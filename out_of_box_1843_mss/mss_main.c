@@ -1158,7 +1158,8 @@ static void MmwDemo_measurementResultOutput(DPU_AoAProc_compRxChannelBiasCfg *co
 *       number of chirps per frame * sizeof(uint32_t)
 *    7. If rangeDopplerHeatMap flag is set, the log magnitude range-Doppler matrix,
 *       size = number of range bins * number of Doppler bins * sizeof(uint16_t)
-*    8. If statsInfo flag is set, the stats information
+*    8. If radarCube flag is set, the raw DPIF radar cube in format 1
+*    9. If statsInfo flag is set, the stats information
 *   @param[in] uartHandle   UART driver handle
 *   @param[in] result       Pointer to result from object detection DPC processing
 *   @param[in] timingInfo   Pointer to timing information provided from core that runs data path
@@ -1185,6 +1186,7 @@ static void MmwDemo_transmitProcessedOutput
     cmplx16ImRe_t *azimuthStaticHeatMap;
     DPIF_PointCloudSideInfo *objOutSideInfo;
     DPC_ObjectDetection_Stats *stats;
+    void *radarCubeData = NULL;
     
     /* Get subframe configuration */
     subFrameCfg = &gMmwMssMCB.subFrameCfg[result->subFrameIdx];
@@ -1221,10 +1223,19 @@ static void MmwDemo_transmitProcessedOutput
         DebugP_assert ((uint32_t)stats != SOC_TRANSLATEADDR_INVALID);
 
 
-        result->radarCube.data = (void *) SOC_translateAddress((uint32_t) result->radarCube.data,
-                                                     SOC_TranslateAddr_Dir_FROM_OTHER_CPU,
-                                                     &errCode);
-        DebugP_assert ((uint32_t) result->radarCube.data!= SOC_TRANSLATEADDR_INVALID);
+        if (pGuiMonSel->radarCube == 1U)
+        {
+            /* This DSP object-detection chain produces format 1 only. */
+            DebugP_assert (result->radarCube.datafmt == DPIF_RADARCUBE_FORMAT_1);
+            DebugP_assert ((result->radarCube.data != NULL) &&
+                           (result->radarCube.dataSize != 0U));
+
+            radarCubeData = (void *)SOC_translateAddress(
+                                      (uint32_t)result->radarCube.data,
+                                      SOC_TranslateAddr_Dir_FROM_OTHER_CPU,
+                                      &errCode);
+            DebugP_assert ((uint32_t)radarCubeData != SOC_TRANSLATEADDR_INVALID);
+        }
     }
 
     /* Header: */
@@ -1285,6 +1296,13 @@ static void MmwDemo_transmitProcessedOutput
     {
         tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_RANGE_DOPPLER_HEAT_MAP;
         tl[tlvIdx].length = subFrameCfg->numRangeBins * subFrameCfg->numDopplerBins * sizeof(uint16_t);
+        packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
+        tlvIdx++;
+    }
+    if (pGuiMonSel->radarCube == 1U)
+    {
+        tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_RADAR_CUBE;
+        tl[tlvIdx].length = result->radarCube.dataSize;
         packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
         tlvIdx++;
     }
@@ -1404,6 +1422,20 @@ static void MmwDemo_transmitProcessedOutput
         UART_writePolling (uartHandle,
                 (uint8_t*)detMatrix,
                 tl[tlvIdx].length);
+        tlvIdx++;
+    }
+
+    /* Send the raw range-FFT radar cube. The DPC result remains owned by DSS
+     * until MmwDemo_handleObjectDetResult reports RESULT_EXPORTED. */
+    if (pGuiMonSel->radarCube == 1U)
+    {
+        UART_writePolling (uartHandle,
+                           (uint8_t*)&tl[tlvIdx],
+                           sizeof(MmwDemo_output_message_tl));
+
+        UART_writePolling (uartHandle,
+                           (uint8_t*)radarCubeData,
+                           tl[tlvIdx].length);
         tlvIdx++;
     }
 

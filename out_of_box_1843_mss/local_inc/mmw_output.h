@@ -87,6 +87,9 @@ typedef enum MmwDemo_output_message_type_e
     /*! @brief   temperature stats from Radar front end */
     MMWDEMO_OUTPUT_MSG_TEMPERATURE_STATS,
 
+    /*! @brief   Raw radar cube (DPIF_RADARCUBE_FORMAT_1) */
+    MMWDEMO_OUTPUT_MSG_RADAR_CUBE = 10,
+
     MMWDEMO_OUTPUT_MSG_MAX
 } MmwDemo_output_message_type;
 

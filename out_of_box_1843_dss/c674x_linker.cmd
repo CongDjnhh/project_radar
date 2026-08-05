@@ -30,6 +30,16 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+/*
+ * The C674x .text output section is intentionally split across L2 memory
+ * ranges.  Functions in the first range can therefore reach the compiler's
+ * __push_rts/__pop_rts helpers through linker-generated trampolines and emit
+ * diagnostic #10370-D.  TI recommends retaining push/pop optimization for
+ * mmWave DSP applications; disabling it increases code size globally.  Keep
+ * the optimized code and suppress only this expected placement diagnostic.
+ */
+--diag_suppress=10370
+
 #define L1P_CACHE_SIZE (16*1024)
 #define L1D_CACHE_SIZE (16*1024)
 #define MMWAVE_L3RAM_SIZE (MMWAVE_L3RAM_NUM_BANK*MMWAVE_SHMEM_BANK_SIZE)
@@ -96,4 +106,3 @@ SECTIONS
 
     .text: {} >> L2SRAM_UMAP1 | L2SRAM_UMAP0 | L3SRAM
 }
-
