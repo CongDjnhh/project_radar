@@ -628,7 +628,6 @@
 #include "local_inc/mmw_output.h"
 #include "local_inc/mmw_res.h"
 #include "local_inc/mmw_mss.h"
-#include "dense_elevation.h"
 #include "nav_point_gen.h"
 #include "nav_tracker.h"
 #include <ti/board/antenna_geometry.h>
@@ -703,10 +702,6 @@ static const ANTDEF_AntGeometry gMmwDemoIwr1843IskAntDef =
 };
 #endif
 
-/* CCS-visible UART diagnostics for the independent dense TLV 11 path. */
-volatile uint32_t gDenseElevUartPacketsSent = 0U;
-volatile uint32_t gDenseElevUartInvalidPayloadCount = 0U;
-volatile uint32_t gDenseElevUartLastPayloadSize = 0U;
 volatile uint32_t gMmwDemoUartWriteErrorCount = 0U;
 volatile uint32_t gNavSurfaceUartPacketsSent = 0U;
 volatile uint32_t gNavSurfaceUartInvalidPayloadCount = 0U;
@@ -719,6 +714,16 @@ volatile uint32_t gNavTargetUartLastPayloadSize = 0U;
     (sizeof(MmwDemo_NavTargetHeader) + \
      MMWDEMO_NAV_MAX_TARGETS * sizeof(MmwDemo_NavTarget))
 static uint8_t gNavTargetOutput[MMWDEMO_NAV_TARGET_OUTPUT_CAPACITY];
+
+/* The result-export IOCTL is issued only after the blocking UART transfer.
+ * Reserve the complete wire time plus deterministic MSS control/tracker
+ * headroom before DSS is allowed to spend the remaining frame on Nav. */
+#define MMWDEMO_NAV_UART_BITS_PER_BYTE          (10ULL)
+#define MMWDEMO_NAV_MSS_BASE_RESERVE_USEC       (3000U)
+#define MMWDEMO_NAV_GTRACK_RESERVE_USEC         (10000U)
+/* TI keeps this limit private to objectdetection.c, so mirror the wire-side
+ * maximum locally instead of modifying or including an SDK source file. */
+#define MMWDEMO_NAV_TI_MAX_DETECTED_OBJECTS      (500U)
 
 /**
  * @brief
@@ -869,6 +874,16 @@ static uint8_t MmwDemo_validateNavPayload(
         (!isfinite(header->dopplerStepMps)) ||
         (!isfinite(header->framePeriodSec)) ||
         (!isfinite(header->rangeBiasMeters)) ||
+        (!isfinite(header->egoVelocityXMps)) ||
+        (!isfinite(header->egoVelocityYMps)) ||
+        (!isfinite(header->egoVelocityZMps)) ||
+        (!isfinite(header->egoConfidence)) ||
+        (header->egoConfidence < 0.0f) ||
+        (header->egoConfidence > 1.0f) ||
+        (((header->flags & MMWDEMO_NAV_FLAG_EGO_VALID) == 0U) &&
+         ((header->egoVelocityXMps != 0.0f) ||
+          (header->egoVelocityYMps != 0.0f) ||
+          (header->egoVelocityZMps != 0.0f))) ||
         !(header->rangeStepMeters > 0.0f) ||
         !(header->dopplerStepMps > 0.0f) ||
         (header->framePeriodSec < 0.0f))
@@ -886,14 +901,20 @@ static uint8_t MmwDemo_validateNavPayload(
                  (uint32_t)header->numDiscretePoints;
          index++)
     {
+        float u = 2.0f * (float)points[index].azimuthIdx /
+                  (float)header->numAzimuthBins;
+        float v = (float)points[index].sourceVQ15 / 32767.0f;
         if ((points[index].rangeIdx >= header->numRangeBins) ||
+            (points[index].rangeIdx < header->rangeStart) ||
+            (points[index].rangeIdx >= header->rangeEnd) ||
             ((int16_t)points[index].azimuthIdx < -halfAzimuth) ||
             ((int16_t)points[index].azimuthIdx >= halfAzimuth) ||
             ((int16_t)points[index].elevationIdx < -halfElevation) ||
             ((int16_t)points[index].elevationIdx >= halfElevation) ||
             (points[index].dopplerIdx < -halfDoppler) ||
             (points[index].dopplerIdx >= halfDoppler) ||
-            (points[index].sourceVQ15 == (int16_t)-32768))
+            (points[index].sourceVQ15 == (int16_t)-32768) ||
+            ((u * u + v * v) > 1.001f))
         {
             return 0U;
         }
@@ -912,6 +933,8 @@ static uint8_t MmwDemo_validateNavTargetPayload(
     const MmwDemo_NavTargetHeader *header =
         (const MmwDemo_NavTargetHeader *)payload;
     uint32_t expectedSize;
+    uint32_t index;
+    const MmwDemo_NavTarget *targets;
 
     if ((payload == NULL) ||
         (payloadSize < sizeof(MmwDemo_NavTargetHeader)) ||
@@ -927,16 +950,43 @@ static uint8_t MmwDemo_validateNavTargetPayload(
     }
     expectedSize = (uint32_t)header->headerSize +
         (uint32_t)header->numTargets * (uint32_t)header->targetSize;
-    return (expectedSize == payloadSize) ? 1U : 0U;
+    if (expectedSize != payloadSize)
+    {
+        return 0U;
+    }
+    targets = (const MmwDemo_NavTarget *)
+        ((const uint8_t *)payload + header->headerSize);
+    for (index = 0U; index < header->numTargets; index++)
+    {
+        if ((!isfinite(targets[index].posX)) ||
+            (!isfinite(targets[index].posY)) ||
+            (!isfinite(targets[index].posZ)) ||
+            (!isfinite(targets[index].velX)) ||
+            (!isfinite(targets[index].velY)) ||
+            (!isfinite(targets[index].velZ)) ||
+            (!isfinite(targets[index].accX)) ||
+            (!isfinite(targets[index].accY)) ||
+            (!isfinite(targets[index].accZ)) ||
+            (!isfinite(targets[index].dimX)) ||
+            (!isfinite(targets[index].dimY)) ||
+            (!isfinite(targets[index].dimZ)) ||
+            (!isfinite(targets[index].confidence)) ||
+            (targets[index].dimX < 0.0f) ||
+            (targets[index].dimY < 0.0f) ||
+            (targets[index].dimZ < 0.0f) ||
+            (targets[index].confidence < 0.0f))
+        {
+            return 0U;
+        }
+    }
+    return 1U;
 }
 
-static uint32_t MmwDemo_transmitProcessedOutput
+static void MmwDemo_transmitProcessedOutput
 (
     UART_Handle     uartHandle,
     DPC_ObjectDetection_ExecuteResult   *result,
     MmwDemo_output_message_stats        *timingInfo,
-    void *denseElevHeatmap,
-    uint32_t denseElevPayloadSize,
     void *navSurfacePayload,
     uint32_t navSurfacePayloadSize,
     void *navTargetPayload,
@@ -1283,7 +1333,28 @@ uint8_t MmwDemo_isAllCfgInNonPendingState(void)
  *      Error   -   <0
  */
 void MmwDemo_CfgUpdate(void *srcPtr, uint32_t offset, uint32_t size, int8_t subFrameNum)
-{    
+{
+    volatile MmwDemo_NavCliCfg *sharedCfg =
+        (volatile MmwDemo_NavCliCfg *)&gHSRAM.navCfg;
+    uint8_t timingAffects =
+        ((offset == MMWDEMO_GUIMONSEL_OFFSET) ||
+         (offset == MMWDEMO_LVDSSTREAMCFG_OFFSET)) ? 1U : 0U;
+    uint8_t generation = 0U;
+    UInt key = 0U;
+
+    /* GUI/LVDS flags change the blocking result tail. Keep their MSS copy and
+     * the DSS timing contract inside one generation transaction. */
+    if (timingAffects != 0U)
+    {
+        key = Hwi_disable();
+        generation = sharedCfg->isValid;
+        if (generation != 0U)
+        {
+            sharedCfg->isValid = 0U;
+            MEM_BARRIER();
+        }
+    }
+
     /* if subFrameNum undefined, broadcast to all sub-frames */
     if(subFrameNum == MMWDEMO_SUBFRAME_NUM_FRAME_LEVEL_CONFIG)
     {
@@ -1300,6 +1371,49 @@ void MmwDemo_CfgUpdate(void *srcPtr, uint32_t offset, uint32_t size, int8_t subF
            where there is no advanced frame config) */
         memcpy((void *)((uint32_t) &gMmwMssMCB.subFrameCfg[subFrameNum] + offset), srcPtr, size);
         MmwDemo_setSubFramePendingState(&gMmwMssMCB.subFrameCfg[subFrameNum], offset);
+    }
+
+    if (timingAffects != 0U)
+    {
+        if (generation != 0U)
+        {
+            uint8_t first = (subFrameNum ==
+                MMWDEMO_SUBFRAME_NUM_FRAME_LEVEL_CONFIG) ? 0U :
+                (uint8_t)subFrameNum;
+            uint8_t last = (subFrameNum ==
+                MMWDEMO_SUBFRAME_NUM_FRAME_LEVEL_CONFIG) ?
+                (RL_MAX_SUBFRAMES - 1U) : (uint8_t)subFrameNum;
+            uint16_t maxSurfacePoints = sharedCfg->uartMaxSurfacePoints;
+            uint8_t indx;
+            uint8_t nextGeneration = generation + 1U;
+
+            if ((maxSurfacePoints == 0U) ||
+                (maxSurfacePoints > MMWDEMO_NAV_MAX_SURFACE_POINTS))
+            {
+                maxSurfacePoints = MMWDEMO_NAV_MAX_SURFACE_POINTS;
+            }
+            for (indx = first; indx <= last; indx++)
+            {
+                uint8_t surfaceEnabled =
+                    ((sharedCfg->enabledSurfaceMask & (1U << indx)) != 0U)
+                        ? 1U : 0U;
+                uint8_t targetEnabled =
+                    ((sharedCfg->enabledTargetMask & (1U << indx)) != 0U)
+                        ? 1U : 0U;
+                sharedCfg->postProcReserveUsec[indx] =
+                    MmwDemo_getNavPostProcReserveUsecForState(
+                        indx, maxSurfacePoints,
+                        surfaceEnabled, targetEnabled);
+            }
+            MEM_BARRIER();
+            if (nextGeneration == 0U)
+            {
+                nextGeneration = 1U;
+            }
+            sharedCfg->isValid = nextGeneration;
+            MEM_BARRIER();
+        }
+        Hwi_restore(key);
     }
 }
 
@@ -1359,21 +1473,18 @@ static void MmwDemo_measurementResultOutput(DPU_AoAProc_compRxChannelBiasCfg *co
 *    7. If rangeDopplerHeatMap flag is set, the log magnitude range-Doppler matrix,
 *       size = number of range bins * number of Doppler bins * sizeof(uint16_t)
 *    8. If radarCube flag is set, the raw DPIF radar cube in format 1
-*    9. If denseElevationHeatMap is set, diagnostic source samples (TLV 11)
-*   10. If nav surface output is enabled, current-frame surfaces (TLV 12)
-*   11. If nav target output is enabled, GTRACK 3-D targets (TLV 13)
-*   12. If statsInfo flag is set, the stats information
+*    9. If nav surface output is enabled, current-frame surfaces (TLV 12)
+*   10. If nav target output is enabled, GTRACK 3-D targets (TLV 13)
+*   11. If statsInfo flag is set, the stats information
 *   @param[in] uartHandle   UART driver handle
 *   @param[in] result       Pointer to result from object detection DPC processing
 *   @param[in] timingInfo   Pointer to timing information provided from core that runs data path
 */
-static uint32_t MmwDemo_transmitProcessedOutput
+static void MmwDemo_transmitProcessedOutput
 (
     UART_Handle     uartHandle,
     DPC_ObjectDetection_ExecuteResult   *result,
     MmwDemo_output_message_stats        *timingInfo,
-    void *denseElevHeatmap,
-    uint32_t denseElevPayloadSize,
     void *navSurfacePayload,
     uint32_t navSurfacePayloadSize,
     void *navTargetPayload,
@@ -1388,7 +1499,6 @@ static uint32_t MmwDemo_transmitProcessedOutput
     uint32_t index;
     uint32_t numPaddingBytes;
     uint32_t packetLen;
-    uint32_t denseBytesSent = 0U;
     uint8_t padding[MMWDEMO_OUTPUT_MSG_SEGMENT_LEN];
     MmwDemo_output_message_tl   tl[MMWDEMO_OUTPUT_MSG_MAX];
     int32_t errCode;
@@ -1398,9 +1508,6 @@ static uint32_t MmwDemo_transmitProcessedOutput
     DPIF_PointCloudSideInfo *objOutSideInfo;
     DPC_ObjectDetection_Stats *stats;
     void *radarCubeData = NULL;
-    uint8_t densePayloadValid = 0U;
-    MmwDemo_DenseElevation_OutputHeader *denseHeader =
-        (MmwDemo_DenseElevation_OutputHeader *)denseElevHeatmap;
 
 #define MMWDEMO_UART_WRITE_OR_EXIT(buffer_, size_) do { \
     if (MmwDemo_uartWriteChecked(uartHandle, (uint8_t *)(buffer_), \
@@ -1417,86 +1524,6 @@ static uint32_t MmwDemo_transmitProcessedOutput
      * must not change a condition between the TLV-table and UART-write phases. */
     guiMonSel = subFrameCfg->guiMonSel;
     pGuiMonSel = &guiMonSel;
-
-    /* Validate the complete V6 wire payload before it can affect packet
-     * length or UART. Header-only DSP error reports remain transportable. */
-    if ((denseHeader != NULL) &&
-        (denseElevPayloadSize >= sizeof(*denseHeader)) &&
-        (denseHeader->magic == MMWDEMO_DENSE_ELEVATION_MAGIC) &&
-        (denseHeader->version == MMWDEMO_DENSE_ELEVATION_PROTOCOL_VERSION) &&
-        (denseHeader->headerSize == sizeof(*denseHeader)) &&
-        (denseHeader->sampleSize == sizeof(MmwDemo_DenseElevation_OutputSample)) &&
-        (denseHeader->numSamples <= MMWDEMO_DENSE_ELEV_MAX_OUTPUT_SAMPLES))
-    {
-        uint32_t expectedDenseSize =
-            (uint32_t)denseHeader->headerSize +
-            (uint32_t)denseHeader->numSamples *
-            (uint32_t)denseHeader->sampleSize;
-
-        if (expectedDenseSize == denseElevPayloadSize)
-        {
-            if (denseHeader->protocolStatus != 0U)
-            {
-                /* DSP processing errors intentionally carry no samples and
-                 * no normal processing flags. */
-                densePayloadValid = (denseHeader->numSamples == 0U) ? 1U : 0U;
-            }
-            else if ((denseHeader->numRangeBins != 0U) &&
-                     (denseHeader->numDopplerBins != 0U) &&
-                     ((denseHeader->numDopplerBins & 1U) == 0U) &&
-                     (denseHeader->numAzimuthBins ==
-                        MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS) &&
-                     (denseHeader->numElevationBins ==
-                        MMWDEMO_DENSE_ELEV_NUM_ELEVATION_BINS) &&
-                     (denseHeader->rangeStart <= denseHeader->rangeEnd) &&
-                     (denseHeader->rangeEnd <= denseHeader->numRangeBins) &&
-                     ((denseHeader->flags & MMWDEMO_DENSE_REQUIRED_FLAGS) ==
-                        MMWDEMO_DENSE_REQUIRED_FLAGS) &&
-                     (denseHeader->minAzimuthDeg10 >= -900) &&
-                     (denseHeader->maxAzimuthDeg10 <= 900) &&
-                     (denseHeader->minAzimuthDeg10 <=
-                        denseHeader->maxAzimuthDeg10) &&
-                     (denseHeader->minElevationDeg10 >= -900) &&
-                     (denseHeader->maxElevationDeg10 <= 900) &&
-                     (denseHeader->minElevationDeg10 <=
-                        denseHeader->maxElevationDeg10))
-            {
-                MmwDemo_DenseElevation_OutputSample *denseSamples =
-                    (MmwDemo_DenseElevation_OutputSample *)
-                    ((uint8_t *)denseElevHeatmap + denseHeader->headerSize);
-                int16_t halfAzimuth =
-                    (int16_t)(denseHeader->numAzimuthBins / 2U);
-                int16_t halfElevation =
-                    (int16_t)(denseHeader->numElevationBins / 2U);
-                int16_t halfDoppler =
-                    (int16_t)(denseHeader->numDopplerBins / 2U);
-
-                densePayloadValid = 1U;
-                for (index = 0U; index < denseHeader->numSamples; index++)
-                {
-                    MmwDemo_DenseElevation_OutputSample *sample =
-                        &denseSamples[index];
-                    if ((sample->rangeIdx >= denseHeader->numRangeBins) ||
-                        ((int16_t)sample->azimuthIdx < -halfAzimuth) ||
-                        ((int16_t)sample->azimuthIdx >= halfAzimuth) ||
-                        ((int16_t)sample->elevationIdx < -halfElevation) ||
-                        ((int16_t)sample->elevationIdx >= halfElevation) ||
-                        (sample->dopplerIdx < -halfDoppler) ||
-                        (sample->dopplerIdx >= halfDoppler) ||
-                        (sample->sourceVQ15 == (int16_t)-32768))
-                    {
-                        densePayloadValid = 0U;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    if (((denseElevHeatmap != NULL) || (denseElevPayloadSize != 0U)) &&
-        (densePayloadValid == 0U))
-    {
-        gDenseElevUartInvalidPayloadCount++;
-    }
 
     /* Clear message header and padding. */
     memset((void *)&header, 0, sizeof(MmwDemo_output_message_header));
@@ -1543,16 +1570,6 @@ static uint32_t MmwDemo_transmitProcessedOutput
         }
     }
 
-    /* A frame-synchronous TLV must identify the same radar frame/subframe as
-     * the outer TI packet. Never transmit a stale dense buffer. */
-    if ((densePayloadValid != 0U) &&
-        ((denseHeader->radarFrameNumber != stats->frameStartIntCounter) ||
-         (denseHeader->subFrameNumber != result->subFrameIdx)))
-    {
-        densePayloadValid = 0U;
-        gDenseElevUartInvalidPayloadCount++;
-    }
-
     /* Header: */
     header.platform =  0xA1843;
     header.magicWord[0] = 0x0102;
@@ -1581,16 +1598,6 @@ static uint32_t MmwDemo_transmitProcessedOutput
     {
         tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_DETECTED_POINTS_SIDE_INFO;
         tl[tlvIdx].length = sizeof(DPIF_PointCloudSideInfo) * result->numObjOut;
-        packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
-        tlvIdx++;
-    }
-
-    /* Dense voxels are an additional, self-describing TLV; CFAR point-cloud
-     * data above remains untouched. */
-    if ((pGuiMonSel->denseElevationHeatMap == 1U) && densePayloadValid)
-    {
-        tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_DENSE_ELEVATION_HEATMAP;
-        tl[tlvIdx].length = denseElevPayloadSize;
         packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
         tlvIdx++;
     }
@@ -1627,7 +1634,9 @@ static uint32_t MmwDemo_transmitProcessedOutput
         packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
         tlvIdx++;
     }
-    if (pGuiMonSel->rangeAzimuthHeatMap)
+    if ((pGuiMonSel->rangeAzimuthHeatMap != 0U) &&
+        (result->azimuthStaticHeatMap != NULL) &&
+        (result->azimuthStaticHeatMapSize != 0U))
     {
 #if defined(USE_2D_AOA_DPU)
         tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_AZIMUT_ELEVATION_STATIC_HEAT_MAP;
@@ -1700,17 +1709,6 @@ static uint32_t MmwDemo_transmitProcessedOutput
         tlvIdx++;
     }
 
-    if ((pGuiMonSel->denseElevationHeatMap == 1U) && densePayloadValid)
-    {
-        MMWDEMO_UART_WRITE_OR_EXIT(
-            &tl[tlvIdx], sizeof(MmwDemo_output_message_tl));
-
-        /*Send custom dense heatmap array */
-        MMWDEMO_UART_WRITE_OR_EXIT(
-            denseElevHeatmap, denseElevPayloadSize);
-        tlvIdx++;
-    }
-
     if ((navSurfacePayload != NULL) && (navSurfacePayloadSize != 0U))
     {
         MMWDEMO_UART_WRITE_OR_EXIT(
@@ -1761,7 +1759,9 @@ static uint32_t MmwDemo_transmitProcessedOutput
     }
 
     /* Send data for static azimuth heatmap */
-    if (pGuiMonSel->rangeAzimuthHeatMap)
+    if ((pGuiMonSel->rangeAzimuthHeatMap != 0U) &&
+        (result->azimuthStaticHeatMap != NULL) &&
+        (result->azimuthStaticHeatMapSize != 0U))
     {
         azimuthStaticHeatMap = (cmplx16ImRe_t *) SOC_translateAddress((uint32_t)result->azimuthStaticHeatMap,
                                                      SOC_TranslateAddr_Dir_FROM_OTHER_CPU,
@@ -1828,12 +1828,6 @@ static uint32_t MmwDemo_transmitProcessedOutput
 
     /* Count a TLV only after the complete outer packet, including padding,
      * has reached UART. A truncated packet is not usable by the parser. */
-    if ((pGuiMonSel->denseElevationHeatMap == 1U) && densePayloadValid)
-    {
-        denseBytesSent = denseElevPayloadSize;
-        gDenseElevUartLastPayloadSize = denseElevPayloadSize;
-        gDenseElevUartPacketsSent++;
-    }
     if ((navSurfacePayload != NULL) && (navSurfacePayloadSize != 0U))
     {
         gNavSurfaceUartLastPayloadSize = navSurfacePayloadSize;
@@ -1846,7 +1840,7 @@ static uint32_t MmwDemo_transmitProcessedOutput
     }
 uartWriteExit:
 #undef MMWDEMO_UART_WRITE_OR_EXIT
-    return denseBytesSent;
+    return;
 }
 
 /**************************************************************************
@@ -2120,6 +2114,181 @@ static uint16_t MmwDemo_convertCfarToLinear(uint16_t codedCfarVal, uint8_t numVi
     return (linearVal);
 }
 
+/** Return a conservative current-configuration upper bound for work after DSS
+ * publishes a result: MSS validation/GTRACK, the complete blocking UART packet,
+ * and the result-export control path. */
+uint32_t MmwDemo_getNavPostProcReserveUsecForState(
+    uint8_t subFrameIdx,
+    uint16_t maxSurfacePoints,
+    uint8_t surfaceEnabled,
+    uint8_t targetEnabled)
+{
+    const MmwDemo_SubFrameCfg *subFrameCfg =
+        &gMmwMssMCB.subFrameCfg[subFrameIdx];
+    const MmwDemo_GuiMonSel *gui = &subFrameCfg->guiMonSel;
+    uint64_t packetBytes = sizeof(MmwDemo_output_message_header);
+    uint64_t uartUsec;
+    uint64_t reserveUsec;
+
+    if ((maxSurfacePoints == 0U) ||
+        (maxSurfacePoints > MMWDEMO_NAV_MAX_SURFACE_POINTS))
+    {
+        maxSurfacePoints = MMWDEMO_NAV_MAX_SURFACE_POINTS;
+    }
+
+    /* Navigation and LVDS share a non-double-buffered result lifetime.  Until
+     * an LVDS WCET contract exists, fail safe instead of pretending UART-only
+     * reserve covers the unbounded semaphore waits in the TI stream path. */
+    if ((subFrameCfg->lvdsStreamCfg.isSwEnabled == 1U) ||
+        (subFrameCfg->lvdsStreamCfg.dataFmt !=
+         MMW_DEMO_LVDS_STREAM_CFG_DATAFMT_DISABLED))
+    {
+        return 0xFFFFFFFFU;
+    }
+
+    if ((gui->detectedObjects == 1U) ||
+        (gui->detectedObjects == 2U))
+    {
+        packetBytes += sizeof(MmwDemo_output_message_tl) +
+            (uint64_t)MMWDEMO_NAV_TI_MAX_DETECTED_OBJECTS *
+            sizeof(DPIF_PointCloudCartesian);
+    }
+    if (gui->detectedObjects == 1U)
+    {
+        packetBytes += sizeof(MmwDemo_output_message_tl) +
+            (uint64_t)MMWDEMO_NAV_TI_MAX_DETECTED_OBJECTS *
+            sizeof(DPIF_PointCloudSideInfo);
+    }
+    if (surfaceEnabled != 0U)
+    {
+        packetBytes += sizeof(MmwDemo_output_message_tl) +
+            sizeof(MmwDemo_NavFrameHeader) +
+            (uint64_t)maxSurfacePoints * sizeof(MmwDemo_NavPoint);
+    }
+    if (targetEnabled != 0U)
+    {
+        packetBytes += sizeof(MmwDemo_output_message_tl) +
+            sizeof(MmwDemo_NavTargetHeader) +
+            (uint64_t)MMWDEMO_NAV_MAX_TARGETS * sizeof(MmwDemo_NavTarget);
+    }
+    if (gui->logMagRange != 0U)
+    {
+        packetBytes += sizeof(MmwDemo_output_message_tl) +
+            (uint64_t)subFrameCfg->numRangeBins * sizeof(uint16_t);
+    }
+    if (gui->noiseProfile != 0U)
+    {
+        packetBytes += sizeof(MmwDemo_output_message_tl) +
+            (uint64_t)subFrameCfg->numRangeBins * sizeof(uint16_t);
+    }
+    if (gui->rangeAzimuthHeatMap != 0U)
+    {
+        packetBytes += sizeof(MmwDemo_output_message_tl) +
+            (uint64_t)subFrameCfg->numRangeBins *
+            subFrameCfg->numVirtualAntennas * sizeof(cmplx16ImRe_t);
+    }
+    if (gui->rangeDopplerHeatMap != 0U)
+    {
+        packetBytes += sizeof(MmwDemo_output_message_tl) +
+            (uint64_t)subFrameCfg->numRangeBins *
+            subFrameCfg->numDopplerBins *
+            sizeof(uint16_t);
+    }
+    if (gui->radarCube == 1U)
+    {
+        packetBytes += sizeof(MmwDemo_output_message_tl) +
+            (uint64_t)subFrameCfg->numRangeBins *
+            subFrameCfg->numDopplerChirps *
+            subFrameCfg->numVirtualAntennas *
+            sizeof(cmplx16ImRe_t);
+    }
+    if (gui->statsInfo != 0U)
+    {
+        packetBytes += 2ULL * sizeof(MmwDemo_output_message_tl) +
+            sizeof(MmwDemo_output_message_stats) +
+            sizeof(MmwDemo_temperatureStats);
+    }
+
+    packetBytes = (packetBytes + MMWDEMO_OUTPUT_MSG_SEGMENT_LEN - 1ULL) &
+                  ~((uint64_t)MMWDEMO_OUTPUT_MSG_SEGMENT_LEN - 1ULL);
+    uartUsec = (packetBytes * MMWDEMO_NAV_UART_BITS_PER_BYTE * 1000000ULL +
+                gMmwMssMCB.cfg.platformCfg.loggingBaudRate - 1ULL) /
+               gMmwMssMCB.cfg.platformCfg.loggingBaudRate;
+    reserveUsec = uartUsec + MMWDEMO_NAV_MSS_BASE_RESERVE_USEC;
+    if (targetEnabled != 0U)
+    {
+        reserveUsec += MMWDEMO_NAV_GTRACK_RESERVE_USEC;
+    }
+    return (reserveUsec > 0xFFFFFFFFULL) ? 0xFFFFFFFFU :
+           (uint32_t)reserveUsec;
+}
+
+static uint32_t MmwDemo_getNavPostProcReserveUsec(uint8_t subFrameIdx)
+{
+    volatile const MmwDemo_NavCliCfg *sharedCfg =
+        (volatile const MmwDemo_NavCliCfg *)&gHSRAM.navCfg;
+    uint16_t maxSurfacePoints = MMWDEMO_NAV_MAX_SURFACE_POINTS;
+    uint8_t surfaceEnabled = 0U;
+    uint8_t targetEnabled = 0U;
+    UInt key = Hwi_disable();
+
+    if (sharedCfg->isValid != 0U)
+    {
+        if ((sharedCfg->uartMaxSurfacePoints != 0U) &&
+            (sharedCfg->uartMaxSurfacePoints <=
+             MMWDEMO_NAV_MAX_SURFACE_POINTS))
+        {
+            maxSurfacePoints = sharedCfg->uartMaxSurfacePoints;
+        }
+        surfaceEnabled =
+            ((sharedCfg->enabledSurfaceMask & (1U << subFrameIdx)) != 0U)
+                ? 1U : 0U;
+        targetEnabled =
+            ((sharedCfg->enabledTargetMask & (1U << subFrameIdx)) != 0U)
+                ? 1U : 0U;
+    }
+    Hwi_restore(key);
+    return MmwDemo_getNavPostProcReserveUsecForState(
+        subFrameIdx, maxSurfacePoints, surfaceEnabled, targetEnabled);
+}
+
+/** Publish one subframe timing contract without exposing a torn array update
+ * to DSS. A zero generation remains zero, so timing alone never enables Nav. */
+static void MmwDemo_publishNavTiming(
+    uint8_t subFrameIdx,
+    uint32_t framePeriodUsec,
+    uint32_t trackingPeriodUsec,
+    uint32_t postProcReserveUsec)
+{
+    volatile MmwDemo_NavCliCfg *sharedCfg =
+        (volatile MmwDemo_NavCliCfg *)&gHSRAM.navCfg;
+    uint8_t generation;
+    uint8_t nextGeneration;
+    UInt key = Hwi_disable();
+
+    generation = sharedCfg->isValid;
+    if (generation != 0U)
+    {
+        sharedCfg->isValid = 0U;
+        MEM_BARRIER();
+    }
+    sharedCfg->framePeriodUsec[subFrameIdx] = framePeriodUsec;
+    sharedCfg->trackingPeriodUsec[subFrameIdx] = trackingPeriodUsec;
+    sharedCfg->postProcReserveUsec[subFrameIdx] = postProcReserveUsec;
+    MEM_BARRIER();
+    if (generation != 0U)
+    {
+        nextGeneration = generation + 1U;
+        if (nextGeneration == 0U)
+        {
+            nextGeneration = 1U;
+        }
+        sharedCfg->isValid = nextGeneration;
+        MEM_BARRIER();
+    }
+    Hwi_restore(key);
+}
+
 
 /**
  *  @b Description
@@ -2143,6 +2312,10 @@ static int32_t MmwDemo_dataPathConfig (void)
     MmwDemo_RFParserOutParams       RFparserOutParams;
     DPC_ObjectDetection_PreStartCfg  objDetPreStartCfg;
     DPC_ObjectDetection_StaticCfg   *staticCfg;
+    uint64_t                         trackingPeriodTicks = 0ULL;
+    uint32_t                         trackingPeriodUsec;
+    uint32_t                         framePeriodTicks;
+    uint8_t                          timingIdx;
 
     /* Get data path object and control configuration */
     ptrCtrlCfg = &gMmwMssMCB.cfg.ctrlCfg;
@@ -2239,6 +2412,22 @@ static int32_t MmwDemo_dataPathConfig (void)
         subFrameCfg->objDetDynCfg.dynCfg.prepareRangeAzimuthHeatMap = subFrameCfg->guiMonSel.rangeAzimuthHeatMap;
         subFrameCfg->numAdcSamples = RFparserOutParams.numAdcSamples;
         subFrameCfg->numChirpsPerSubFrame = RFparserOutParams.numChirpsPerFrame;
+        subFrameCfg->numDopplerChirps = RFparserOutParams.numDopplerChirps;
+        if (ptrCtrlCfg->dfeDataOutputMode ==
+            MMWave_DFEDataOutputMode_ADVANCED_FRAME)
+        {
+            framePeriodTicks = ptrCtrlCfg->u.advancedFrameCfg.frameCfg.frameSeq.
+                subFrameCfg[subFrameIndx].subFramePeriodicity;
+        }
+        else
+        {
+            framePeriodTicks =
+                ptrCtrlCfg->u.frameCfg.frameCfg.framePeriodicity;
+        }
+        /* One mmWaveLink timing tick is 5 ns. Floor to microseconds so the
+         * deadline contract can never exceed the RF period by rounding up. */
+        subFrameCfg->framePeriodUsec =
+            (uint32_t)(((uint64_t)framePeriodTicks * 5ULL) / 1000ULL);
         subFrameCfg->numVirtualAntennas = RFparserOutParams.numVirtualAntennas;
 
         /* DPC pre-start config */
@@ -2369,6 +2558,41 @@ static int32_t MmwDemo_dataPathConfig (void)
                 goto exit;
             }
         }
+    }
+
+    /* A subframe deadline ends at the next subframe, but GTRACK deltaT is the
+     * interval until this same subframe is observed again. In advanced-frame
+     * mode that is the sum of all enabled subframe slots. */
+    for (timingIdx = 0U;
+         timingIdx < objDetCommonCfg->preStartCommonCfg.numSubFrames;
+         timingIdx++)
+    {
+        if (ptrCtrlCfg->dfeDataOutputMode ==
+            MMWave_DFEDataOutputMode_ADVANCED_FRAME)
+        {
+            trackingPeriodTicks +=
+                ptrCtrlCfg->u.advancedFrameCfg.frameCfg.frameSeq.
+                    subFrameCfg[timingIdx].subFramePeriodicity;
+        }
+        else
+        {
+            trackingPeriodTicks =
+                ptrCtrlCfg->u.frameCfg.frameCfg.framePeriodicity;
+        }
+    }
+    trackingPeriodUsec =
+        (uint32_t)((trackingPeriodTicks * 5ULL) / 1000ULL);
+    for (timingIdx = 0U;
+         timingIdx < objDetCommonCfg->preStartCommonCfg.numSubFrames;
+         timingIdx++)
+    {
+        gMmwMssMCB.subFrameCfg[timingIdx].trackingPeriodUsec =
+            trackingPeriodUsec;
+        MmwDemo_publishNavTiming(
+            timingIdx,
+            gMmwMssMCB.subFrameCfg[timingIdx].framePeriodUsec,
+            trackingPeriodUsec,
+            MmwDemo_getNavPostProcReserveUsec(timingIdx));
     }
 exit:
     return errCode;
@@ -3069,7 +3293,6 @@ static void MmwDemo_handleObjectDetResult
 )
 {
     static uint32_t lastResultTime[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
-    static uint32_t lastDensePayloadSize[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
     static uint32_t lastNavSurfacePayloadSize[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
     static uint8_t navTargetWasEnabled[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
     int32_t     retVal;
@@ -3090,10 +3313,8 @@ static void MmwDemo_handleObjectDetResult
     uint32_t                                  navTargetPayloadSize = 0U;
     uint8_t                                   navSurfaceEnabled = 0U;
     uint8_t                                   navTargetEnabled = 0U;
+    float                                     navStaticVelocityThresholdMps = 0.20f;
     uint32_t                                  navSurfacePacketsBefore;
-    uint8_t                                   navCfgSeqBefore;
-    uint8_t                                   navCfgSeqAfter;
-    volatile const MmwDemo_NavCliCfg          *sharedNavCfg;
     MmwDemo_AuxResult                         *auxResult = NULL;
 
     /*****************************************************************
@@ -3118,46 +3339,46 @@ static void MmwDemo_handleObjectDetResult
     currSubFrameStats = &gMmwMssMCB.subFrameStats[currSubFrameIdx];
     prevSubFrameStats = &gMmwMssMCB.subFrameStats[prevSubFrameIdx];
 
-    /* Snapshot only the publication masks. The DSS independently snapshots
-     * the same generation before generating this frame's NAVF payload. */
-    sharedNavCfg = (volatile const MmwDemo_NavCliCfg *)&gHSRAM.navCfg;
-    navCfgSeqBefore = sharedNavCfg->isValid;
-    if (navCfgSeqBefore != 0U)
-    {
-        navSurfaceEnabled =
-            ((sharedNavCfg->enabledSurfaceMask &
-              (uint8_t)(1U << currSubFrameIdx)) != 0U) ? 1U : 0U;
-        navTargetEnabled =
-            ((sharedNavCfg->enabledTargetMask &
-              (uint8_t)(1U << currSubFrameIdx)) != 0U) ? 1U : 0U;
-        navCfgSeqAfter = sharedNavCfg->isValid;
-        if ((navCfgSeqBefore != navCfgSeqAfter) ||
-            (navCfgSeqAfter == 0U))
-        {
-            navSurfaceEnabled = 0U;
-            navTargetEnabled = 0U;
-        }
-    }
-
-    /* UART feedback controller for the next dense result. It uses the tighter
-     * of 40% of the measured subframe and the time remaining after the last
-     * measured DSP processing time plus a 2 ms guard. */
+    /* Allocate the next frame's UART budget to navigation surfaces. */
     {
         uint32_t now = Cycleprofiler_getTimeStamp();
         uint32_t previous = lastResultTime[currSubFrameIdx];
-        uint16_t nextMaxSamples = 64U;
         uint16_t nextMaxNavSurface = 384U;
-        volatile MmwDemo_DenseElevCliCfg *sharedDenseCfg =
-            (volatile MmwDemo_DenseElevCliCfg *)&gHSRAM.denseElevCfg;
+        uint16_t configuredMaxNavSurface = 384U;
+        uint8_t navGeneration;
+        uint8_t navSurfaceOutputEnabled = 0U;
+        uint8_t navTargetOutputEnabled = 0U;
+        UInt key;
         volatile MmwDemo_NavCliCfg *sharedNavFeedbackCfg =
             (volatile MmwDemo_NavCliCfg *)&gHSRAM.navCfg;
 
-        if ((sharedNavFeedbackCfg->maxSurfacePoints != 0U) &&
-            (sharedNavFeedbackCfg->maxSurfacePoints <=
-             MMWDEMO_NAV_MAX_SURFACE_POINTS))
+        key = Hwi_disable();
+        navGeneration = sharedNavFeedbackCfg->isValid;
+        if (navGeneration != 0U)
         {
-            nextMaxNavSurface = sharedNavFeedbackCfg->maxSurfacePoints;
+            navSurfaceOutputEnabled =
+                ((sharedNavFeedbackCfg->enabledSurfaceMask &
+                  (1U << currSubFrameIdx)) != 0U) ? 1U : 0U;
+            navTargetOutputEnabled =
+                ((sharedNavFeedbackCfg->enabledTargetMask &
+                  (1U << currSubFrameIdx)) != 0U) ? 1U : 0U;
+            if ((sharedNavFeedbackCfg->maxSurfacePoints != 0U) &&
+                (sharedNavFeedbackCfg->maxSurfacePoints <=
+                 MMWDEMO_NAV_MAX_SURFACE_POINTS))
+            {
+                configuredMaxNavSurface =
+                    sharedNavFeedbackCfg->maxSurfacePoints;
+            }
+            if (isfinite(sharedNavFeedbackCfg->staticVelocityThresholdMps) &&
+                (sharedNavFeedbackCfg->staticVelocityThresholdMps >= 0.0f) &&
+                (sharedNavFeedbackCfg->staticVelocityThresholdMps <= 5.0f))
+            {
+                navStaticVelocityThresholdMps =
+                    sharedNavFeedbackCfg->staticVelocityThresholdMps;
+            }
         }
+        Hwi_restore(key);
+        nextMaxNavSurface = configuredMaxNavSurface;
 
         if (previous != 0U)
         {
@@ -3172,19 +3393,14 @@ static void MmwDemo_handleObjectDetResult
                 ((uint64_t)gMmwMssMCB.cfg.platformCfg.loggingBaudRate *
                  (uint64_t)currSubFrameStats->outputStats.transmitOutputTime) /
                 10000000ULL;
-            uint64_t nonDenseBytes = 256ULL;
-            uint64_t nonNavBytes = 256ULL;
+            uint64_t customBytes =
+                (uint64_t)lastNavSurfacePayloadSize[currSubFrameIdx];
+            uint64_t fixedBytes = 256ULL;
+            uint64_t remainingBytes;
 
-            if (previousTotalBytes > lastDensePayloadSize[currSubFrameIdx])
+            if (previousTotalBytes > customBytes)
             {
-                nonDenseBytes = previousTotalBytes -
-                                lastDensePayloadSize[currSubFrameIdx];
-            }
-            if (previousTotalBytes >
-                lastNavSurfacePayloadSize[currSubFrameIdx])
-            {
-                nonNavBytes = previousTotalBytes -
-                              lastNavSurfacePayloadSize[currSubFrameIdx];
+                fixedBytes = previousTotalBytes - customBytes;
             }
             if (periodUsec > (previousProcessingUsec + 2000U))
             {
@@ -3198,67 +3414,61 @@ static void MmwDemo_handleObjectDetResult
             uartBytesBudget =
                 ((uint64_t)gMmwMssMCB.cfg.platformCfg.loggingBaudRate *
                  (uint64_t)uartBudgetUsec) / 10000000ULL;
+            /* Reserve one segment for changed TLV headers/padding not present
+             * in the previous packet estimate. */
+            fixedBytes += MMWDEMO_OUTPUT_MSG_SEGMENT_LEN;
+            remainingBytes = (uartBytesBudget > fixedBytes) ?
+                             (uartBytesBudget - fixedBytes) : 0ULL;
 
-            if (uartBytesBudget >
-                (nonDenseBytes + sizeof(MmwDemo_DenseElevation_OutputHeader)))
+            if (navSurfaceOutputEnabled != 0U)
             {
-                uint64_t sampleBudget =
-                    (uartBytesBudget - nonDenseBytes -
-                     sizeof(MmwDemo_DenseElevation_OutputHeader) -
-                     sizeof(MmwDemo_output_message_tl)) /
-                    sizeof(MmwDemo_DenseElevation_OutputSample);
-                if (sampleBudget > MMWDEMO_DENSE_ELEV_MAX_OUTPUT_SAMPLES)
+                uint64_t navOverhead =
+                    sizeof(MmwDemo_NavFrameHeader) +
+                    sizeof(MmwDemo_output_message_tl);
+                uint64_t navSampleBudget = 0ULL;
+                if (remainingBytes > navOverhead)
                 {
-                    sampleBudget = MMWDEMO_DENSE_ELEV_MAX_OUTPUT_SAMPLES;
+                    navSampleBudget = (remainingBytes - navOverhead) /
+                                      sizeof(MmwDemo_NavPoint);
                 }
-                if (sampleBudget < 8ULL)
+                if (navSampleBudget > configuredMaxNavSurface)
                 {
-                    sampleBudget = 8ULL;
+                    navSampleBudget = configuredMaxNavSurface;
                 }
-                nextMaxSamples = (uint16_t)sampleBudget;
-            }
-            else
-            {
-                nextMaxSamples = 8U;
-            }
-
-            if (uartBytesBudget >
-                (nonNavBytes + sizeof(MmwDemo_NavFrameHeader) +
-                 sizeof(MmwDemo_output_message_tl)))
-            {
-                uint64_t navSampleBudget =
-                    (uartBytesBudget - nonNavBytes -
-                     sizeof(MmwDemo_NavFrameHeader) -
-                     sizeof(MmwDemo_output_message_tl)) /
-                    sizeof(MmwDemo_NavPoint);
-                if (navSampleBudget >
-                    sharedNavFeedbackCfg->maxSurfacePoints)
+                if (navSampleBudget < 1ULL)
                 {
-                    navSampleBudget =
-                        sharedNavFeedbackCfg->maxSurfacePoints;
-                }
-                if (navSampleBudget < 8ULL)
-                {
-                    navSampleBudget = 8ULL;
+                    navSampleBudget = 1ULL;
                 }
                 nextMaxNavSurface = (uint16_t)navSampleBudget;
             }
-            else
-            {
-                nextMaxNavSurface = 8U;
-            }
         }
         lastResultTime[currSubFrameIdx] = now;
-        /* A naturally aligned 16-bit volatile update is atomic on both cores.
-         * It is intentionally independent of the multi-field CLI generation. */
-        if (sharedDenseCfg->isValid != 0U)
+
+        /* Publish the feedback cap through the same zero/generation
+         * transaction consumed coherently by DSS. */
+        key = Hwi_disable();
+        if ((navGeneration != 0U) &&
+            (sharedNavFeedbackCfg->isValid == navGeneration))
         {
-            sharedDenseCfg->maxOutputSamples = nextMaxSamples;
-        }
-        if (sharedNavFeedbackCfg->isValid != 0U)
-        {
+            uint8_t nextGeneration = navGeneration + 1U;
+            if (nextGeneration == 0U)
+            {
+                nextGeneration = 1U;
+            }
+            sharedNavFeedbackCfg->isValid = 0U;
+            MEM_BARRIER();
             sharedNavFeedbackCfg->uartMaxSurfacePoints = nextMaxNavSurface;
+            sharedNavFeedbackCfg->postProcReserveUsec[currSubFrameIdx] =
+                MmwDemo_getNavPostProcReserveUsecForState(
+                    currSubFrameIdx,
+                    nextMaxNavSurface,
+                    navSurfaceOutputEnabled,
+                    navTargetOutputEnabled);
+            MEM_BARRIER();
+            sharedNavFeedbackCfg->isValid = nextGeneration;
+            MEM_BARRIER();
         }
+        Hwi_restore(key);
     }
 
     /*****************************************************************
@@ -3326,10 +3536,7 @@ static void MmwDemo_handleObjectDetResult
         &retVal);
     DebugP_assert((uint32_t)dpcStatsForNav != SOC_TRANSLATEADDR_INVALID);
 
-    /* DPM slot 2 contains a fixed-size AUXR descriptor, not either payload
-     * directly. This stays within the SDK's DPM_MAX_BUFFER == 3 ABI. */
-    void *denseElevHeatmap = NULL;
-    uint32_t denseElevPayloadSize = 0U;
+    /* DPM slot 2 contains the fixed-size navigation AUXR descriptor. */
     if ((ptrResult->size[2] == sizeof(MmwDemo_AuxResult)) &&
         (ptrResult->ptrBuffer[2] != NULL))
     {
@@ -3350,24 +3557,20 @@ static void MmwDemo_handleObjectDetResult
          dpcStatsForNav->frameStartIntCounter) &&
         (auxResult->subFrameNumber == currSubFrameIdx) &&
         ((auxResult->flags &
-          (uint16_t)~(MMWDEMO_AUX_RESULT_FLAG_DENSE_VALID |
-                      MMWDEMO_AUX_RESULT_FLAG_NAV_VALID)) == 0U))
+          (uint16_t)~(MMWDEMO_AUX_RESULT_FLAG_NAV_VALID |
+                      MMWDEMO_AUX_RESULT_FLAG_NAV_SURFACE_ENABLED |
+                      MMWDEMO_AUX_RESULT_FLAG_NAV_TARGET_ENABLED)) == 0U))
     {
-        if ((auxResult->flags & MMWDEMO_AUX_RESULT_FLAG_DENSE_VALID) != 0U)
-        {
-            denseElevPayloadSize = auxResult->denseSize;
-            denseElevHeatmap = (void *)SOC_translateAddress(
-                auxResult->denseAddress,
-                SOC_TranslateAddr_Dir_FROM_OTHER_CPU,
-                &retVal);
-            if ((uint32_t)denseElevHeatmap == SOC_TRANSLATEADDR_INVALID)
-            {
-                denseElevHeatmap = NULL;
-                denseElevPayloadSize = 0U;
-            }
-        }
         if ((auxResult->flags & MMWDEMO_AUX_RESULT_FLAG_NAV_VALID) != 0U)
         {
+            navSurfaceEnabled =
+                ((auxResult->flags &
+                  MMWDEMO_AUX_RESULT_FLAG_NAV_SURFACE_ENABLED) != 0U)
+                    ? 1U : 0U;
+            navTargetEnabled =
+                ((auxResult->flags &
+                  MMWDEMO_AUX_RESULT_FLAG_NAV_TARGET_ENABLED) != 0U)
+                    ? 1U : 0U;
             navPayloadSize = auxResult->navSize;
             navPayload = (void *)SOC_translateAddress(
                 auxResult->navAddress,
@@ -3382,7 +3585,6 @@ static void MmwDemo_handleObjectDetResult
     }
     else if ((ptrResult->size[2] != 0U) || (ptrResult->ptrBuffer[2] != NULL))
     {
-        gDenseElevUartInvalidPayloadCount++;
         gNavSurfaceUartInvalidPayloadCount++;
     }
 
@@ -3401,6 +3603,8 @@ static void MmwDemo_handleObjectDetResult
         }
         if (navTargetEnabled != 0U)
         {
+            MmwDemo_NavTracker_setMotionThreshold(
+                navStaticVelocityThresholdMps);
             (void)MmwDemo_NavTracker_process(
                 navPayload,
                 navPayloadSize,
@@ -3435,18 +3639,15 @@ static void MmwDemo_handleObjectDetResult
 
     /* Transmit processing results for the frame */
     navSurfacePacketsBefore = gNavSurfaceUartPacketsSent;
-    lastDensePayloadSize[currSubFrameIdx] =
-        MmwDemo_transmitProcessedOutput(gMmwMssMCB.loggingUartHandle,
-                                        dpcResults,
-                                        &currSubFrameStats->outputStats,
-                                        denseElevHeatmap,
-                                        denseElevPayloadSize,
-                                        (navSurfacePayloadSize != 0U) ?
-                                            navPayload : NULL,
-                                        navSurfacePayloadSize,
-                                        (navTargetPayloadSize != 0U) ?
-                                            gNavTargetOutput : NULL,
-                                        navTargetPayloadSize);
+    MmwDemo_transmitProcessedOutput(gMmwMssMCB.loggingUartHandle,
+                                    dpcResults,
+                                    &currSubFrameStats->outputStats,
+                                    (navSurfacePayloadSize != 0U) ?
+                                        navPayload : NULL,
+                                    navSurfacePayloadSize,
+                                    (navTargetPayloadSize != 0U) ?
+                                        gNavTargetOutput : NULL,
+                                    navTargetPayloadSize);
     if (gNavSurfaceUartPacketsSent != navSurfacePacketsBefore)
     {
         lastNavSurfacePayloadSize[currSubFrameIdx] = navSurfacePayloadSize;

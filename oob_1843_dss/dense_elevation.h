@@ -28,9 +28,9 @@ extern "C" {
 #define MMWDEMO_DENSE_ELEV_MAX_OUTPUT_SAMPLES     (1536U)
 
 #define MMWDEMO_DENSE_ELEVATION_MAGIC             (0x44454C56U) /* DELV */
-#define MMWDEMO_DENSE_ELEVATION_PROTOCOL_VERSION  (6U)
+#define MMWDEMO_DENSE_ELEVATION_PROTOCOL_VERSION  (7U)
 
-/* V6 is one complete radar frame, never a rolling or cross-frame sweep. */
+/* V7 is one complete radar frame, never a rolling or cross-frame sweep. */
 #define MMWDEMO_DENSE_FLAG_CFAR_BYPASSED           (1U << 0)
 #define MMWDEMO_DENSE_FLAG_DOPPLER_PREFILTER       (1U << 1)
 #define MMWDEMO_DENSE_FLAG_RX_PHASE_COMPENSATED    (1U << 2)
@@ -41,6 +41,14 @@ extern "C" {
 #define MMWDEMO_DENSE_FLAG_TIME_BUDGET_EXCEEDED     (1U << 7)
 #define MMWDEMO_DENSE_FLAG_STATIC_CLUTTER_APPLIED   (1U << 8)
 #define MMWDEMO_DENSE_FLAG_AZIMUTH_NMS              (1U << 9)
+#define MMWDEMO_DENSE_REQUIRED_FLAGS \
+    (MMWDEMO_DENSE_FLAG_CFAR_BYPASSED | \
+     MMWDEMO_DENSE_FLAG_DOPPLER_PREFILTER | \
+     MMWDEMO_DENSE_FLAG_RX_PHASE_COMPENSATED | \
+     MMWDEMO_DENSE_FLAG_TDM_COMPENSATED | \
+     MMWDEMO_DENSE_FLAG_FOV_FILTERED | \
+     MMWDEMO_DENSE_FLAG_FRAME_COMPLETE | \
+     MMWDEMO_DENSE_FLAG_AZIMUTH_NMS)
 
 /* Negative DSP return codes. Positive magnitude is carried in
  * outputHeader.protocolStatus when processing fails. */
@@ -57,6 +65,7 @@ extern "C" {
 #define MMWDEMO_DENSE_EDETMATRIX_FORMAT              (-11)
 #define MMWDEMO_DENSE_EDETMATRIX_SIZE                (-12)
 #define MMWDEMO_DENSE_EUNSUPPORTED_MIMO               (-13)
+#define MMWDEMO_DENSE_ETIME_BUDGET                    (-14)
 
 typedef struct MmwDemo_DenseElevation_Cfg_t
 {
@@ -79,6 +88,11 @@ typedef struct MmwDemo_DenseElevation_OutputSample_t
     int16_t  dopplerIdx;   /* signed Doppler bin */
     uint16_t snrDb10;      /* detMatrix peak over range-row median, 0.1 dB */
     int16_t  sourceVQ15;   /* continuous v=sin(elevation), Q15 */
+    int16_t  powerDb10;    /* Raw beamformed digital power at the steered
+                            * direction, 100*log10(power), in 0.1 dB units.
+                            * It is not calibrated dBm and remains dependent on
+                            * FFT/window/profile scaling. INT16_MIN means that
+                            * the power was zero or non-finite. */
 } MmwDemo_DenseElevation_OutputSample;
 
 /** Header at the beginning of every TLV 11 payload. */
@@ -126,11 +140,17 @@ typedef struct MmwDemo_DenseElevation_StaticCfg_t
     uint32_t frameNumber;
 } MmwDemo_DenseElevation_StaticCfg;
 
-/** Process every configured range in the current radar frame. cycleBudget is
- * diagnostic only: processing is never split or continued in a later frame. */
+/** Process every configured range in the current radar frame. Work is never
+ * continued in a later frame. deadlineStartCycles/deadlineOffsetCycles define
+ * one absolute frame-relative deadline shared by ObjectDetection, Nav and
+ * Dense; cycleBudget is retained as Nav-entry telemetry for the output header.
+ * A nonzero deadlineOffsetCycles returns MMWDEMO_DENSE_ETIME_BUDGET instead of
+ * publishing partial data when that common deadline expires. */
 int32_t MmwDemo_DenseElevation_process(
     const MmwDemo_DenseElevation_Cfg *cfg,
     const MmwDemo_DenseElevation_StaticCfg *staticCfg,
+    uint32_t deadlineStartCycles,
+    uint32_t deadlineOffsetCycles,
     uint32_t cycleBudget,
     uint8_t *outBuffer,
     uint32_t outBufferSize,
@@ -141,7 +161,9 @@ void MmwDemo_DenseElevation_reset(void);
 
 /* Wire ABI checks: ARM and C674 must agree exactly. */
 typedef char MmwDemo_DenseSampleSizeCheck[
-    (sizeof(MmwDemo_DenseElevation_OutputSample) == 10U) ? 1 : -1];
+    (sizeof(MmwDemo_DenseElevation_OutputSample) == 12U) ? 1 : -1];
+typedef char MmwDemo_DenseSamplePowerOffsetCheck[
+    (offsetof(MmwDemo_DenseElevation_OutputSample, powerDb10) == 10U) ? 1 : -1];
 typedef char MmwDemo_DenseSampleRangeOffsetCheck[
     (offsetof(MmwDemo_DenseElevation_OutputSample, rangeIdx) == 0U) ? 1 : -1];
 typedef char MmwDemo_DenseSampleAzimuthOffsetCheck[

@@ -105,6 +105,7 @@ static uint8_t gDenseReferenceRow;
 static uint8_t gDenseElevationRow;
 static int16_t gDenseVerticalBaseline;
 static uint32_t gDenseGeometrySignature;
+static uint8_t gDenseGeometryValid;
 static uint16_t gDenseTwiddleSize;
 
 static int16_t MmwDemo_DenseElevation_sat16(int32_t value)
@@ -284,11 +285,15 @@ static int32_t MmwDemo_DenseElevation_configure(
     }
 
     signature = MmwDemo_DenseElevation_hashStaticCfg(cfg);
-    if (signature == gDenseGeometrySignature)
+    if ((gDenseGeometryValid != 0U) &&
+        (signature == gDenseGeometrySignature))
     {
         return 0;
     }
 
+    /* A failed rebuild must never leave a cacheable, partially updated
+     * geometry. The next call will rebuild all derived state. */
+    gDenseGeometryValid = 0U;
     gDenseNumRows = 0U;
     memset(gDenseRowAntCount, 0, sizeof(gDenseRowAntCount));
     ant = 0U;
@@ -405,6 +410,7 @@ static int32_t MmwDemo_DenseElevation_configure(
     }
 
     gDenseGeometrySignature = signature;
+    gDenseGeometryValid = 1U;
     return 0;
 }
 
@@ -542,19 +548,26 @@ static uint16_t MmwDemo_DenseElevation_medianQ8(
     const uint16_t *row,
     uint16_t count)
 {
-    uint16_t i;
+    uint16_t gap;
 
     memcpy(gDenseDetRowScratch, row, count * sizeof(uint16_t));
-    for (i = 1U; i < count; i++)
+    /* Shell sort keeps the exact median used by the detector while avoiding
+     * insertion sort's O(N^2) worst case for 128 Doppler bins. */
+    for (gap = count >> 1U; gap != 0U; gap >>= 1U)
     {
-        uint16_t key = gDenseDetRowScratch[i];
-        int32_t j = (int32_t)i - 1;
-        while ((j >= 0) && (gDenseDetRowScratch[j] > key))
+        uint16_t i;
+        for (i = gap; i < count; i++)
         {
-            gDenseDetRowScratch[j + 1] = gDenseDetRowScratch[j];
-            j--;
+            uint16_t value = gDenseDetRowScratch[i];
+            uint16_t j = i;
+            while ((j >= gap) &&
+                   (gDenseDetRowScratch[j - gap] > value))
+            {
+                gDenseDetRowScratch[j] = gDenseDetRowScratch[j - gap];
+                j -= gap;
+            }
+            gDenseDetRowScratch[j] = value;
         }
-        gDenseDetRowScratch[j + 1] = key;
     }
 
     if ((count & 1U) != 0U)
@@ -1031,6 +1044,31 @@ static void MmwDemo_DenseElevation_processDoppler(
         sample.dopplerIdx = (int16_t)signedD;
         sample.snrDb10 = candidate->snrDb10;
         sample.sourceVQ15 = gDenseAzSourceVQ15[azimuth];
+        {
+            float power = gDenseAzPower[azimuth];
+            if (!(power > 0.0f) || !isfinite(power))
+            {
+                sample.powerDb10 = (int16_t)-32768;
+            }
+            else
+            {
+                float powerDb10Scaled = 100.0f * log10f(power);
+                if (powerDb10Scaled >= 32767.0f)
+                {
+                    sample.powerDb10 = 32767;
+                }
+                else if (powerDb10Scaled <= -32768.0f)
+                {
+                    sample.powerDb10 = (int16_t)-32768;
+                }
+                else
+                {
+                    sample.powerDb10 = (int16_t)((powerDb10Scaled >= 0.0f)
+                        ? (powerDb10Scaled + 0.5f)
+                        : (powerDb10Scaled - 0.5f));
+                }
+            }
+        }
         MmwDemo_DenseElevation_insertOutput(
             &sample, output, outputCapacity, outputCount,
             sectorCount, outputLimited);
@@ -1046,9 +1084,20 @@ static int16_t MmwDemo_DenseElevation_deg10(float degree)
                                          : (scaled - 0.5f));
 }
 
+static uint8_t MmwDemo_DenseElevation_deadlineExpired(
+    uint32_t deadlineStartCycles,
+    uint32_t deadlineOffsetCycles)
+{
+    return ((deadlineOffsetCycles != 0U) &&
+            ((Cycleprofiler_getTimeStamp() - deadlineStartCycles) >=
+             deadlineOffsetCycles)) ? 1U : 0U;
+}
+
 int32_t MmwDemo_DenseElevation_process(
     const MmwDemo_DenseElevation_Cfg *cfg,
     const MmwDemo_DenseElevation_StaticCfg *staticCfg,
+    uint32_t deadlineStartCycles,
+    uint32_t deadlineOffsetCycles,
     uint32_t cycleBudget,
     uint8_t *outBuffer,
     uint32_t outBufferSize,
@@ -1071,7 +1120,7 @@ int32_t MmwDemo_DenseElevation_process(
                      MMWDEMO_DENSE_FLAG_FRAME_COMPLETE |
                      MMWDEMO_DENSE_FLAG_AZIMUTH_NMS;
     uint8_t outputLimited = 0U;
-    uint32_t startCycles;
+    uint32_t processingStartCycles;
     uint32_t processingCycles;
     uint32_t range;
     uint16_t numVirtualAntennas;
@@ -1099,6 +1148,7 @@ int32_t MmwDemo_DenseElevation_process(
         return MMWDEMO_DENSE_EINVAL;
     }
 
+    processingStartCycles = Cycleprofiler_getTimeStamp();
     configureError = MmwDemo_DenseElevation_configure(staticCfg);
     if (configureError != 0)
     {
@@ -1141,19 +1191,28 @@ int32_t MmwDemo_DenseElevation_process(
     numVirtualAntennas =
         (uint16_t)(staticCfg->numTxAntennas * staticCfg->numRxAntennas);
     memset(sectorCount, 0, sizeof(sectorCount));
-    startCycles = Cycleprofiler_getTimeStamp();
-
     for (range = minRange; range <= maxRange; range++)
     {
         const uint16_t *detRow =
             &detMatrix[(uint32_t)range * staticCfg->numDopplerBins];
         MmwDemo_DenseDopplerCandidate
             candidate[DENSE_MAX_DOPPLER_CANDIDATES];
-        uint16_t candidateCount =
-            MmwDemo_DenseElevation_selectDopplerCandidates(
-                detRow, staticCfg->numDopplerBins, numVirtualAntennas,
-                cfg->snrThresholdDb, candidate);
+        uint16_t candidateCount;
         uint16_t k;
+
+        if (MmwDemo_DenseElevation_deadlineExpired(
+                deadlineStartCycles, deadlineOffsetCycles) != 0U)
+        {
+            return MMWDEMO_DENSE_ETIME_BUDGET;
+        }
+        candidateCount = MmwDemo_DenseElevation_selectDopplerCandidates(
+            detRow, staticCfg->numDopplerBins, numVirtualAntennas,
+            cfg->snrThresholdDb, candidate);
+        if (MmwDemo_DenseElevation_deadlineExpired(
+                deadlineStartCycles, deadlineOffsetCycles) != 0U)
+        {
+            return MMWDEMO_DENSE_ETIME_BUDGET;
+        }
 
         if (candidateCount == 0U)
         {
@@ -1164,16 +1223,31 @@ int32_t MmwDemo_DenseElevation_process(
          * One FFT per antenna supplies every selected Doppler candidate. */
         MmwDemo_DenseElevation_dopplerFftForRange(
             (uint16_t)range, staticCfg);
+        if (MmwDemo_DenseElevation_deadlineExpired(
+                deadlineStartCycles, deadlineOffsetCycles) != 0U)
+        {
+            return MMWDEMO_DENSE_ETIME_BUDGET;
+        }
         for (k = 0U; k < candidateCount; k++)
         {
+            if (MmwDemo_DenseElevation_deadlineExpired(
+                    deadlineStartCycles, deadlineOffsetCycles) != 0U)
+            {
+                return MMWDEMO_DENSE_ETIME_BUDGET;
+            }
             MmwDemo_DenseElevation_processDoppler(
                 (uint16_t)range, &candidate[k], cfg, staticCfg,
                 output, outputCapacity, &outputCount,
                 sectorCount, &outputLimited);
+            if (MmwDemo_DenseElevation_deadlineExpired(
+                    deadlineStartCycles, deadlineOffsetCycles) != 0U)
+            {
+                return MMWDEMO_DENSE_ETIME_BUDGET;
+            }
         }
     }
 
-    processingCycles = Cycleprofiler_getTimeStamp() - startCycles;
+    processingCycles = Cycleprofiler_getTimeStamp() - processingStartCycles;
     if (outputLimited != 0U)
     {
         flags |= MMWDEMO_DENSE_FLAG_OUTPUT_LIMITED;
@@ -1215,5 +1289,6 @@ int32_t MmwDemo_DenseElevation_process(
 void MmwDemo_DenseElevation_reset(void)
 {
     gDenseGeometrySignature = 0U;
+    gDenseGeometryValid = 0U;
     gDenseTwiddleSize = 0U;
 }

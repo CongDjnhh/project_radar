@@ -16,7 +16,7 @@
 #define MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES          (4U)
 
 #define MMWDEMO_DENSE_ELEVATION_MAGIC             (0x44454C56U)
-#define MMWDEMO_DENSE_ELEVATION_PROTOCOL_VERSION  (6U)
+#define MMWDEMO_DENSE_ELEVATION_PROTOCOL_VERSION  (7U)
 
 #define MMWDEMO_DENSE_FLAG_CFAR_BYPASSED           (1U << 0)
 #define MMWDEMO_DENSE_FLAG_DOPPLER_PREFILTER       (1U << 1)
@@ -50,6 +50,7 @@
 #define MMWDEMO_DENSE_EDETMATRIX_FORMAT              (-11)
 #define MMWDEMO_DENSE_EDETMATRIX_SIZE                (-12)
 #define MMWDEMO_DENSE_EUNSUPPORTED_MIMO               (-13)
+#define MMWDEMO_DENSE_ETIME_BUDGET                    (-14)
 
 typedef struct MmwDemo_DenseElevation_OutputSample_t
 {
@@ -59,6 +60,11 @@ typedef struct MmwDemo_DenseElevation_OutputSample_t
     int16_t  dopplerIdx;
     uint16_t snrDb10;
     int16_t  sourceVQ15;
+    int16_t  powerDb10;    /* Raw beamformed digital power at the steered
+                            * direction, 100*log10(power), in 0.1 dB units.
+                            * It is not calibrated dBm and remains dependent on
+                            * FFT/window/profile scaling. INT16_MIN means that
+                            * the power was zero or non-finite. */
 } MmwDemo_DenseElevation_OutputSample;
 
 typedef struct MmwDemo_DenseElevation_OutputHeader_t
@@ -86,7 +92,9 @@ typedef struct MmwDemo_DenseElevation_OutputHeader_t
 } MmwDemo_DenseElevation_OutputHeader;
 
 typedef char MmwDemo_DenseSampleSizeCheck[
-    (sizeof(MmwDemo_DenseElevation_OutputSample) == 10U) ? 1 : -1];
+    (sizeof(MmwDemo_DenseElevation_OutputSample) == 12U) ? 1 : -1];
+typedef char MmwDemo_DenseSamplePowerOffsetCheck[
+    (offsetof(MmwDemo_DenseElevation_OutputSample, powerDb10) == 10U) ? 1 : -1];
 typedef char MmwDemo_DenseSampleRangeOffsetCheck[
     (offsetof(MmwDemo_DenseElevation_OutputSample, rangeIdx) == 0U) ? 1 : -1];
 typedef char MmwDemo_DenseSampleAzimuthOffsetCheck[

@@ -48,6 +48,7 @@ extern "C" {
 
 /** @brief Output packet length is a multiple of this value, must be power of 2*/
 #define MMWDEMO_OUTPUT_MSG_SEGMENT_LEN 32
+#define MMWDEMO_NAV_SHARED_MAX_SUBFRAMES 4U
 
 /*!
  * @brief
@@ -90,9 +91,6 @@ typedef enum MmwDemo_output_message_type_e
     /*! @brief   Raw radar cube (DPIF_RADARCUBE_FORMAT_1) */
     MMWDEMO_OUTPUT_MSG_RADAR_CUBE = 10,
 
-    /*! @brief   Dense Elevation Heatmap Output */
-    MMWDEMO_OUTPUT_MSG_DENSE_ELEVATION_HEATMAP = 11,
-
     /*! @brief   Current-frame nearest navigation surface point cloud */
     MMWDEMO_OUTPUT_MSG_NAV_SURFACE_POINTS = 12,
 
@@ -104,9 +102,10 @@ typedef enum MmwDemo_output_message_type_e
 
 /** Slot-2 descriptor used because the SDK DPM ABI has only buffers 0..2. */
 #define MMWDEMO_AUX_RESULT_MAGIC            (0x41555852U) /* AUXR */
-#define MMWDEMO_AUX_RESULT_VERSION          (1U)
-#define MMWDEMO_AUX_RESULT_FLAG_DENSE_VALID (1U << 0)
-#define MMWDEMO_AUX_RESULT_FLAG_NAV_VALID   (1U << 1)
+#define MMWDEMO_AUX_RESULT_VERSION          (3U)
+#define MMWDEMO_AUX_RESULT_FLAG_NAV_VALID   (1U << 0)
+#define MMWDEMO_AUX_RESULT_FLAG_NAV_SURFACE_ENABLED (1U << 1)
+#define MMWDEMO_AUX_RESULT_FLAG_NAV_TARGET_ENABLED  (1U << 2)
 
 typedef struct MmwDemo_AuxResult_t
 {
@@ -116,14 +115,12 @@ typedef struct MmwDemo_AuxResult_t
     uint32_t radarFrameNumber;
     uint16_t subFrameNumber;
     uint16_t flags;
-    uint32_t denseAddress;
-    uint32_t denseSize;
     uint32_t navAddress;
     uint32_t navSize;
 } MmwDemo_AuxResult;
 
 typedef char MmwDemo_AuxResultSizeCheck[
-    (sizeof(MmwDemo_AuxResult) == 32U) ? 1 : -1];
+    (sizeof(MmwDemo_AuxResult) == 24U) ? 1 : -1];
 
 /*!
  * @brief
@@ -199,21 +196,7 @@ typedef struct MmwDemo_output_message_stats_t
  */
 #define MMWDEMO_HSRAM_PAYLOAD_SIZE        (SOC_HSRAM_SIZE - sizeof(DPC_ObjectDetection_ExecuteResult) - \
                                             sizeof(MmwDemo_output_message_stats) - \
-                                            sizeof(MmwDemo_DenseElevCliCfg) - \
                                             sizeof(MmwDemo_NavCliCfg))
-
-typedef struct MmwDemo_DenseElevCliCfg_t {
-    float   minElevationDeg;
-    float   maxElevationDeg;
-    float   minAzimuthDeg;
-    float   maxAzimuthDeg;
-    float   snrThresholdDb;
-    int16_t minRangeBin;
-    int16_t maxRangeBin;
-    uint8_t  isValid;          /* 0 while MSS writes; otherwise generation */
-    uint8_t  enabledSubFrameMask; /* bit n: compute/send TLV11 for subframe n */
-    uint16_t maxOutputSamples; /* UART budget for the next result */
-} MmwDemo_DenseElevCliCfg;
 
 /** Runtime navigation configuration shared atomically from MSS to DSS. */
 typedef struct MmwDemo_NavCliCfg_t {
@@ -235,10 +218,38 @@ typedef struct MmwDemo_NavCliCfg_t {
     uint8_t enabledSurfaceMask;
     uint8_t enabledTargetMask;
     uint8_t reserved[3];
+    uint8_t dbscanEnabled;
+    uint8_t dbscanMinPoints;
+    uint8_t dbscanMaxClusters;
+    uint8_t egoMode;
+    uint16_t dbscanMaxPoints;
+    uint16_t sceneMinInliers;
+    uint16_t egoVelocityValidFrames;
+    uint16_t reserved16;
+    float dbscanEpsilonM;
+    float dbscanRangeScale;
+    float wallMinLengthM;
+    float wallMaxThicknessM;
+    float wallMinAspectRatio;
+    float staticVelocityThresholdMps;
+    float egoVelocityXMps;
+    float egoVelocityYMps;
+    float egoVelocityZMps;
+    float egoConfidence;
+    float egoConfidenceThreshold;
+    float egoMaxSpeedMps;
+    float sceneResidualThresholdMps;
+    uint32_t egoSequence;
+    /* Timing contract published by MSS after RF parsing.  Values are kept in
+     * microseconds so both cores use the configured frame/subframe period and
+     * never depend on a wrapping 32-bit cycle-to-cycle interval. */
+    uint32_t framePeriodUsec[MMWDEMO_NAV_SHARED_MAX_SUBFRAMES];
+    uint32_t trackingPeriodUsec[MMWDEMO_NAV_SHARED_MAX_SUBFRAMES];
+    uint32_t postProcReserveUsec[MMWDEMO_NAV_SHARED_MAX_SUBFRAMES];
 } MmwDemo_NavCliCfg;
 
 typedef char MmwDemo_NavCliCfgSizeCheck[
-    (sizeof(MmwDemo_NavCliCfg) == 44U) ? 1 : -1];
+    (sizeof(MmwDemo_NavCliCfg) == 160U) ? 1 : -1];
 
 /**
  * @brief
@@ -249,9 +260,6 @@ typedef struct MmwDemo_HSRAM_t
     /*! @brief   DPC execution result */
     DPC_ObjectDetection_ExecuteResult result;
     
-    /*! @brief   Custom Configuration for Dense Elevation Heatmap */
-    MmwDemo_DenseElevCliCfg denseElevCfg;
-
     /*! @brief   Navigation surface/tracker configuration */
     MmwDemo_NavCliCfg navCfg;
 

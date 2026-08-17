@@ -216,6 +216,15 @@ typedef struct MmwDemo_SubFrameCfg_t
 
     /*! @brief  Number of chirps per sub-frame */
     uint16_t    numChirpsPerSubFrame;
+
+    /*! @brief  Number of physical Doppler chirps before FFT padding */
+    uint16_t    numDopplerChirps;
+
+    /*! @brief  Configured frame/subframe period in microseconds */
+    uint32_t    framePeriodUsec;
+
+    /*! @brief  Interval between two results of this same subframe */
+    uint32_t    trackingPeriodUsec;
     
     /*! @brief  Number of virtual antennas */
     uint8_t     numVirtualAntennas; 
@@ -484,6 +493,11 @@ extern uint8_t MmwDemo_isAllCfgInPendingState(void);
 extern uint8_t MmwDemo_isAllCfgInNonPendingState(void);
 extern void MmwDemo_resetStaticCfgPendingState(void);
 extern void MmwDemo_CfgUpdate(void *srcPtr, uint32_t offset, uint32_t size, int8_t subFrameNum);
+extern uint32_t MmwDemo_getNavPostProcReserveUsecForState(
+    uint8_t subFrameIdx,
+    uint16_t maxSurfacePoints,
+    uint8_t surfaceEnabled,
+    uint8_t targetEnabled);
 
 /* Debug Functions */
 extern void _MmwDemo_debugAssert(int32_t expression, const char *file, int32_t line);

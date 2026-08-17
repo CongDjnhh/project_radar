@@ -51,6 +51,7 @@
 
 /* BIOS/XDC Include Files. */
 #include <xdc/runtime/System.h>
+#include <ti/sysbios/family/arm/v7r/vim/Hwi.h>
 
 /* mmWave SDK Include Files: */
 #include <ti/common/sys_common.h>
@@ -69,8 +70,11 @@
 #include <ti/utils/hsiheader/hsiheader.h>
 
 #include <ti/utils/mathutils/mathutils.h>
-#include "../oob_1843_dss/dense_elevation.h"
 #include "nav_point_gen.h"
+
+#ifndef MMWDEMO_ENABLE_LEGACY_CFAR_AOA
+#define MMWDEMO_ENABLE_LEGACY_CFAR_AOA (0)
+#endif
 
 /**************************************************************************
  *************************** Local function prototype****************************
@@ -95,9 +99,10 @@ static int32_t MmwDemo_CLIChirpQualitySigImgMonCfg (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLIAnalogMonitorCfg (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLILvdsStreamCfg (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLIConfigDataPort (int32_t argc, char* argv[]);
-static int32_t MmwDemo_CLIDenseElevCfg (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLINavMonitor (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLINavPointCfg (int32_t argc, char* argv[]);
+static int32_t MmwDemo_CLINavClusterCfg (int32_t argc, char* argv[]);
+static int32_t MmwDemo_CLINavEgoCfg (int32_t argc, char* argv[]);
 
 /**************************************************************************
  *************************** Extern Definitions *******************************
@@ -444,57 +449,6 @@ static int32_t MmwDemo_CLIGetSubframe (int32_t argc, char* argv[], int32_t expec
  *  @retval
  *      Error   -   <0
  */
-static void MmwDemo_CLISetDenseEnableMask(int8_t subFrameNum, uint8_t enabled)
-{
-    volatile MmwDemo_DenseElevCliCfg *sharedCfg;
-    uint8_t nextGeneration;
-    uint8_t enableMask;
-    uint8_t initializeDefaults;
-
-    extern MmwDemo_HSRAM gHSRAM;
-    sharedCfg = (volatile MmwDemo_DenseElevCliCfg *)&gHSRAM.denseElevCfg;
-    initializeDefaults = (sharedCfg->isValid == 0U) ? 1U : 0U;
-    nextGeneration = sharedCfg->isValid + 1U;
-    if (nextGeneration == 0U)
-    {
-        nextGeneration = 1U;
-    }
-    enableMask = sharedCfg->enabledSubFrameMask;
-    if (subFrameNum == MMWDEMO_SUBFRAME_NUM_FRAME_LEVEL_CONFIG)
-    {
-        enableMask = (enabled != 0U) ?
-                     (uint8_t)((1U << RL_MAX_SUBFRAMES) - 1U) : 0U;
-    }
-    else if (enabled != 0U)
-    {
-        enableMask |= (uint8_t)(1U << (uint8_t)subFrameNum);
-    }
-    else
-    {
-        enableMask &= (uint8_t)~(1U << (uint8_t)subFrameNum);
-    }
-
-    /* R4F-to-DSS publication: zero marks an in-progress write and DSB makes
-     * the payload visible before the non-zero generation is published. */
-    sharedCfg->isValid = 0U;
-    MEM_BARRIER();
-    if (initializeDefaults != 0U)
-    {
-        sharedCfg->minElevationDeg = -10.0f;
-        sharedCfg->maxElevationDeg = 10.0f;
-        sharedCfg->minAzimuthDeg = -60.0f;
-        sharedCfg->maxAzimuthDeg = 60.0f;
-        sharedCfg->snrThresholdDb = 20.0f;
-        sharedCfg->minRangeBin = 0;
-        sharedCfg->maxRangeBin = 32767;
-        sharedCfg->maxOutputSamples = 64U;
-    }
-    sharedCfg->enabledSubFrameMask = enableMask;
-    MEM_BARRIER();
-    sharedCfg->isValid = nextGeneration;
-    MEM_BARRIER();
-}
-
 static void MmwDemo_CLIInitNavDefaults(
     volatile MmwDemo_NavCliCfg *sharedCfg)
 {
@@ -514,6 +468,28 @@ static void MmwDemo_CLIInitNavDefaults(
     sharedCfg->surfaceElevationNeighborBins = 1U;
     sharedCfg->enabledSurfaceMask = 0U;
     sharedCfg->enabledTargetMask = 0U;
+    sharedCfg->dbscanEnabled = 1U;
+    sharedCfg->dbscanMinPoints = 3U;
+    sharedCfg->dbscanMaxPoints = MMWDEMO_NAV_DBSCAN_MAX_POINTS;
+    sharedCfg->dbscanMaxClusters = 24U;
+    sharedCfg->egoMode = MMWDEMO_NAV_EGO_MODE_SCENE;
+    sharedCfg->sceneMinInliers = 12U;
+    sharedCfg->egoVelocityValidFrames = 5U;
+    sharedCfg->reserved16 = 0U;
+    sharedCfg->dbscanEpsilonM = 0.18f;
+    sharedCfg->dbscanRangeScale = 0.025f;
+    sharedCfg->wallMinLengthM = 1.20f;
+    sharedCfg->wallMaxThicknessM = 0.45f;
+    sharedCfg->wallMinAspectRatio = 4.0f;
+    sharedCfg->staticVelocityThresholdMps = 0.20f;
+    sharedCfg->egoVelocityXMps = 0.0f;
+    sharedCfg->egoVelocityYMps = 0.0f;
+    sharedCfg->egoVelocityZMps = 0.0f;
+    sharedCfg->egoConfidence = 0.0f;
+    sharedCfg->egoConfidenceThreshold = 0.55f;
+    sharedCfg->egoMaxSpeedMps = 8.0f;
+    sharedCfg->sceneResidualThresholdMps = 0.30f;
+    sharedCfg->egoSequence = 1U;
 }
 
 static uint8_t MmwDemo_CLIUpdateSubFrameMask(
@@ -550,7 +526,12 @@ static int32_t MmwDemo_CLINavMonitor(int32_t argc, char *argv[])
     uint8_t initializeDefaults;
     uint8_t nextSurfaceMask;
     uint8_t nextTargetMask;
+    uint8_t firstSubFrame;
+    uint8_t lastSubFrame;
+    uint8_t timingSubFrame;
+    uint16_t maxSurfacePoints;
     volatile MmwDemo_NavCliCfg *sharedCfg;
+    UInt key;
 
     if (argc != 4)
     {
@@ -576,6 +557,7 @@ static int32_t MmwDemo_CLINavMonitor(int32_t argc, char *argv[])
 
     extern MmwDemo_HSRAM gHSRAM;
     sharedCfg = (volatile MmwDemo_NavCliCfg *)&gHSRAM.navCfg;
+    key = Hwi_disable();
     initializeDefaults = (sharedCfg->isValid == 0U) ? 1U : 0U;
     nextGeneration = sharedCfg->isValid + 1U;
     if (nextGeneration == 0U)
@@ -606,6 +588,7 @@ static int32_t MmwDemo_CLINavMonitor(int32_t argc, char *argv[])
          MMWave_DFEDataOutputMode_ADVANCED_FRAME) &&
         ((nextTargetMask & (uint8_t)(nextTargetMask - 1U)) != 0U))
     {
+        Hwi_restore(key);
         CLI_write("Error: GTRACK target output supports one advanced-frame subframe; TLV12 surfaces may use all subframes.\n");
         return -1;
     }
@@ -618,9 +601,33 @@ static int32_t MmwDemo_CLINavMonitor(int32_t argc, char *argv[])
     }
     sharedCfg->enabledSurfaceMask = nextSurfaceMask;
     sharedCfg->enabledTargetMask = nextTargetMask;
+    maxSurfacePoints = sharedCfg->uartMaxSurfacePoints;
+    if ((maxSurfacePoints == 0U) ||
+        (maxSurfacePoints > MMWDEMO_NAV_MAX_SURFACE_POINTS))
+    {
+        maxSurfacePoints = MMWDEMO_NAV_MAX_SURFACE_POINTS;
+    }
+    firstSubFrame = (subFrameNum ==
+        MMWDEMO_SUBFRAME_NUM_FRAME_LEVEL_CONFIG) ? 0U :
+        (uint8_t)subFrameNum;
+    lastSubFrame = (subFrameNum ==
+        MMWDEMO_SUBFRAME_NUM_FRAME_LEVEL_CONFIG) ?
+        (RL_MAX_SUBFRAMES - 1U) : (uint8_t)subFrameNum;
+    for (timingSubFrame = firstSubFrame;
+         timingSubFrame <= lastSubFrame;
+         timingSubFrame++)
+    {
+        sharedCfg->postProcReserveUsec[timingSubFrame] =
+            MmwDemo_getNavPostProcReserveUsecForState(
+                timingSubFrame,
+                maxSurfacePoints,
+                ((nextSurfaceMask & (1U << timingSubFrame)) != 0U) ? 1U : 0U,
+                ((nextTargetMask & (1U << timingSubFrame)) != 0U) ? 1U : 0U);
+    }
     MEM_BARRIER();
     sharedCfg->isValid = nextGeneration;
     MEM_BARRIER();
+    Hwi_restore(key);
     return 0;
 }
 
@@ -629,11 +636,9 @@ static int32_t MmwDemo_CLIGuiMonSel (int32_t argc, char* argv[])
     MmwDemo_GuiMonSel   guiMonSel;
     int8_t              subFrameNum;
     int32_t             radarCube = 0;
-    int32_t             denseElevationHeatMap = 0;
 
-    /* Keep the SDK's original form and the optional radar-cube extension
-     * backward compatible. Dense elevation is an independent final flag. */
-    if ((argc < 8) || (argc > 10))
+    /* Keep the SDK's original form and optional radar-cube extension. */
+    if ((argc < 8) || (argc > 9))
     {
         CLI_write ("Error: Invalid usage of the CLI command\n");
         return -1;
@@ -653,17 +658,6 @@ static int32_t MmwDemo_CLIGuiMonSel (int32_t argc, char* argv[])
             return -1;
         }
     }
-    if (argc == 10)
-    {
-        denseElevationHeatMap = atoi(argv[9]);
-        if ((denseElevationHeatMap != 0) &&
-            (denseElevationHeatMap != 1))
-        {
-            CLI_write ("Error: denseElevationHeatMap must be 0 or 1\n");
-            return -1;
-        }
-    }
-
     if ((atoi(argv[2]) < 0) || (atoi(argv[2]) > 2) ||
         (atoi(argv[3]) < 0) || (atoi(argv[3]) > 1) ||
         (atoi(argv[4]) < 0) || (atoi(argv[4]) > 1) ||
@@ -686,13 +680,19 @@ static int32_t MmwDemo_CLIGuiMonSel (int32_t argc, char* argv[])
     guiMonSel.rangeDopplerHeatMap       = atoi (argv[6]);
     guiMonSel.statsInfo                 = atoi (argv[7]);
     guiMonSel.radarCube                 = (uint8_t)radarCube;
-    guiMonSel.denseElevationHeatMap     = (uint8_t)denseElevationHeatMap;
+
+#if !MMWDEMO_ENABLE_LEGACY_CFAR_AOA
+    if ((guiMonSel.detectedObjects != 0U) ||
+        (guiMonSel.rangeAzimuthHeatMap != 0U))
+    {
+        CLI_write("Warning: navigation-only build disables TI CFAR/AoA; detectedObjects and rangeAzimuthHeatMap were forced to 0.\n");
+        guiMonSel.detectedObjects = 0U;
+        guiMonSel.rangeAzimuthHeatMap = 0U;
+    }
+#endif
 
     MmwDemo_CfgUpdate((void *)&guiMonSel, MMWDEMO_GUIMONSEL_OFFSET,
         sizeof(MmwDemo_GuiMonSel), subFrameNum);
-    MmwDemo_CLISetDenseEnableMask(
-        subFrameNum, (uint8_t)denseElevationHeatMap);
-
     return 0;
 }
 
@@ -1608,14 +1608,19 @@ void MmwDemo_CLIInit (uint8_t taskPriority)
     cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLISensorStop;
     cnt++;
 
-    cliCfg.tableEntry[cnt].cmd            = "denseElevCfg";
-    cliCfg.tableEntry[cnt].helpString     = "<minElev> <maxElev> <minAzim> <maxAzim> <minRange> <maxRange> <snrThreshold>";
-    cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLIDenseElevCfg;
-    cnt++;
-
     cliCfg.tableEntry[cnt].cmd            = "navPointCfg";
     cliCfg.tableEntry[cnt].helpString     = "<minEl> <maxEl> <minAz> <maxAz> <minRange> <maxRange> <snrDb> <minMovingMps> <rangeTolBins> <minRun> <elevNeighborBins> <maxSurface> <maxDiscrete>";
     cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLINavPointCfg;
+    cnt++;
+
+    cliCfg.tableEntry[cnt].cmd            = "navClusterCfg";
+    cliCfg.tableEntry[cnt].helpString     = "<enable> <epsilonM> <rangeScale> <minPts> <maxPoints> <maxClusters> <wallMinLengthM> <wallMaxThicknessM> <wallMinAspect> <staticVelocityMps>";
+    cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLINavClusterCfg;
+    cnt++;
+
+    cliCfg.tableEntry[cnt].cmd            = "navEgoCfg";
+    cliCfg.tableEntry[cnt].helpString     = "<mode:0=off,1=external,2=scene> <vxRadarMps> <vyRadarMps> <vzRadarMps> <confidence> <validFrames> <confidenceThreshold> <maxSpeedMps> <sceneResidualMps> <sceneMinInliers>";
+    cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLINavEgoCfg;
     cnt++;
 
     cliCfg.tableEntry[cnt].cmd            = "navMonitor";
@@ -1624,7 +1629,7 @@ void MmwDemo_CLIInit (uint8_t taskPriority)
     cnt++;
 
     cliCfg.tableEntry[cnt].cmd            = "guiMonitor";
-    cliCfg.tableEntry[cnt].helpString     = "<subFrameIdx> <detectedObjects> <logMagRange> <noiseProfile> <rangeAzimuthHeatMap> <rangeDopplerHeatMap> <statsInfo> [radarCube] [denseElevationHeatMap]";
+    cliCfg.tableEntry[cnt].helpString     = "<subFrameIdx> <detectedObjects> <logMagRange> <noiseProfile> <rangeAzimuthHeatMap> <rangeDopplerHeatMap> <statsInfo> [radarCube]";
     cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLIGuiMonSel;
     cnt++;
 
@@ -1727,90 +1732,6 @@ void MmwDemo_CLIInit (uint8_t taskPriority)
 /**
  *  @b Description
  *  @n
- *      This is the CLI Handler for the dense elevation configuration
- *
- *  @param[in] argc
- *      Number of arguments
- *  @param[in] argv
- *      Arguments
- *
- *  @retval
- *      Success -   0
- *  @retval
- *      Error   -   <0
- */
-static int32_t MmwDemo_CLIDenseElevCfg (int32_t argc, char* argv[])
-{
-    MmwDemo_DenseElevCliCfg cfg;
-    volatile MmwDemo_DenseElevCliCfg *sharedCfg;
-    uint8_t nextGeneration;
-    int32_t minRangeBin;
-    int32_t maxRangeBin;
-
-    if (argc != 8)
-    {
-        CLI_write ("Error: Invalid usage of the CLI command. Expected 7 arguments.\n");
-        return -1;
-    }
-
-    memset(&cfg, 0, sizeof(cfg));
-    cfg.minElevationDeg = (float) atof(argv[1]);
-    cfg.maxElevationDeg = (float) atof(argv[2]);
-    cfg.minAzimuthDeg   = (float) atof(argv[3]);
-    cfg.maxAzimuthDeg   = (float) atof(argv[4]);
-    if ((MmwDemo_CLIParseInt32(argv[5], 0, 32767, &minRangeBin) < 0) ||
-        (MmwDemo_CLIParseInt32(argv[6], 0, 32767, &maxRangeBin) < 0))
-    {
-        CLI_write("Error: denseElevCfg range bins must be 0..32767.\n");
-        return -1;
-    }
-    cfg.minRangeBin = (int16_t)minRangeBin;
-    cfg.maxRangeBin = (int16_t)maxRangeBin;
-    cfg.snrThresholdDb  = (float) atof(argv[7]);
-
-    if ((!isfinite(cfg.minElevationDeg)) ||
-        (!isfinite(cfg.maxElevationDeg)) ||
-        (!isfinite(cfg.minAzimuthDeg)) ||
-        (!isfinite(cfg.maxAzimuthDeg)) ||
-        (!isfinite(cfg.snrThresholdDb)) ||
-        (cfg.minElevationDeg < -90.0f) || (cfg.maxElevationDeg > 90.0f) ||
-        (cfg.minAzimuthDeg < -90.0f) || (cfg.maxAzimuthDeg > 90.0f) ||
-        (cfg.minElevationDeg > cfg.maxElevationDeg) ||
-        (cfg.minAzimuthDeg > cfg.maxAzimuthDeg) ||
-        (cfg.minRangeBin < 0) || (cfg.maxRangeBin < cfg.minRangeBin) ||
-        (cfg.snrThresholdDb < 0.0f) || (cfg.snrThresholdDb > 80.0f))
-    {
-        CLI_write("Error: denseElevCfg bounds are invalid. Angles must be within +/-90 deg, range bins nonnegative, SNR 0..80 dB.\n");
-        return -1;
-    }
-
-    extern MmwDemo_HSRAM gHSRAM;
-    sharedCfg = (volatile MmwDemo_DenseElevCliCfg *)&gHSRAM.denseElevCfg;
-    nextGeneration = sharedCfg->isValid + 1U;
-    if (nextGeneration == 0U)
-    {
-        nextGeneration = 1U;
-    }
-    /* Publish atomically to DSS: zero marks an in-progress update. */
-    sharedCfg->isValid = 0U;
-    MEM_BARRIER();
-    sharedCfg->minElevationDeg = cfg.minElevationDeg;
-    sharedCfg->maxElevationDeg = cfg.maxElevationDeg;
-    sharedCfg->minAzimuthDeg = cfg.minAzimuthDeg;
-    sharedCfg->maxAzimuthDeg = cfg.maxAzimuthDeg;
-    sharedCfg->snrThresholdDb = cfg.snrThresholdDb;
-    sharedCfg->minRangeBin = cfg.minRangeBin;
-    sharedCfg->maxRangeBin = cfg.maxRangeBin;
-    MEM_BARRIER();
-    sharedCfg->isValid = nextGeneration;
-    MEM_BARRIER();
-
-    return 0;
-}
-
-/**
- *  @b Description
- *  @n
  *      Configures the current-frame navigation point generator.  The output
  *      enable masks are deliberately preserved; navMonitor is the only CLI
  *      command that controls TLV12/TLV13 publication.
@@ -1822,6 +1743,7 @@ static int32_t MmwDemo_CLINavPointCfg(int32_t argc, char *argv[])
     uint8_t nextGeneration;
     uint8_t surfaceMask;
     uint8_t targetMask;
+    UInt key;
     int32_t rangeTolerance;
     int32_t minRun;
     int32_t elevationNeighborBins;
@@ -1829,6 +1751,7 @@ static int32_t MmwDemo_CLINavPointCfg(int32_t argc, char *argv[])
     int32_t maxDiscrete;
     int32_t minRangeBin;
     int32_t maxRangeBin;
+    uint8_t timingSubFrame;
 
     if (argc != 14)
     {
@@ -1897,6 +1820,7 @@ static int32_t MmwDemo_CLINavPointCfg(int32_t argc, char *argv[])
 
     extern MmwDemo_HSRAM gHSRAM;
     sharedCfg = (volatile MmwDemo_NavCliCfg *)&gHSRAM.navCfg;
+    key = Hwi_disable();
     if (sharedCfg->isValid != 0U)
     {
         surfaceMask = sharedCfg->enabledSurfaceMask;
@@ -1905,6 +1829,7 @@ static int32_t MmwDemo_CLINavPointCfg(int32_t argc, char *argv[])
     }
     else
     {
+        MmwDemo_CLIInitNavDefaults(sharedCfg);
         surfaceMask = 0U;
         targetMask = 0U;
         nextGeneration = 1U;
@@ -1933,9 +1858,217 @@ static int32_t MmwDemo_CLINavPointCfg(int32_t argc, char *argv[])
         cfg.surfaceElevationNeighborBins;
     sharedCfg->enabledSurfaceMask = surfaceMask;
     sharedCfg->enabledTargetMask = targetMask;
+    for (timingSubFrame = 0U;
+         timingSubFrame < RL_MAX_SUBFRAMES;
+         timingSubFrame++)
+    {
+        sharedCfg->postProcReserveUsec[timingSubFrame] =
+            MmwDemo_getNavPostProcReserveUsecForState(
+                timingSubFrame,
+                cfg.uartMaxSurfacePoints,
+                ((surfaceMask & (1U << timingSubFrame)) != 0U) ? 1U : 0U,
+                ((targetMask & (1U << timingSubFrame)) != 0U) ? 1U : 0U);
+    }
     MEM_BARRIER();
     sharedCfg->isValid = nextGeneration;
     MEM_BARRIER();
+    Hwi_restore(key);
+    return 0;
+}
+
+/** Configure deterministic Cartesian DBSCAN and wall-shape classification. */
+static int32_t MmwDemo_CLINavClusterCfg(int32_t argc, char *argv[])
+{
+    volatile MmwDemo_NavCliCfg *sharedCfg;
+    int32_t enabled;
+    int32_t minPoints;
+    int32_t maxPoints;
+    int32_t maxClusters;
+    float epsilonM;
+    float rangeScale;
+    float wallMinLengthM;
+    float wallMaxThicknessM;
+    float wallMinAspect;
+    float staticVelocityMps;
+    uint8_t nextGeneration;
+    UInt key;
+
+    if (argc != 11)
+    {
+        CLI_write("Error: navClusterCfg expects 10 arguments.\n");
+        return -1;
+    }
+    epsilonM = (float)atof(argv[2]);
+    rangeScale = (float)atof(argv[3]);
+    wallMinLengthM = (float)atof(argv[7]);
+    wallMaxThicknessM = (float)atof(argv[8]);
+    wallMinAspect = (float)atof(argv[9]);
+    staticVelocityMps = (float)atof(argv[10]);
+    if ((MmwDemo_CLIParseInt32(argv[1], 0, 1, &enabled) < 0) ||
+        (MmwDemo_CLIParseInt32(argv[4], 2, 32, &minPoints) < 0) ||
+        (MmwDemo_CLIParseInt32(argv[5], 16,
+                               MMWDEMO_NAV_DBSCAN_MAX_POINTS,
+                               &maxPoints) < 0) ||
+        (MmwDemo_CLIParseInt32(argv[6], 1,
+                               MMWDEMO_NAV_DBSCAN_MAX_CLUSTERS,
+                               &maxClusters) < 0) ||
+        (!isfinite(epsilonM)) || (epsilonM < 0.02f) ||
+        (epsilonM > 2.0f) ||
+        (!isfinite(rangeScale)) || (rangeScale < 0.0f) ||
+        (rangeScale > 0.25f) ||
+        (!isfinite(wallMinLengthM)) || (wallMinLengthM < 0.20f) ||
+        (wallMinLengthM > 20.0f) ||
+        (!isfinite(wallMaxThicknessM)) ||
+        (wallMaxThicknessM < 0.02f) ||
+        (wallMaxThicknessM > 3.0f) ||
+        (!isfinite(wallMinAspect)) || (wallMinAspect < 1.0f) ||
+        (wallMinAspect > 50.0f) ||
+        (!isfinite(staticVelocityMps)) ||
+        (staticVelocityMps < 0.0f) || (staticVelocityMps > 5.0f))
+    {
+        CLI_write("Error: navClusterCfg values are outside supported bounds.\n");
+        return -1;
+    }
+
+    extern MmwDemo_HSRAM gHSRAM;
+    sharedCfg = (volatile MmwDemo_NavCliCfg *)&gHSRAM.navCfg;
+    key = Hwi_disable();
+    if (sharedCfg->isValid == 0U)
+    {
+        MmwDemo_CLIInitNavDefaults(sharedCfg);
+        nextGeneration = 1U;
+    }
+    else
+    {
+        nextGeneration = sharedCfg->isValid + 1U;
+        if (nextGeneration == 0U)
+        {
+            nextGeneration = 1U;
+        }
+    }
+    if ((uint16_t)maxPoints < sharedCfg->sceneMinInliers)
+    {
+        Hwi_restore(key);
+        CLI_write("Error: DBSCAN maxPoints must be >= sceneMinInliers.\n");
+        return -1;
+    }
+    sharedCfg->isValid = 0U;
+    MEM_BARRIER();
+    sharedCfg->dbscanEnabled = (uint8_t)enabled;
+    sharedCfg->dbscanMinPoints = (uint8_t)minPoints;
+    sharedCfg->dbscanMaxPoints = (uint16_t)maxPoints;
+    sharedCfg->dbscanMaxClusters = (uint8_t)maxClusters;
+    sharedCfg->dbscanEpsilonM = epsilonM;
+    sharedCfg->dbscanRangeScale = rangeScale;
+    sharedCfg->wallMinLengthM = wallMinLengthM;
+    sharedCfg->wallMaxThicknessM = wallMaxThicknessM;
+    sharedCfg->wallMinAspectRatio = wallMinAspect;
+    sharedCfg->staticVelocityThresholdMps = staticVelocityMps;
+    MEM_BARRIER();
+    sharedCfg->isValid = nextGeneration;
+    MEM_BARRIER();
+    Hwi_restore(key);
+    return 0;
+}
+
+/** Configure translation-only ego Doppler compensation in radar coordinates. */
+static int32_t MmwDemo_CLINavEgoCfg(int32_t argc, char *argv[])
+{
+    volatile MmwDemo_NavCliCfg *sharedCfg;
+    int32_t mode;
+    int32_t validFrames;
+    int32_t sceneMinInliers;
+    float velocityX;
+    float velocityY;
+    float velocityZ;
+    float confidence;
+    float confidenceThreshold;
+    float maxSpeed;
+    float sceneResidual;
+    float speedSquared;
+    uint8_t nextGeneration;
+    UInt key;
+
+    if (argc != 11)
+    {
+        CLI_write("Error: navEgoCfg expects 10 arguments.\n");
+        return -1;
+    }
+    velocityX = (float)atof(argv[2]);
+    velocityY = (float)atof(argv[3]);
+    velocityZ = (float)atof(argv[4]);
+    confidence = (float)atof(argv[5]);
+    confidenceThreshold = (float)atof(argv[7]);
+    maxSpeed = (float)atof(argv[8]);
+    sceneResidual = (float)atof(argv[9]);
+    speedSquared = velocityX * velocityX +
+                   velocityY * velocityY + velocityZ * velocityZ;
+    if ((MmwDemo_CLIParseInt32(argv[1], MMWDEMO_NAV_EGO_MODE_OFF,
+                               MMWDEMO_NAV_EGO_MODE_SCENE, &mode) < 0) ||
+        (MmwDemo_CLIParseInt32(argv[6], 1, 1000, &validFrames) < 0) ||
+        (MmwDemo_CLIParseInt32(argv[10], 3,
+                               MMWDEMO_NAV_DBSCAN_MAX_POINTS,
+                               &sceneMinInliers) < 0) ||
+        (!isfinite(velocityX)) || (!isfinite(velocityY)) ||
+        (!isfinite(velocityZ)) ||
+        (!isfinite(confidence)) || (confidence < 0.0f) ||
+        (confidence > 1.0f) ||
+        (!isfinite(confidenceThreshold)) ||
+        (confidenceThreshold < 0.0f) ||
+        (confidenceThreshold > 1.0f) ||
+        (!isfinite(maxSpeed)) || (maxSpeed < 0.10f) ||
+        (maxSpeed > 20.0f) ||
+        (speedSquared > maxSpeed * maxSpeed) ||
+        (!isfinite(sceneResidual)) || (sceneResidual < 0.01f) ||
+        (sceneResidual > 5.0f))
+    {
+        CLI_write("Error: navEgoCfg values are outside supported bounds.\n");
+        return -1;
+    }
+
+    extern MmwDemo_HSRAM gHSRAM;
+    sharedCfg = (volatile MmwDemo_NavCliCfg *)&gHSRAM.navCfg;
+    key = Hwi_disable();
+    if (sharedCfg->isValid == 0U)
+    {
+        MmwDemo_CLIInitNavDefaults(sharedCfg);
+        nextGeneration = 1U;
+    }
+    else
+    {
+        nextGeneration = sharedCfg->isValid + 1U;
+        if (nextGeneration == 0U)
+        {
+            nextGeneration = 1U;
+        }
+    }
+    if ((uint16_t)sceneMinInliers > sharedCfg->dbscanMaxPoints)
+    {
+        Hwi_restore(key);
+        CLI_write("Error: sceneMinInliers must be <= DBSCAN maxPoints.\n");
+        return -1;
+    }
+    sharedCfg->isValid = 0U;
+    MEM_BARRIER();
+    sharedCfg->egoMode = (uint8_t)mode;
+    sharedCfg->egoVelocityXMps = velocityX;
+    sharedCfg->egoVelocityYMps = velocityY;
+    sharedCfg->egoVelocityZMps = velocityZ;
+    sharedCfg->egoConfidence = confidence;
+    sharedCfg->egoVelocityValidFrames = (uint16_t)validFrames;
+    sharedCfg->egoConfidenceThreshold = confidenceThreshold;
+    sharedCfg->egoMaxSpeedMps = maxSpeed;
+    sharedCfg->sceneResidualThresholdMps = sceneResidual;
+    sharedCfg->sceneMinInliers = (uint16_t)sceneMinInliers;
+    sharedCfg->egoSequence++;
+    if (sharedCfg->egoSequence == 0U)
+    {
+        sharedCfg->egoSequence = 1U;
+    }
+    MEM_BARRIER();
+    sharedCfg->isValid = nextGeneration;
+    MEM_BARRIER();
+    Hwi_restore(key);
     return 0;
 }
 

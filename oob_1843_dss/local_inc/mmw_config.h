@@ -86,8 +86,6 @@ typedef struct MmwDemo_GuiMonSel_t
     /*! @brief   Send the raw DPIF radar cube over the data UART */
     uint8_t        radarCube;
 
-    /*! @brief   Send the CFAR-independent dense range/azimuth/elevation TLV 11 */
-    uint8_t        denseElevationHeatMap;
 } MmwDemo_GuiMonSel;
 
 /**

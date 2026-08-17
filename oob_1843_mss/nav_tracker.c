@@ -3,9 +3,9 @@
  *
  * @brief Converts DSS discrete navigation points to TI GTRACK 3-D input.
  *
- * Extended surfaces are removed by nav_point_gen on DSS. This module feeds
- * only the remaining moving/discrete points to GTRACK. Static nearest-surface
- * points are never offered to the tracker.
+ * Wall-like extended surfaces and DBSCAN noise are removed by nav_point_gen
+ * on DSS. Compact clusters, including stationary obstacles, are offered to
+ * GTRACK; compensated Doppler supplies the static/moving/uncertain state.
  */
 
 #include <stdint.h>
@@ -13,7 +13,6 @@
 #include <string.h>
 #include <math.h>
 
-#include <ti/drivers/osal/MemoryP.h>
 #include <ti/utils/cycleprofiler/cycle_profiler.h>
 #include <ti/alg/gtrack/gtrack.h>
 
@@ -21,14 +20,21 @@
 
 #define MMWDEMO_NAV_TRACKER_MAX_POINTS MMWDEMO_NAV_MAX_DISCRETE_POINTS
 #define MMWDEMO_NAV_TRACKER_PI         (3.14159265358979323846f)
+#define MMWDEMO_NAV_TRACKER_ARENA_BYTES (64U * 1024U)
 
 static void *gNavTrackerHandle;
 static uint32_t gNavTrackerLastFrame;
 static uint8_t gNavTrackerHasLastFrame;
 static uint16_t gNavTrackerSubFrame = 0xFFFFU;
+static float gNavTrackerMotionThresholdMps = 0.20f;
 
 static GTRACK_measurementPoint
     gNavTrackerMeasurements[MMWDEMO_NAV_TRACKER_MAX_POINTS];
+/* GTRACK sees native radar-relative Doppler because its state is
+ * radar-relative. Keep a separate frame-aligned compensated float for target
+ * motion classification; never quantize that derived value into an FFT bin. */
+static float
+    gNavTrackerCompensatedDoppler[MMWDEMO_NAV_TRACKER_MAX_POINTS];
 static GTRACK_targetDesc
     gNavTrackerDescriptions[MMWDEMO_NAV_MAX_TARGETS];
 static uint8_t gNavTrackerAssociations[MMWDEMO_NAV_TRACKER_MAX_POINTS];
@@ -38,33 +44,74 @@ static GTRACK_allocationParams gNavTrackerAllocation;
 static GTRACK_stateParams gNavTrackerState;
 static GTRACK_advancedParameters gNavTrackerAdvanced;
 
+/* GTRACK obtains all storage through gtrack_alloc. A fixed arena removes
+ * general-purpose heap latency and fragmentation from frame-gap reset/recreate
+ * paths. Allocation is monotonic; GTRACK delete frees every block, then the
+ * arena is reclaimed atomically when the live block count reaches zero. */
+#pragma DATA_ALIGN(gNavTrackerArena, 8)
+static uint8_t gNavTrackerArena[MMWDEMO_NAV_TRACKER_ARENA_BYTES];
+static uint32_t gNavTrackerArenaOffset;
+static uint32_t gNavTrackerArenaLiveBlocks;
+
 volatile uint32_t gNavTrackerHeapBytes = 0U;
+volatile uint32_t gNavTrackerArenaHighWaterBytes = 0U;
 volatile int32_t gNavTrackerLastError = 0;
 volatile uint32_t gNavTrackerProcessCount = 0U;
 volatile uint32_t gNavTrackerResetCount = 0U;
+volatile uint32_t gNavTrackerMaxProcessCycles = 0U;
 
 void *gtrack_alloc(uint32_t numElements, uint32_t sizeInBytes)
 {
-    uint32_t bytes = numElements * sizeInBytes;
-    void *memory = MemoryP_ctrlAlloc(bytes, 8U);
-    if (memory != NULL)
+    uint32_t bytes;
+    uint32_t alignedOffset;
+    void *memory;
+    if ((sizeInBytes != 0U) &&
+        (numElements > (0xFFFFFFFFU / sizeInBytes)))
     {
-        gNavTrackerHeapBytes += bytes;
+        return NULL;
+    }
+    bytes = numElements * sizeInBytes;
+    if (bytes == 0U)
+    {
+        return NULL;
+    }
+    alignedOffset = (gNavTrackerArenaOffset + 7U) & ~7U;
+    if ((alignedOffset > MMWDEMO_NAV_TRACKER_ARENA_BYTES) ||
+        (bytes > (MMWDEMO_NAV_TRACKER_ARENA_BYTES - alignedOffset)))
+    {
+        return NULL;
+    }
+    memory = &gNavTrackerArena[alignedOffset];
+    gNavTrackerArenaOffset = alignedOffset + bytes;
+    gNavTrackerArenaLiveBlocks++;
+    gNavTrackerHeapBytes += bytes;
+    if (gNavTrackerArenaOffset > gNavTrackerArenaHighWaterBytes)
+    {
+        gNavTrackerArenaHighWaterBytes = gNavTrackerArenaOffset;
     }
     return memory;
 }
 
 void gtrack_free(void *pFree, uint32_t sizeInBytes)
 {
-    if (pFree != NULL)
+    if ((pFree != NULL) &&
+        ((uint8_t *)pFree >= &gNavTrackerArena[0]) &&
+        ((uint8_t *)pFree <
+         &gNavTrackerArena[MMWDEMO_NAV_TRACKER_ARENA_BYTES]) &&
+        (gNavTrackerArenaLiveBlocks != 0U))
     {
-        MemoryP_ctrlFree(pFree, sizeInBytes);
         if (gNavTrackerHeapBytes >= sizeInBytes)
         {
             gNavTrackerHeapBytes -= sizeInBytes;
         }
         else
         {
+            gNavTrackerHeapBytes = 0U;
+        }
+        gNavTrackerArenaLiveBlocks--;
+        if (gNavTrackerArenaLiveBlocks == 0U)
+        {
+            gNavTrackerArenaOffset = 0U;
             gNavTrackerHeapBytes = 0U;
         }
     }
@@ -89,6 +136,15 @@ static float MmwDemo_NavTracker_clamp(float value, float low, float high)
         return high;
     }
     return value;
+}
+
+void MmwDemo_NavTracker_setMotionThreshold(float thresholdMps)
+{
+    if (isfinite(thresholdMps) &&
+        (thresholdMps >= 0.0f) && (thresholdMps <= 20.0f))
+    {
+        gNavTrackerMotionThresholdMps = thresholdMps;
+    }
 }
 
 static void MmwDemo_NavTracker_delete(void)
@@ -123,7 +179,9 @@ static int32_t MmwDemo_NavTracker_create(
     memset(&gNavTrackerAllocation, 0, sizeof(gNavTrackerAllocation));
     gNavTrackerAllocation.snrThre = 60.0f;
     gNavTrackerAllocation.snrThreObscured = 200.0f;
-    gNavTrackerAllocation.velocityThre = 0.10f;
+    /* DBSCAN has already rejected isolated noise. Do not prevent compact
+     * stationary obstacles (chair, pole, box) from allocating a track. */
+    gNavTrackerAllocation.velocityThre = 0.0f;
     gNavTrackerAllocation.pointsThre = 3U;
     gNavTrackerAllocation.maxDistanceThre = 1.5f;
     gNavTrackerAllocation.maxVelThre = 2.0f;
@@ -131,7 +189,7 @@ static int32_t MmwDemo_NavTracker_create(
     memset(&gNavTrackerState, 0, sizeof(gNavTrackerState));
     gNavTrackerState.det2actThre = 3U;
     gNavTrackerState.det2freeThre = 5U;
-    gNavTrackerState.active2freeThre = 20U;
+    gNavTrackerState.active2freeThre = 30U;
     gNavTrackerState.static2freeThre = 20U;
     gNavTrackerState.exit2freeThre = 5U;
     gNavTrackerState.sleep2freeThre = 20U;
@@ -190,6 +248,12 @@ static uint8_t MmwDemo_NavTracker_payloadValid(
         (!isfinite(header->dopplerStepMps)) ||
         (!isfinite(header->framePeriodSec)) ||
         (!isfinite(header->rangeBiasMeters)) ||
+        (!isfinite(header->egoVelocityXMps)) ||
+        (!isfinite(header->egoVelocityYMps)) ||
+        (!isfinite(header->egoVelocityZMps)) ||
+        (!isfinite(header->egoConfidence)) ||
+        (header->egoConfidence < 0.0f) ||
+        (header->egoConfidence > 1.0f) ||
         !(header->rangeStepMeters > 0.0f) ||
         !(header->dopplerStepMps > 0.0f) ||
         (header->framePeriodSec < 0.0f))
@@ -249,6 +313,19 @@ static uint16_t MmwDemo_NavTracker_makeMeasurements(
             atan2f(z, sqrtf(x * x + y * y));
         gNavTrackerMeasurements[index].vector.doppler =
             (float)discrete[index].dopplerIdx * header->dopplerStepMps;
+        gNavTrackerCompensatedDoppler[index] =
+            gNavTrackerMeasurements[index].vector.doppler;
+        if (((header->flags & MMWDEMO_NAV_FLAG_EGO_VALID) != 0U) &&
+            (range > 0.001f))
+        {
+            /* GTRACK retains native radar-relative Doppler. Motion-state
+             * classification uses the separate frame-aligned compensated
+             * float, without quantizing it back into an FFT bin. */
+            gNavTrackerCompensatedDoppler[index] +=
+                (x * header->egoVelocityXMps +
+                 y * header->egoVelocityYMps +
+                 z * header->egoVelocityZMps) / range;
+        }
         /* snrDb10 stores 10*dB. GTRACK expects linear SNR. */
         gNavTrackerMeasurements[index].snr =
             powf(10.0f, (float)discrete[index].snrDb10 * 0.01f);
@@ -274,7 +351,7 @@ int32_t MmwDemo_NavTracker_process(
     uint16_t targetCount = 0U;
     uint16_t index;
     uint8_t presence = 0U;
-    uint16_t flags = MMWDEMO_NAV_TARGET_FLAG_NO_EGO_COMP;
+    uint16_t flags = 0U;
     int32_t retVal = 0;
 
     if (targetPayloadSize != NULL)
@@ -293,6 +370,35 @@ int32_t MmwDemo_NavTracker_process(
     {
         gNavTrackerLastError = MMWDEMO_NAV_TRACKER_EPAYLOAD;
         return MMWDEMO_NAV_TRACKER_EPAYLOAD;
+    }
+
+    if ((navHeader->flags & MMWDEMO_NAV_FLAG_NO_EGO_COMPENSATION) != 0U)
+    {
+        flags |= MMWDEMO_NAV_TARGET_FLAG_NO_EGO_COMP;
+    }
+    if ((navHeader->flags & MMWDEMO_NAV_FLAG_DBSCAN_ACTIVE) != 0U)
+    {
+        flags |= MMWDEMO_NAV_TARGET_FLAG_DBSCAN_INPUT;
+    }
+    if ((navHeader->flags & MMWDEMO_NAV_FLAG_EGO_EXTERNAL) != 0U)
+    {
+        flags |= MMWDEMO_NAV_TARGET_FLAG_EGO_EXTERNAL;
+    }
+    if ((navHeader->flags & MMWDEMO_NAV_FLAG_EGO_SCENE) != 0U)
+    {
+        flags |= MMWDEMO_NAV_TARGET_FLAG_EGO_SCENE;
+    }
+    if ((navHeader->flags & MMWDEMO_NAV_FLAG_EGO_VALID) != 0U)
+    {
+        flags |= MMWDEMO_NAV_TARGET_FLAG_EGO_VALID;
+    }
+    if ((navHeader->flags & MMWDEMO_NAV_FLAG_EGO_LOW_CONFIDENCE) != 0U)
+    {
+        flags |= MMWDEMO_NAV_TARGET_FLAG_EGO_LOW_CONF;
+    }
+    if ((navHeader->flags & MMWDEMO_NAV_FLAG_TRANSLATION_ONLY) != 0U)
+    {
+        flags |= MMWDEMO_NAV_TARGET_FLAG_TRANSLATION_ONLY;
     }
 
     startCycles = Cycleprofiler_getTimeStamp();
@@ -314,11 +420,12 @@ int32_t MmwDemo_NavTracker_process(
         flags |= MMWDEMO_NAV_TARGET_FLAG_RESET;
     }
 
-    /* Frame zero identifies a fresh sensor run. A non-monotonic frame also
-     * invalidates velocity state; do not let stale tracks survive a restart. */
+    /* Frame zero identifies a fresh sensor run. Duplicate, non-monotonic, or
+     * skipped navigation frames invalidate a fixed-deltaT tracker. Reset
+     * deterministically instead of silently integrating with the wrong dt. */
     if ((navHeader->radarFrameNumber == 0U) ||
         ((gNavTrackerHasLastFrame != 0U) &&
-         (navHeader->radarFrameNumber < gNavTrackerLastFrame)))
+         (navHeader->radarFrameNumber != (gNavTrackerLastFrame + 1U))))
     {
         MmwDemo_NavTracker_delete();
         gNavTrackerHasLastFrame = 0U;
@@ -369,6 +476,9 @@ int32_t MmwDemo_NavTracker_process(
         {
             uint16_t pointIndex;
             uint16_t associated = 0U;
+            float associatedAbsDoppler = 0.0f;
+            uint16_t objectFlags = (presence != 0U) ?
+                MMWDEMO_NAV_TARGET_OBJECT_FLAG_PRESENCE : 0U;
             target[index].trackId = gNavTrackerDescriptions[index].tid;
             target[index].posX = gNavTrackerDescriptions[index].S[0];
             target[index].posY = gNavTrackerDescriptions[index].S[1];
@@ -376,6 +486,14 @@ int32_t MmwDemo_NavTracker_process(
             target[index].velX = gNavTrackerDescriptions[index].S[3];
             target[index].velY = gNavTrackerDescriptions[index].S[4];
             target[index].velZ = gNavTrackerDescriptions[index].S[5];
+            if ((navHeader->flags & MMWDEMO_NAV_FLAG_EGO_VALID) != 0U)
+            {
+                /* Report target velocity after translation compensation while
+                 * retaining target position in the current radar frame. */
+                target[index].velX += navHeader->egoVelocityXMps;
+                target[index].velY += navHeader->egoVelocityYMps;
+                target[index].velZ += navHeader->egoVelocityZMps;
+            }
             target[index].accX = gNavTrackerDescriptions[index].S[6];
             target[index].accY = gNavTrackerDescriptions[index].S[7];
             target[index].accZ = gNavTrackerDescriptions[index].S[8];
@@ -391,10 +509,37 @@ int32_t MmwDemo_NavTracker_process(
                     gNavTrackerDescriptions[index].uid)
                 {
                     associated++;
+                    associatedAbsDoppler += fabsf(
+                        gNavTrackerCompensatedDoppler[pointIndex]);
                 }
             }
             target[index].numAssociatedPoints = associated;
-            target[index].flags = (presence != 0U) ? 1U : 0U;
+            if (((navHeader->flags & MMWDEMO_NAV_FLAG_EGO_VALID) == 0U) ||
+                (associated == 0U))
+            {
+                objectFlags |= MMWDEMO_NAV_TARGET_OBJECT_FLAG_UNCERTAIN;
+            }
+            else if ((associatedAbsDoppler / (float)associated) <=
+                     gNavTrackerMotionThresholdMps)
+            {
+                float targetSpeed = sqrtf(
+                    target[index].velX * target[index].velX +
+                    target[index].velY * target[index].velY +
+                    target[index].velZ * target[index].velZ);
+                if (targetSpeed <= gNavTrackerMotionThresholdMps)
+                {
+                    objectFlags |= MMWDEMO_NAV_TARGET_OBJECT_FLAG_STATIC;
+                }
+                else
+                {
+                    objectFlags |= MMWDEMO_NAV_TARGET_OBJECT_FLAG_MOVING;
+                }
+            }
+            else
+            {
+                objectFlags |= MMWDEMO_NAV_TARGET_OBJECT_FLAG_MOVING;
+            }
+            target[index].flags = objectFlags;
         }
         gNavTrackerProcessCount++;
         gNavTrackerLastFrame = navHeader->radarFrameNumber;
@@ -413,6 +558,10 @@ int32_t MmwDemo_NavTracker_process(
     targetHeader->radarFrameNumber = navHeader->radarFrameNumber;
     targetHeader->processingCycles =
         Cycleprofiler_getTimeStamp() - startCycles;
+    if (targetHeader->processingCycles > gNavTrackerMaxProcessCycles)
+    {
+        gNavTrackerMaxProcessCycles = targetHeader->processingCycles;
+    }
     targetHeader->trackerHeapBytes = gNavTrackerHeapBytes;
     *targetPayloadSize = sizeof(*targetHeader) +
         (uint32_t)targetCount * sizeof(MmwDemo_NavTarget);
@@ -427,6 +576,8 @@ void MmwDemo_NavTracker_reset(void)
     gNavTrackerHasLastFrame = 0U;
     gNavTrackerSubFrame = 0xFFFFU;
     memset(gNavTrackerMeasurements, 0, sizeof(gNavTrackerMeasurements));
+    memset(gNavTrackerCompensatedDoppler, 0,
+           sizeof(gNavTrackerCompensatedDoppler));
     memset(gNavTrackerDescriptions, 0, sizeof(gNavTrackerDescriptions));
     memset(gNavTrackerAssociations, GTRACK_ID_POINT_NOT_ASSOCIATED,
            sizeof(gNavTrackerAssociations));

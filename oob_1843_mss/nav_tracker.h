@@ -23,6 +23,18 @@ extern "C" {
 #define MMWDEMO_NAV_TARGET_FLAG_INPUT_LIMITED (1U << 2)
 #define MMWDEMO_NAV_TARGET_FLAG_NO_EGO_COMP   (1U << 3)
 #define MMWDEMO_NAV_TARGET_FLAG_RESET          (1U << 4)
+#define MMWDEMO_NAV_TARGET_FLAG_EGO_EXTERNAL   (1U << 5)
+#define MMWDEMO_NAV_TARGET_FLAG_EGO_SCENE      (1U << 6)
+#define MMWDEMO_NAV_TARGET_FLAG_EGO_VALID      (1U << 7)
+#define MMWDEMO_NAV_TARGET_FLAG_DBSCAN_INPUT   (1U << 8)
+#define MMWDEMO_NAV_TARGET_FLAG_EGO_LOW_CONF   (1U << 9)
+#define MMWDEMO_NAV_TARGET_FLAG_TRANSLATION_ONLY (1U << 10)
+
+/* Per-target flags. Bit zero retains the original presence indication. */
+#define MMWDEMO_NAV_TARGET_OBJECT_FLAG_PRESENCE  (1U << 0)
+#define MMWDEMO_NAV_TARGET_OBJECT_FLAG_STATIC    (1U << 1)
+#define MMWDEMO_NAV_TARGET_OBJECT_FLAG_MOVING    (1U << 2)
+#define MMWDEMO_NAV_TARGET_OBJECT_FLAG_UNCERTAIN (1U << 3)
 
 #define MMWDEMO_NAV_TRACKER_EINVAL            (-201)
 #define MMWDEMO_NAV_TRACKER_EPAYLOAD          (-202)
@@ -77,13 +89,17 @@ int32_t MmwDemo_NavTracker_process(
     uint32_t targetPayloadCapacity,
     uint32_t *targetPayloadSize);
 
+void MmwDemo_NavTracker_setMotionThreshold(float thresholdMps);
+
 void MmwDemo_NavTracker_reset(void);
 void MmwDemo_NavTracker_resetSubFrame(uint16_t subFrameNumber);
 
 extern volatile uint32_t gNavTrackerHeapBytes;
+extern volatile uint32_t gNavTrackerArenaHighWaterBytes;
 extern volatile int32_t gNavTrackerLastError;
 extern volatile uint32_t gNavTrackerProcessCount;
 extern volatile uint32_t gNavTrackerResetCount;
+extern volatile uint32_t gNavTrackerMaxProcessCycles;
 
 #ifdef __cplusplus
 }
