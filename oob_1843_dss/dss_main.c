@@ -89,9 +89,9 @@
  */
 #define MMWDEMO_DPC_OBJDET_DPM_TASK_PRIORITY      5
 
-/*! L3 RAM buffer for object detection DPC. The 96 KiB reserve contains the
+/*! L3 RAM buffer for object detection DPC. The 160 KiB reserve contains the
  * frame-synchronous navigation scratch/output plus linker-managed L3 data. */
-#define MMWDEMO_DENSE_L3_RESERVE_SIZE (0x18000U)
+#define MMWDEMO_DENSE_L3_RESERVE_SIZE (0x28000U)
 uint8_t gMmwL3[SOC_L3RAM_SIZE - MMWDEMO_DENSE_L3_RESERVE_SIZE];
 #ifndef SOC_XWR68XX
 /* EDMA 4K silicon bug related : Align heap to 4K address boundary so that
@@ -103,7 +103,7 @@ uint8_t gMmwL3[SOC_L3RAM_SIZE - MMWDEMO_DENSE_L3_RESERVE_SIZE];
 
  /*! L2 RAM buffer for object detection DPC */
 #define MMWDEMO_OBJDET_L1RAM_SIZE (16U * 1024U)
-#define MMWDEMO_OBJDET_L2RAM_SIZE (72U * 1024U)
+#define MMWDEMO_OBJDET_L2RAM_SIZE (60U * 1024U)
 uint8_t gDPC_ObjDetL1Heap[MMWDEMO_OBJDET_L1RAM_SIZE];
 #pragma DATA_ALIGN(gDPC_ObjDetL1Heap, 4096U);
 #pragma DATA_SECTION(gDPC_ObjDetL1Heap, ".dpc_l1Heap");

@@ -96,9 +96,26 @@ typedef enum MmwDemo_output_message_type_e
 
     /*! @brief   GTRACK 3-D target list generated from discrete points */
     MMWDEMO_OUTPUT_MSG_NAV_TARGET_LIST = 13,
+    
+    /*! @brief   Custom detected clustered objects (Distance, Width, Elevation, Power) */
+    MMWDEMO_OUTPUT_MSG_DETECTED_OBJECTS_CUSTOM = 14,
 
     MMWDEMO_OUTPUT_MSG_MAX
 } MmwDemo_output_message_type;
+
+#if 0
+/*!
+ * @brief
+ *  Structure to hold custom detected objects
+ *  Instead of sending raw point clouds, send simplified clustered objects.
+ */
+typedef struct MmwDemo_DetectedObject_t {
+    float distance_m;      // Khoáº£ng cĂ¡ch tá»« Radar (m)
+    float width_m;         // Äá»™ rá»™ng váº­t lĂ½ (m)
+    float elevation_deg;   // GĂ³c ngáº©ng (Ä‘á»™)
+    float power_db;        // Má»©c nÄƒng lÆ°á»£ng (dB)
+} MmwDemo_DetectedObject;
+#endif
 
 /** Slot-2 descriptor used because the SDK DPM ABI has only buffers 0..2. */
 #define MMWDEMO_AUX_RESULT_MAGIC            (0x41555852U) /* AUXR */
@@ -211,26 +228,15 @@ typedef struct MmwDemo_NavCliCfg_t {
     uint16_t surfaceRangeToleranceBins;
     uint16_t maxSurfacePoints;
     uint16_t uartMaxSurfacePoints; /* MSS feedback cap; user grid is unchanged */
-    uint16_t maxDiscretePoints;
     uint8_t surfaceMinRunLength;
     uint8_t surfaceElevationNeighborBins;
     uint8_t isValid;
     uint8_t enabledSurfaceMask;
-    uint8_t enabledTargetMask;
-    uint8_t reserved[3];
-    uint8_t dbscanEnabled;
-    uint8_t dbscanMinPoints;
-    uint8_t dbscanMaxClusters;
+    uint8_t reserved[4];
     uint8_t egoMode;
-    uint16_t dbscanMaxPoints;
     uint16_t sceneMinInliers;
     uint16_t egoVelocityValidFrames;
     uint16_t reserved16;
-    float dbscanEpsilonM;
-    float dbscanRangeScale;
-    float wallMinLengthM;
-    float wallMaxThicknessM;
-    float wallMinAspectRatio;
     float staticVelocityThresholdMps;
     float egoVelocityXMps;
     float egoVelocityYMps;
@@ -249,7 +255,7 @@ typedef struct MmwDemo_NavCliCfg_t {
 } MmwDemo_NavCliCfg;
 
 typedef char MmwDemo_NavCliCfgSizeCheck[
-    (sizeof(MmwDemo_NavCliCfg) == 160U) ? 1 : -1];
+    (sizeof(MmwDemo_NavCliCfg) == 136U) ? 1 : -1];
 
 /**
  * @brief

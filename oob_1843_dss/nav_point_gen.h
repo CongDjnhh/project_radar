@@ -16,8 +16,8 @@ extern "C" {
 #endif
 
 #define MMWDEMO_NAV_MAGIC                    (0x4E415646U) /* NAVF */
-#define MMWDEMO_NAV_PROTOCOL_VERSION         (4U)
-#define MMWDEMO_NAV_MAX_SURFACE_POINTS       (1024U)
+#define MMWDEMO_NAV_PROTOCOL_VERSION         (5U)
+#define MMWDEMO_NAV_MAX_SURFACE_POINTS       (512U)
 #define MMWDEMO_NAV_MAX_DISCRETE_POINTS      (128U)
 #define MMWDEMO_NAV_NUM_AZIMUTH_SECTORS      (8U)
 #define MMWDEMO_NAV_NUM_ELEVATION_SECTORS    (64U)
@@ -85,17 +85,14 @@ typedef struct MmwDemo_NavPointGen_Cfg_t
     uint32_t egoSequence;
 } MmwDemo_NavPointGen_Cfg;
 
-/** Compact point used in the DSS-to-MSS result and TLV 12. */
+/** Custom detected object point used in DSS-to-MSS result and TLV 14. */
 typedef struct MmwDemo_NavPoint_t
 {
-    uint16_t rangeIdx;
-    int8_t   azimuthIdx;
-    int8_t   elevationIdx;
-    int16_t  dopplerIdx;
-    uint16_t snrDb10;
-    int16_t  sourceVQ15;
-    int16_t  powerDb10;    /* Uncalibrated/profile-dependent raw beam power,
-                            * 0.1 dB units; INT16_MIN is invalid. */
+    float distance_m;      /*!< Distance / Range in meters.                     */
+    float width_m;         /*!< Physical width in meters.                       */
+    float azimuth_deg;     /*!< Azimuth angle in degrees.                       */
+    float elevation_deg;   /*!< Elevation angle in degrees.                     */
+    float power_db;        /*!< Power / SNR in dB.                              */
 } MmwDemo_NavPoint;
 
 /**
@@ -161,7 +158,7 @@ int32_t MmwDemo_NavPointGen_process(
 void MmwDemo_NavPointGen_reset(void);
 
 typedef char MmwDemo_NavPointSizeCheck[
-    (sizeof(MmwDemo_NavPoint) == 12U) ? 1 : -1];
+    (sizeof(MmwDemo_NavPoint) == 20U) ? 1 : -1];
 typedef char MmwDemo_NavHeaderSizeCheck[
     (sizeof(MmwDemo_NavFrameHeader) == 84U) ? 1 : -1];
 

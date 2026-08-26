@@ -73,7 +73,7 @@
 #include "nav_point_gen.h"
 
 #ifndef MMWDEMO_ENABLE_LEGACY_CFAR_AOA
-#define MMWDEMO_ENABLE_LEGACY_CFAR_AOA (0)
+#define MMWDEMO_ENABLE_LEGACY_CFAR_AOA (1)
 #endif
 
 /**************************************************************************
@@ -101,7 +101,7 @@ static int32_t MmwDemo_CLILvdsStreamCfg (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLIConfigDataPort (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLINavMonitor (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLINavPointCfg (int32_t argc, char* argv[]);
-static int32_t MmwDemo_CLINavClusterCfg (int32_t argc, char* argv[]);
+
 static int32_t MmwDemo_CLINavEgoCfg (int32_t argc, char* argv[]);
 
 /**************************************************************************
@@ -463,24 +463,13 @@ static void MmwDemo_CLIInitNavDefaults(
     sharedCfg->surfaceRangeToleranceBins = 2U;
     sharedCfg->maxSurfacePoints = 384U;
     sharedCfg->uartMaxSurfacePoints = 384U;
-    sharedCfg->maxDiscretePoints = 96U;
     sharedCfg->surfaceMinRunLength = 6U;
     sharedCfg->surfaceElevationNeighborBins = 1U;
     sharedCfg->enabledSurfaceMask = 0U;
-    sharedCfg->enabledTargetMask = 0U;
-    sharedCfg->dbscanEnabled = 1U;
-    sharedCfg->dbscanMinPoints = 3U;
-    sharedCfg->dbscanMaxPoints = MMWDEMO_NAV_DBSCAN_MAX_POINTS;
-    sharedCfg->dbscanMaxClusters = 24U;
     sharedCfg->egoMode = MMWDEMO_NAV_EGO_MODE_SCENE;
     sharedCfg->sceneMinInliers = 12U;
     sharedCfg->egoVelocityValidFrames = 5U;
     sharedCfg->reserved16 = 0U;
-    sharedCfg->dbscanEpsilonM = 0.18f;
-    sharedCfg->dbscanRangeScale = 0.025f;
-    sharedCfg->wallMinLengthM = 1.20f;
-    sharedCfg->wallMaxThicknessM = 0.45f;
-    sharedCfg->wallMinAspectRatio = 4.0f;
     sharedCfg->staticVelocityThresholdMps = 0.20f;
     sharedCfg->egoVelocityXMps = 0.0f;
     sharedCfg->egoVelocityYMps = 0.0f;
@@ -519,13 +508,10 @@ static int32_t MmwDemo_CLINavMonitor(int32_t argc, char *argv[])
     int8_t subFrameNum;
     int32_t parsedSubFrame;
     int32_t parsedSurfaceEnabled;
-    int32_t parsedTargetEnabled;
     uint8_t surfaceEnabled;
-    uint8_t targetEnabled;
     uint8_t nextGeneration;
     uint8_t initializeDefaults;
     uint8_t nextSurfaceMask;
-    uint8_t nextTargetMask;
     uint8_t firstSubFrame;
     uint8_t lastSubFrame;
     uint8_t timingSubFrame;
@@ -533,9 +519,9 @@ static int32_t MmwDemo_CLINavMonitor(int32_t argc, char *argv[])
     volatile MmwDemo_NavCliCfg *sharedCfg;
     UInt key;
 
-    if (argc != 4)
+    if (argc != 3)
     {
-        CLI_write("Error: navMonitor expects <subFrameIdx> <surface> <target>.\n");
+        CLI_write("Error: navMonitor expects <subFrameIdx> <surface>.\n");
         return -1;
     }
     if ((MmwDemo_CLIParseInt32(
@@ -544,16 +530,13 @@ static int32_t MmwDemo_CLINavMonitor(int32_t argc, char *argv[])
         ((parsedSubFrame < 0) &&
          (parsedSubFrame != MMWDEMO_SUBFRAME_NUM_FRAME_LEVEL_CONFIG)) ||
         (MmwDemo_CLIParseInt32(argv[2], 0, 1,
-                               &parsedSurfaceEnabled) < 0) ||
-        (MmwDemo_CLIParseInt32(argv[3], 0, 1,
-                               &parsedTargetEnabled) < 0))
+                               &parsedSurfaceEnabled) < 0))
     {
         CLI_write("Error: navMonitor values are invalid.\n");
         return -1;
     }
     subFrameNum = (int8_t)parsedSubFrame;
     surfaceEnabled = (uint8_t)parsedSurfaceEnabled;
-    targetEnabled = (uint8_t)parsedTargetEnabled;
 
     extern MmwDemo_HSRAM gHSRAM;
     sharedCfg = (volatile MmwDemo_NavCliCfg *)&gHSRAM.navCfg;
@@ -568,30 +551,13 @@ static int32_t MmwDemo_CLINavMonitor(int32_t argc, char *argv[])
     if (initializeDefaults != 0U)
     {
         nextSurfaceMask = 0U;
-        nextTargetMask = 0U;
     }
     else
     {
         nextSurfaceMask = sharedCfg->enabledSurfaceMask;
-        nextTargetMask = sharedCfg->enabledTargetMask;
     }
     nextSurfaceMask = MmwDemo_CLIUpdateSubFrameMask(
         nextSurfaceMask, subFrameNum, surfaceEnabled);
-    nextTargetMask = MmwDemo_CLIUpdateSubFrameMask(
-        nextTargetMask, subFrameNum, targetEnabled);
-
-    /* One GTRACK instance fits the MSS heap safely. Legacy frame mode has one
-     * effective stream even when -1 expands the mask. Advanced-frame mode must
-     * select at most one target subframe; surfaces remain independently valid
-     * on every subframe. */
-    if ((gMmwMssMCB.cfg.ctrlCfg.dfeDataOutputMode ==
-         MMWave_DFEDataOutputMode_ADVANCED_FRAME) &&
-        ((nextTargetMask & (uint8_t)(nextTargetMask - 1U)) != 0U))
-    {
-        Hwi_restore(key);
-        CLI_write("Error: GTRACK target output supports one advanced-frame subframe; TLV12 surfaces may use all subframes.\n");
-        return -1;
-    }
 
     sharedCfg->isValid = 0U;
     MEM_BARRIER();
@@ -600,7 +566,6 @@ static int32_t MmwDemo_CLINavMonitor(int32_t argc, char *argv[])
         MmwDemo_CLIInitNavDefaults(sharedCfg);
     }
     sharedCfg->enabledSurfaceMask = nextSurfaceMask;
-    sharedCfg->enabledTargetMask = nextTargetMask;
     maxSurfacePoints = sharedCfg->uartMaxSurfacePoints;
     if ((maxSurfacePoints == 0U) ||
         (maxSurfacePoints > MMWDEMO_NAV_MAX_SURFACE_POINTS))
@@ -622,7 +587,7 @@ static int32_t MmwDemo_CLINavMonitor(int32_t argc, char *argv[])
                 timingSubFrame,
                 maxSurfacePoints,
                 ((nextSurfaceMask & (1U << timingSubFrame)) != 0U) ? 1U : 0U,
-                ((nextTargetMask & (1U << timingSubFrame)) != 0U) ? 1U : 0U);
+                0U);
     }
     MEM_BARRIER();
     sharedCfg->isValid = nextGeneration;
@@ -1613,10 +1578,7 @@ void MmwDemo_CLIInit (uint8_t taskPriority)
     cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLINavPointCfg;
     cnt++;
 
-    cliCfg.tableEntry[cnt].cmd            = "navClusterCfg";
-    cliCfg.tableEntry[cnt].helpString     = "<enable> <epsilonM> <rangeScale> <minPts> <maxPoints> <maxClusters> <wallMinLengthM> <wallMaxThicknessM> <wallMinAspect> <staticVelocityMps>";
-    cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLINavClusterCfg;
-    cnt++;
+
 
     cliCfg.tableEntry[cnt].cmd            = "navEgoCfg";
     cliCfg.tableEntry[cnt].helpString     = "<mode:0=off,1=external,2=scene> <vxRadarMps> <vyRadarMps> <vzRadarMps> <confidence> <validFrames> <confidenceThreshold> <maxSpeedMps> <sceneResidualMps> <sceneMinInliers>";
@@ -1624,7 +1586,7 @@ void MmwDemo_CLIInit (uint8_t taskPriority)
     cnt++;
 
     cliCfg.tableEntry[cnt].cmd            = "navMonitor";
-    cliCfg.tableEntry[cnt].helpString     = "<subFrameIdx> <surfaceTLV12> <targetTLV13>";
+    cliCfg.tableEntry[cnt].helpString     = "<subFrameIdx> <surfaceTLV12>";
     cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLINavMonitor;
     cnt++;
 
@@ -1816,7 +1778,6 @@ static int32_t MmwDemo_CLINavPointCfg(int32_t argc, char *argv[])
     cfg.surfaceElevationNeighborBins = (uint16_t)elevationNeighborBins;
     cfg.maxSurfacePoints = (uint16_t)maxSurface;
     cfg.uartMaxSurfacePoints = (uint16_t)maxSurface;
-    cfg.maxDiscretePoints = (uint16_t)maxDiscrete;
 
     extern MmwDemo_HSRAM gHSRAM;
     sharedCfg = (volatile MmwDemo_NavCliCfg *)&gHSRAM.navCfg;
@@ -1824,14 +1785,12 @@ static int32_t MmwDemo_CLINavPointCfg(int32_t argc, char *argv[])
     if (sharedCfg->isValid != 0U)
     {
         surfaceMask = sharedCfg->enabledSurfaceMask;
-        targetMask = sharedCfg->enabledTargetMask;
         nextGeneration = sharedCfg->isValid + 1U;
     }
     else
     {
         MmwDemo_CLIInitNavDefaults(sharedCfg);
         surfaceMask = 0U;
-        targetMask = 0U;
         nextGeneration = 1U;
     }
     if (nextGeneration == 0U)
@@ -1852,12 +1811,10 @@ static int32_t MmwDemo_CLINavPointCfg(int32_t argc, char *argv[])
     sharedCfg->surfaceRangeToleranceBins = cfg.surfaceRangeToleranceBins;
     sharedCfg->maxSurfacePoints = cfg.maxSurfacePoints;
     sharedCfg->uartMaxSurfacePoints = cfg.uartMaxSurfacePoints;
-    sharedCfg->maxDiscretePoints = cfg.maxDiscretePoints;
     sharedCfg->surfaceMinRunLength = cfg.surfaceMinRunLength;
     sharedCfg->surfaceElevationNeighborBins =
         cfg.surfaceElevationNeighborBins;
     sharedCfg->enabledSurfaceMask = surfaceMask;
-    sharedCfg->enabledTargetMask = targetMask;
     for (timingSubFrame = 0U;
          timingSubFrame < RL_MAX_SUBFRAMES;
          timingSubFrame++)
@@ -1869,101 +1826,6 @@ static int32_t MmwDemo_CLINavPointCfg(int32_t argc, char *argv[])
                 ((surfaceMask & (1U << timingSubFrame)) != 0U) ? 1U : 0U,
                 ((targetMask & (1U << timingSubFrame)) != 0U) ? 1U : 0U);
     }
-    MEM_BARRIER();
-    sharedCfg->isValid = nextGeneration;
-    MEM_BARRIER();
-    Hwi_restore(key);
-    return 0;
-}
-
-/** Configure deterministic Cartesian DBSCAN and wall-shape classification. */
-static int32_t MmwDemo_CLINavClusterCfg(int32_t argc, char *argv[])
-{
-    volatile MmwDemo_NavCliCfg *sharedCfg;
-    int32_t enabled;
-    int32_t minPoints;
-    int32_t maxPoints;
-    int32_t maxClusters;
-    float epsilonM;
-    float rangeScale;
-    float wallMinLengthM;
-    float wallMaxThicknessM;
-    float wallMinAspect;
-    float staticVelocityMps;
-    uint8_t nextGeneration;
-    UInt key;
-
-    if (argc != 11)
-    {
-        CLI_write("Error: navClusterCfg expects 10 arguments.\n");
-        return -1;
-    }
-    epsilonM = (float)atof(argv[2]);
-    rangeScale = (float)atof(argv[3]);
-    wallMinLengthM = (float)atof(argv[7]);
-    wallMaxThicknessM = (float)atof(argv[8]);
-    wallMinAspect = (float)atof(argv[9]);
-    staticVelocityMps = (float)atof(argv[10]);
-    if ((MmwDemo_CLIParseInt32(argv[1], 0, 1, &enabled) < 0) ||
-        (MmwDemo_CLIParseInt32(argv[4], 2, 32, &minPoints) < 0) ||
-        (MmwDemo_CLIParseInt32(argv[5], 16,
-                               MMWDEMO_NAV_DBSCAN_MAX_POINTS,
-                               &maxPoints) < 0) ||
-        (MmwDemo_CLIParseInt32(argv[6], 1,
-                               MMWDEMO_NAV_DBSCAN_MAX_CLUSTERS,
-                               &maxClusters) < 0) ||
-        (!isfinite(epsilonM)) || (epsilonM < 0.02f) ||
-        (epsilonM > 2.0f) ||
-        (!isfinite(rangeScale)) || (rangeScale < 0.0f) ||
-        (rangeScale > 0.25f) ||
-        (!isfinite(wallMinLengthM)) || (wallMinLengthM < 0.20f) ||
-        (wallMinLengthM > 20.0f) ||
-        (!isfinite(wallMaxThicknessM)) ||
-        (wallMaxThicknessM < 0.02f) ||
-        (wallMaxThicknessM > 3.0f) ||
-        (!isfinite(wallMinAspect)) || (wallMinAspect < 1.0f) ||
-        (wallMinAspect > 50.0f) ||
-        (!isfinite(staticVelocityMps)) ||
-        (staticVelocityMps < 0.0f) || (staticVelocityMps > 5.0f))
-    {
-        CLI_write("Error: navClusterCfg values are outside supported bounds.\n");
-        return -1;
-    }
-
-    extern MmwDemo_HSRAM gHSRAM;
-    sharedCfg = (volatile MmwDemo_NavCliCfg *)&gHSRAM.navCfg;
-    key = Hwi_disable();
-    if (sharedCfg->isValid == 0U)
-    {
-        MmwDemo_CLIInitNavDefaults(sharedCfg);
-        nextGeneration = 1U;
-    }
-    else
-    {
-        nextGeneration = sharedCfg->isValid + 1U;
-        if (nextGeneration == 0U)
-        {
-            nextGeneration = 1U;
-        }
-    }
-    if ((uint16_t)maxPoints < sharedCfg->sceneMinInliers)
-    {
-        Hwi_restore(key);
-        CLI_write("Error: DBSCAN maxPoints must be >= sceneMinInliers.\n");
-        return -1;
-    }
-    sharedCfg->isValid = 0U;
-    MEM_BARRIER();
-    sharedCfg->dbscanEnabled = (uint8_t)enabled;
-    sharedCfg->dbscanMinPoints = (uint8_t)minPoints;
-    sharedCfg->dbscanMaxPoints = (uint16_t)maxPoints;
-    sharedCfg->dbscanMaxClusters = (uint8_t)maxClusters;
-    sharedCfg->dbscanEpsilonM = epsilonM;
-    sharedCfg->dbscanRangeScale = rangeScale;
-    sharedCfg->wallMinLengthM = wallMinLengthM;
-    sharedCfg->wallMaxThicknessM = wallMaxThicknessM;
-    sharedCfg->wallMinAspectRatio = wallMinAspect;
-    sharedCfg->staticVelocityThresholdMps = staticVelocityMps;
     MEM_BARRIER();
     sharedCfg->isValid = nextGeneration;
     MEM_BARRIER();
@@ -2007,7 +1869,7 @@ static int32_t MmwDemo_CLINavEgoCfg(int32_t argc, char *argv[])
                                MMWDEMO_NAV_EGO_MODE_SCENE, &mode) < 0) ||
         (MmwDemo_CLIParseInt32(argv[6], 1, 1000, &validFrames) < 0) ||
         (MmwDemo_CLIParseInt32(argv[10], 3,
-                               MMWDEMO_NAV_DBSCAN_MAX_POINTS,
+                               MMWDEMO_NAV_MAX_SURFACE_POINTS,
                                &sceneMinInliers) < 0) ||
         (!isfinite(velocityX)) || (!isfinite(velocityY)) ||
         (!isfinite(velocityZ)) ||
@@ -2042,12 +1904,7 @@ static int32_t MmwDemo_CLINavEgoCfg(int32_t argc, char *argv[])
             nextGeneration = 1U;
         }
     }
-    if ((uint16_t)sceneMinInliers > sharedCfg->dbscanMaxPoints)
-    {
-        Hwi_restore(key);
-        CLI_write("Error: sceneMinInliers must be <= DBSCAN maxPoints.\n");
-        return -1;
-    }
+
     sharedCfg->isValid = 0U;
     MEM_BARRIER();
     sharedCfg->egoMode = (uint8_t)mode;

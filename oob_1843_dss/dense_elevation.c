@@ -62,17 +62,27 @@ static far int16_t
     gDenseDopplerFft[MMWDEMO_DENSE_ELEV_MAX_VIRTUAL_ANTENNAS]
                     [2U * MMWDEMO_DENSE_ELEV_MAX_DOPPLER_BINS];
 
-#pragma DATA_SECTION(gDenseFftInput, ".l3ram");
+#pragma DATA_SECTION(gDenseFftInput, ".l1dscratch");
 #pragma DATA_ALIGN(gDenseFftInput, 8);
-static far int16_t gDenseFftInput[2U * MMWDEMO_DENSE_ELEV_MAX_DOPPLER_BINS];
+/* P1.3: L1D SRAM (0 wait-state). Written/cleared for every range bin Ă— TX Ă— RX
+ * iteration.  At 128 Doppler bins Ă— 12 antennas Ă— ~100 occupied range bins,
+ * this 512-byte buffer is touched 1,200+ times per frame. */
+static int16_t gDenseFftInput[2U * MMWDEMO_DENSE_ELEV_MAX_DOPPLER_BINS];
 
-#pragma DATA_SECTION(gDenseFftTwiddle, ".l3ram");
+#pragma DATA_SECTION(gDenseFftTwiddle, ".l1dscratch");
 #pragma DATA_ALIGN(gDenseFftTwiddle, 8);
-static far int16_t gDenseFftTwiddle[2U * MMWDEMO_DENSE_ELEV_MAX_DOPPLER_BINS];
+/* P1.3: L1D SRAM (0 wait-state). Read-only after geometry reconfiguration;
+ * passed as the W-table argument to DSP_fft16x16() for every antenna Ă—
+ * range bin call.  Constant per Doppler bin count so cache-warming would
+ * help, but L1D placement guarantees zero-wait-state access. */
+static int16_t gDenseFftTwiddle[2U * MMWDEMO_DENSE_ELEV_MAX_DOPPLER_BINS];
 
-#pragma DATA_SECTION(gDenseDetRowScratch, ".l3ram");
+#pragma DATA_SECTION(gDenseDetRowScratch, ".l1dscratch");
 #pragma DATA_ALIGN(gDenseDetRowScratch, 8);
-static far uint16_t gDenseDetRowScratch[MMWDEMO_DENSE_ELEV_MAX_DOPPLER_BINS];
+/* P1.3: L1D SRAM (0 wait-state). Written then read by Shell Sort for every
+ * range bin to compute the median noise floor.  256 bytes in L3 would
+ * generate a cache miss on every Shell Sort gap iteration. */
+static uint16_t gDenseDetRowScratch[MMWDEMO_DENSE_ELEV_MAX_DOPPLER_BINS];
 
 #pragma DATA_SECTION(gDenseAzPower, ".l3ram");
 #pragma DATA_ALIGN(gDenseAzPower, 8);
@@ -697,27 +707,7 @@ static uint16_t MmwDemo_DenseElevation_selectDopplerCandidates(
     return count;
 }
 
-static int32_t MmwDemo_DenseElevation_quantizeElevation(float v)
-{
-    float scaled = v *
-        ((float)MMWDEMO_DENSE_ELEV_NUM_ELEVATION_BINS * 0.5f);
-    int32_t signedBin = (scaled >= 0.0f) ? (int32_t)(scaled + 0.5f)
-                                         : (int32_t)(scaled - 0.5f);
 
-    if (signedBin >
-        ((int32_t)MMWDEMO_DENSE_ELEV_NUM_ELEVATION_BINS / 2 - 1))
-    {
-        signedBin =
-            (int32_t)MMWDEMO_DENSE_ELEV_NUM_ELEVATION_BINS / 2 - 1;
-    }
-    if (signedBin <
-        -((int32_t)MMWDEMO_DENSE_ELEV_NUM_ELEVATION_BINS / 2))
-    {
-        signedBin =
-            -((int32_t)MMWDEMO_DENSE_ELEV_NUM_ELEVATION_BINS / 2);
-    }
-    return signedBin;
-}
 
 static uint8_t MmwDemo_DenseElevation_sector(int8_t signedAzimuth)
 {
@@ -1029,21 +1019,150 @@ static void MmwDemo_DenseElevation_processDoppler(
                 ? (int32_t)azimuth
                 : (int32_t)azimuth -
                   (int32_t)MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
-        float v = (float)gDenseAzSourceVQ15[azimuth] / 32767.0f;
-        int32_t signedE = MmwDemo_DenseElevation_quantizeElevation(v);
         int32_t signedD =
             (candidate->index < (staticCfg->numDopplerBins / 2U))
                 ? (int32_t)candidate->index
                 : (int32_t)candidate->index -
                   (int32_t)staticCfg->numDopplerBins;
+                  
+        int32_t left = azimuth;
+        int32_t right = azimuth;
+        float powerDropThreshold = gDenseAzPower[azimuth] / 4.0f;  /* -6 dB */
+        float sumPower = 0.0f;
+        float sumAz = 0.0f;
+        /* Elevation aggregation across the azimuth region:
+         *   v_cm    = Î£(v_i * P_i) / Î£(P_i)   [weighted centroid, Q15]
+         *   v_min/v_max track the span of valid elevation estimates in the
+         *              region, giving a physical sense of surface height. */
+        float sumVPower = 0.0f;   /* numerator:   Î£(v_i * P_i) */
+        float sumVValid = 0.0f;   /* denominator: Î£(P_i) for valid v bins */
+        float v_min = 1.0f;
+        float v_max = -1.0f;
+        float u_cm, u_width;
+        float v_cm, v_width;
+        uint16_t distance;
+        int32_t i;
         MmwDemo_DenseElevation_OutputSample sample;
 
-        sample.rangeIdx = rangeIdx;
-        sample.azimuthIdx = (int8_t)signedA;
-        sample.elevationIdx = (int8_t)signedE;
-        sample.dopplerIdx = (int16_t)signedD;
-        sample.snrDb10 = candidate->snrDb10;
-        sample.sourceVQ15 = gDenseAzSourceVQ15[azimuth];
+        while (1)
+        {
+            int32_t nextLeft = left - 1;
+            if (nextLeft < 0)
+            {
+                nextLeft += MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
+            }
+            if ((gDenseAzValid[nextLeft] == 0U) ||
+                (gDenseAzPower[nextLeft] < powerDropThreshold) ||
+                (MmwDemo_DenseElevation_circularDistance((uint16_t)azimuth, (uint16_t)nextLeft, MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS) > 4U))
+            {
+                break;
+            }
+            left = nextLeft;
+        }
+
+        while (1)
+        {
+            int32_t nextRight = right + 1;
+            if (nextRight >= MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS)
+            {
+                nextRight -= MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
+            }
+            if ((gDenseAzValid[nextRight] == 0U) ||
+                (gDenseAzPower[nextRight] < powerDropThreshold) ||
+                (MmwDemo_DenseElevation_circularDistance((uint16_t)azimuth, (uint16_t)nextRight, MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS) > 4U))
+            {
+                break;
+            }
+            right = nextRight;
+        }
+
+        i = left;
+        while (1)
+        {
+            int32_t signedI = (i < (MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS / 2U))
+                                  ? i
+                                  : i - MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
+            float pi = gDenseAzPower[i];
+            sumPower += pi;
+            sumAz += (float)signedI * pi;
+
+            /* Accumulate weighted elevation estimate from every valid bin in
+             * the region. Bins without a valid elevation phase (gDenseAzValid
+             * cleared by the FOV or power quality filter) are excluded from
+             * the elevation statistics but still contribute to azimuth CoM. */
+            if (gDenseAzValid[i] != 0U)
+            {
+                float vi = (float)gDenseAzSourceVQ15[i] / 32767.0f;
+                sumVPower += vi * pi;
+                sumVValid += pi;
+                if (vi < v_min)
+                {
+                    v_min = vi;
+                }
+                if (vi > v_max)
+                {
+                    v_max = vi;
+                }
+            }
+            if (i == right)
+            {
+                break;
+            }
+            i++;
+            if (i >= MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS)
+            {
+                i -= MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
+            }
+        }
+
+        /* Azimuth center-of-mass and angular width (same as before). */
+        u_cm = 2.0f * (sumAz / sumPower) / (float)MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
+        distance = MmwDemo_DenseElevation_circularDistance((uint16_t)left, (uint16_t)right,
+                       MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS);
+        u_width = 2.0f * (float)distance / (float)MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
+
+        /* Elevation weighted centroid and span across the region.
+         * v_cm  : sub-bin accurate elevation using all valid bins in region.
+         * v_width: physical elevation extent (max - min elevation sine).
+         *
+         * If no bin in the region passed the elevation quality filter, fall
+         * back to the peak-bin estimate (safe, consistent with v6 behaviour). */
+        if (sumVValid > 0.0f)
+        {
+            v_cm    = sumVPower / sumVValid;
+            v_width = (v_max >= v_min) ? (v_max - v_min) : 0.0f;
+        }
+        else
+        {
+            /* Fallback: single-bin estimate from the peak azimuth bin. */
+            v_cm    = (float)gDenseAzSourceVQ15[azimuth] / 32767.0f;
+            v_width = 0.0f;
+        }
+
+        if (u_cm < -1.0f) { u_cm = -1.0f; }
+        if (u_cm >  1.0f) { u_cm =  1.0f; }
+        if (u_width > 2.0f) { u_width = 2.0f; }
+        /* Clamp elevation: v is sin(elevation) âˆˆ [-1, 1]; width âˆˆ [0, 2]. */
+        if (v_cm < -1.0f) { v_cm = -1.0f; }
+        if (v_cm >  1.0f) { v_cm =  1.0f; }
+        if (v_width < 0.0f)  { v_width = 0.0f; }
+        if (v_width > 2.0f)  { v_width = 2.0f; }
+
+        sample.rangeIdx           = rangeIdx;
+        sample.azimuthIdx         = (int8_t)signedA;
+        sample.reserved0          = 0U;
+        sample.dopplerIdx         = (int16_t)signedD;
+        sample.azimuthUQ15        = (int16_t)(u_cm * 32767.0f);
+        sample.azimuthWidthUQ15   = (uint16_t)(u_width * 32767.0f);
+        sample.snrDb10            = candidate->snrDb10;
+        /* sourceVQ15: weighted elevation centroid over the full 6-dB azimuth
+         * region, not just the peak bin. Improves accuracy on extended
+         * surfaces where elevation varies across the illuminated footprint. */
+        sample.sourceVQ15         = MmwDemo_DenseElevation_sourceVToQ15(v_cm);
+        /* elevationWidthUQ15: span of sin(elevation) across the region.
+         * Encodes the physical height extent of the reflecting surface. */
+        sample.elevationWidthUQ15 = (uint16_t)(v_width * 32767.0f);
+        sample.reserved1          = 0U;
         {
             float power = gDenseAzPower[azimuth];
             if (!(power > 0.0f) || !isfinite(power))

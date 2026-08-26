@@ -28,7 +28,7 @@ extern "C" {
 #define MMWDEMO_DENSE_ELEV_MAX_OUTPUT_SAMPLES     (1536U)
 
 #define MMWDEMO_DENSE_ELEVATION_MAGIC             (0x44454C56U) /* DELV */
-#define MMWDEMO_DENSE_ELEVATION_PROTOCOL_VERSION  (7U)
+#define MMWDEMO_DENSE_ELEVATION_PROTOCOL_VERSION  (8U)
 
 /* V7 is one complete radar frame, never a rolling or cross-frame sweep. */
 #define MMWDEMO_DENSE_FLAG_CFAR_BYPASSED           (1U << 0)
@@ -82,18 +82,23 @@ typedef struct MmwDemo_DenseElevation_Cfg_t
  * estimate used by the firmware FOV filter. elevationIdx is display-only. */
 typedef struct MmwDemo_DenseElevation_OutputSample_t
 {
-    uint16_t rangeIdx;
-    int8_t   azimuthIdx;   /* -32 .. +31, u = 2*index/64 */
-    int8_t   elevationIdx; /*  -8 ..  +7, quantized compatibility value */
-    int16_t  dopplerIdx;   /* signed Doppler bin */
-    uint16_t snrDb10;      /* detMatrix peak over range-row median, 0.1 dB */
-    int16_t  sourceVQ15;   /* continuous v=sin(elevation), Q15 */
-    int16_t  powerDb10;    /* Raw beamformed digital power at the steered
-                            * direction, 100*log10(power), in 0.1 dB units.
-                            * It is not calibrated dBm and remains dependent on
-                            * FFT/window/profile scaling. INT16_MIN means that
-                            * the power was zero or non-finite. */
-} MmwDemo_DenseElevation_OutputSample;
+    uint16_t rangeIdx;           /*!< Range bin index.                              Offset 0  */
+    int8_t   azimuthIdx;         /*!< Integer peak bin, -32..+31, sector limiter.   Offset 2  */
+    uint8_t  reserved0;          /*!< Pad â€” must be zero on transmit.               Offset 3  */
+    int16_t  dopplerIdx;         /*!< Signed Doppler bin.                           Offset 4  */
+    int16_t  azimuthUQ15;        /*!< Weighted CoM u=sin(azimuth), Q15.             Offset 6  */
+    uint16_t azimuthWidthUQ15;   /*!< Angular width in u-space (6-dB region), Q15. Offset 8  */
+    uint16_t snrDb10;            /*!< Peak minus median noise, 0.1 dB units.        Offset 10 */
+    int16_t  sourceVQ15;         /*!< Weighted CoM v=sin(elevation), Q15.           Offset 12 */
+    int16_t  powerDb10;          /*!< 100*log10(beamformed power), 0.1 dB units.
+                                  *   INT16_MIN = zero/non-finite.                  Offset 14 */
+    uint16_t elevationWidthUQ15; /*!< Angular width in v-space (region span), Q15. Offset 16 */
+    uint16_t reserved1;          /*!< Reserved â€” zero on transmit.                  Offset 18 */
+} MmwDemo_DenseElevation_OutputSample;   /*!< 20 bytes; protocol v8 */
+
+/* Compile-time size guard (C89-compatible, works on cl6x): */
+typedef char MmwDemo_DenseOutputSampleEarlyCheck[
+    (sizeof(MmwDemo_DenseElevation_OutputSample) == 20U) ? 1 : -1];
 
 /** Header at the beginning of every TLV 11 payload. */
 typedef struct MmwDemo_DenseElevation_OutputHeader_t
@@ -159,23 +164,29 @@ int32_t MmwDemo_DenseElevation_process(
 
 void MmwDemo_DenseElevation_reset(void);
 
-/* Wire ABI checks: ARM and C674 must agree exactly. */
+/* Wire ABI checks: ARM (MSS) and C674x (DSS) must agree exactly.
+ * Protocol version 8: OutputSample is 20 bytes. Any mismatch is a
+ * compile-time error on both cores. */
 typedef char MmwDemo_DenseSampleSizeCheck[
-    (sizeof(MmwDemo_DenseElevation_OutputSample) == 12U) ? 1 : -1];
-typedef char MmwDemo_DenseSamplePowerOffsetCheck[
-    (offsetof(MmwDemo_DenseElevation_OutputSample, powerDb10) == 10U) ? 1 : -1];
+    (sizeof(MmwDemo_DenseElevation_OutputSample) == 20U) ? 1 : -1];
 typedef char MmwDemo_DenseSampleRangeOffsetCheck[
     (offsetof(MmwDemo_DenseElevation_OutputSample, rangeIdx) == 0U) ? 1 : -1];
 typedef char MmwDemo_DenseSampleAzimuthOffsetCheck[
     (offsetof(MmwDemo_DenseElevation_OutputSample, azimuthIdx) == 2U) ? 1 : -1];
-typedef char MmwDemo_DenseSampleElevationOffsetCheck[
-    (offsetof(MmwDemo_DenseElevation_OutputSample, elevationIdx) == 3U) ? 1 : -1];
 typedef char MmwDemo_DenseSampleDopplerOffsetCheck[
     (offsetof(MmwDemo_DenseElevation_OutputSample, dopplerIdx) == 4U) ? 1 : -1];
+typedef char MmwDemo_DenseSampleAzimuthUQ15OffsetCheck[
+    (offsetof(MmwDemo_DenseElevation_OutputSample, azimuthUQ15) == 6U) ? 1 : -1];
+typedef char MmwDemo_DenseSampleAzimuthWidthOffsetCheck[
+    (offsetof(MmwDemo_DenseElevation_OutputSample, azimuthWidthUQ15) == 8U) ? 1 : -1];
 typedef char MmwDemo_DenseSampleSnrOffsetCheck[
-    (offsetof(MmwDemo_DenseElevation_OutputSample, snrDb10) == 6U) ? 1 : -1];
+    (offsetof(MmwDemo_DenseElevation_OutputSample, snrDb10) == 10U) ? 1 : -1];
 typedef char MmwDemo_DenseSampleSourceVOffsetCheck[
-    (offsetof(MmwDemo_DenseElevation_OutputSample, sourceVQ15) == 8U) ? 1 : -1];
+    (offsetof(MmwDemo_DenseElevation_OutputSample, sourceVQ15) == 12U) ? 1 : -1];
+typedef char MmwDemo_DenseSamplePowerOffsetCheck[
+    (offsetof(MmwDemo_DenseElevation_OutputSample, powerDb10) == 14U) ? 1 : -1];
+typedef char MmwDemo_DenseSampleElevWidthOffsetCheck[
+    (offsetof(MmwDemo_DenseElevation_OutputSample, elevationWidthUQ15) == 16U) ? 1 : -1];
 typedef char MmwDemo_DenseHeaderSizeCheck[
     (sizeof(MmwDemo_DenseElevation_OutputHeader) == 44U) ? 1 : -1];
 

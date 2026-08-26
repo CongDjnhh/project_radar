@@ -1,7 +1,7 @@
 /**
  * @file nav_point_gen.h
  *
- * @brief MSS copy of the frame-synchronous navigation wire ABI.
+ * @brief Frame-synchronous navigation point generation and wire ABI.
  */
 
 #ifndef MMWDEMO_NAV_POINT_GEN_H
@@ -15,9 +15,9 @@
 extern "C" {
 #endif
 
-#define MMWDEMO_NAV_MAGIC                    (0x4E415646U)
-#define MMWDEMO_NAV_PROTOCOL_VERSION         (4U)
-#define MMWDEMO_NAV_MAX_SURFACE_POINTS       (1024U)
+#define MMWDEMO_NAV_MAGIC                    (0x4E415646U) /* NAVF */
+#define MMWDEMO_NAV_PROTOCOL_VERSION         (5U)
+#define MMWDEMO_NAV_MAX_SURFACE_POINTS       (512U)
 #define MMWDEMO_NAV_MAX_DISCRETE_POINTS      (128U)
 #define MMWDEMO_NAV_NUM_AZIMUTH_SECTORS      (8U)
 #define MMWDEMO_NAV_NUM_ELEVATION_SECTORS    (64U)
@@ -50,18 +50,56 @@ extern "C" {
 #define MMWDEMO_NAV_ETIME_BUDGET             (-104)
 #define MMWDEMO_NAV_EFRAME_SLACK              (-105)
 
+/** Configuration is fully runtime supplied. Range bounds use [min,max]. */
+typedef struct MmwDemo_NavPointGen_Cfg_t
+{
+    MmwDemo_DenseElevation_Cfg sourceCfg;
+    float    minMovingSpeedMps;
+    uint16_t surfaceRangeToleranceBins;
+    uint16_t maxSurfacePoints;
+    uint16_t uartMaxSurfacePoints;
+    uint16_t maxDiscretePoints;
+    uint8_t  surfaceMinRunLength;
+    uint8_t  surfaceElevationNeighborBins;
+    uint8_t  dbscanEnabled;
+    uint8_t  dbscanMinPoints;
+    uint16_t dbscanMaxPoints;
+    uint8_t  dbscanMaxClusters;
+    uint8_t  egoMode;
+    uint16_t sceneMinInliers;
+    uint16_t egoVelocityValidFrames;
+    uint16_t reserved16;
+    float    dbscanEpsilonM;
+    float    dbscanRangeScale;
+    float    wallMinLengthM;
+    float    wallMaxThicknessM;
+    float    wallMinAspectRatio;
+    float    staticVelocityThresholdMps;
+    float    egoVelocityXMps;
+    float    egoVelocityYMps;
+    float    egoVelocityZMps;
+    float    egoConfidence;
+    float    egoConfidenceThreshold;
+    float    egoMaxSpeedMps;
+    float    sceneResidualThresholdMps;
+    uint32_t egoSequence;
+} MmwDemo_NavPointGen_Cfg;
+
+/** Custom detected object point used in DSS-to-MSS result and TLV 14. */
 typedef struct MmwDemo_NavPoint_t
 {
-    uint16_t rangeIdx;
-    int8_t   azimuthIdx;
-    int8_t   elevationIdx;
-    int16_t  dopplerIdx;
-    uint16_t snrDb10;
-    int16_t  sourceVQ15;
-    int16_t  powerDb10;    /* Uncalibrated/profile-dependent raw beam power,
-                            * 0.1 dB units; INT16_MIN is invalid. */
+    float distance_m;      /*!< Distance / Range in meters.                     */
+    float width_m;         /*!< Physical width in meters.                       */
+    float azimuth_deg;     /*!< Azimuth angle in degrees.                       */
+    float elevation_deg;   /*!< Elevation angle in degrees.                     */
+    float power_db;        /*!< Power / SNR in dB.                              */
 } MmwDemo_NavPoint;
 
+/**
+ * Header followed by numSurfacePoints surface samples, then
+ * numDiscretePoints tracker-input samples. TLV 12 transmits this header and
+ * only the surface portion; the discrete portion remains internal to radar.
+ */
 typedef struct MmwDemo_NavFrameHeader_t
 {
     uint32_t magic;
@@ -96,8 +134,31 @@ typedef struct MmwDemo_NavFrameHeader_t
     uint32_t egoSequence;
 } MmwDemo_NavFrameHeader;
 
+typedef struct MmwDemo_NavPointGen_StaticCfg_t
+{
+    MmwDemo_DenseElevation_StaticCfg sourceStaticCfg;
+    float rangeStepMeters;
+    float dopplerStepMps;
+    float framePeriodSec;
+    float rangeBiasMeters;
+} MmwDemo_NavPointGen_StaticCfg;
+
+int32_t MmwDemo_NavPointGen_process(
+    const MmwDemo_NavPointGen_Cfg *cfg,
+    const MmwDemo_NavPointGen_StaticCfg *staticCfg,
+    uint32_t deadlineStartCycles,
+    uint32_t deadlineOffsetCycles,
+    uint32_t cycleBudget,
+    uint8_t *candidateBuffer,
+    uint32_t candidateBufferSize,
+    uint8_t *navBuffer,
+    uint32_t navBufferSize,
+    uint32_t *navSize);
+
+void MmwDemo_NavPointGen_reset(void);
+
 typedef char MmwDemo_NavPointSizeCheck[
-    (sizeof(MmwDemo_NavPoint) == 12U) ? 1 : -1];
+    (sizeof(MmwDemo_NavPoint) == 20U) ? 1 : -1];
 typedef char MmwDemo_NavHeaderSizeCheck[
     (sizeof(MmwDemo_NavFrameHeader) == 84U) ? 1 : -1];
 

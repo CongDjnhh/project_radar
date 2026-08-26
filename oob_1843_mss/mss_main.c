@@ -629,7 +629,6 @@
 #include "local_inc/mmw_res.h"
 #include "local_inc/mmw_mss.h"
 #include "nav_point_gen.h"
-#include "nav_tracker.h"
 #include <ti/board/antenna_geometry.h>
 #include <ti/demo/utils/mmwdemo_flash.h>
 
@@ -710,10 +709,7 @@ volatile uint32_t gNavTargetUartPacketsSent = 0U;
 volatile uint32_t gNavTargetUartInvalidPayloadCount = 0U;
 volatile uint32_t gNavTargetUartLastPayloadSize = 0U;
 
-#define MMWDEMO_NAV_TARGET_OUTPUT_CAPACITY \
-    (sizeof(MmwDemo_NavTargetHeader) + \
-     MMWDEMO_NAV_MAX_TARGETS * sizeof(MmwDemo_NavTarget))
-static uint8_t gNavTargetOutput[MMWDEMO_NAV_TARGET_OUTPUT_CAPACITY];
+
 
 /* The result-export IOCTL is issued only after the blocking UART transfer.
  * Reserve the complete wire time plus deterministic MSS control/tracker
@@ -893,28 +889,13 @@ static uint8_t MmwDemo_validateNavPayload(
 
     points = (const MmwDemo_NavPoint *)
         ((const uint8_t *)payload + header->headerSize);
-    halfAzimuth = (int16_t)(header->numAzimuthBins / 2U);
-    halfElevation = (int16_t)(header->numElevationBins / 2U);
-    halfDoppler = (int16_t)(header->numDopplerBins / 2U);
-    for (index = 0U;
-         index < (uint32_t)header->numSurfacePoints +
-                 (uint32_t)header->numDiscretePoints;
-         index++)
+    for (index = 0U; index < (uint32_t)header->numSurfacePoints; index++)
     {
-        float u = 2.0f * (float)points[index].azimuthIdx /
-                  (float)header->numAzimuthBins;
-        float v = (float)points[index].sourceVQ15 / 32767.0f;
-        if ((points[index].rangeIdx >= header->numRangeBins) ||
-            (points[index].rangeIdx < header->rangeStart) ||
-            (points[index].rangeIdx >= header->rangeEnd) ||
-            ((int16_t)points[index].azimuthIdx < -halfAzimuth) ||
-            ((int16_t)points[index].azimuthIdx >= halfAzimuth) ||
-            ((int16_t)points[index].elevationIdx < -halfElevation) ||
-            ((int16_t)points[index].elevationIdx >= halfElevation) ||
-            (points[index].dopplerIdx < -halfDoppler) ||
-            (points[index].dopplerIdx >= halfDoppler) ||
-            (points[index].sourceVQ15 == (int16_t)-32768) ||
-            ((u * u + v * v) > 1.001f))
+        if ((points[index].distance_m < 0.0f) ||
+            (!isfinite(points[index].distance_m)) ||
+            (!isfinite(points[index].width_m)) ||
+            (!isfinite(points[index].elevation_deg)) ||
+            (!isfinite(points[index].power_db)))
         {
             return 0U;
         }
@@ -930,56 +911,7 @@ static uint8_t MmwDemo_validateNavTargetPayload(
     uint32_t radarFrameNumber,
     uint16_t subFrameNumber)
 {
-    const MmwDemo_NavTargetHeader *header =
-        (const MmwDemo_NavTargetHeader *)payload;
-    uint32_t expectedSize;
-    uint32_t index;
-    const MmwDemo_NavTarget *targets;
-
-    if ((payload == NULL) ||
-        (payloadSize < sizeof(MmwDemo_NavTargetHeader)) ||
-        (header->magic != MMWDEMO_NAV_TARGET_MAGIC) ||
-        (header->version != MMWDEMO_NAV_TARGET_PROTOCOL_VERSION) ||
-        (header->headerSize != sizeof(MmwDemo_NavTargetHeader)) ||
-        (header->targetSize != sizeof(MmwDemo_NavTarget)) ||
-        (header->numTargets > MMWDEMO_NAV_MAX_TARGETS) ||
-        (header->radarFrameNumber != radarFrameNumber) ||
-        (header->subFrameNumber != subFrameNumber))
-    {
-        return 0U;
-    }
-    expectedSize = (uint32_t)header->headerSize +
-        (uint32_t)header->numTargets * (uint32_t)header->targetSize;
-    if (expectedSize != payloadSize)
-    {
-        return 0U;
-    }
-    targets = (const MmwDemo_NavTarget *)
-        ((const uint8_t *)payload + header->headerSize);
-    for (index = 0U; index < header->numTargets; index++)
-    {
-        if ((!isfinite(targets[index].posX)) ||
-            (!isfinite(targets[index].posY)) ||
-            (!isfinite(targets[index].posZ)) ||
-            (!isfinite(targets[index].velX)) ||
-            (!isfinite(targets[index].velY)) ||
-            (!isfinite(targets[index].velZ)) ||
-            (!isfinite(targets[index].accX)) ||
-            (!isfinite(targets[index].accY)) ||
-            (!isfinite(targets[index].accZ)) ||
-            (!isfinite(targets[index].dimX)) ||
-            (!isfinite(targets[index].dimY)) ||
-            (!isfinite(targets[index].dimZ)) ||
-            (!isfinite(targets[index].confidence)) ||
-            (targets[index].dimX < 0.0f) ||
-            (targets[index].dimY < 0.0f) ||
-            (targets[index].dimZ < 0.0f) ||
-            (targets[index].confidence < 0.0f))
-        {
-            return 0U;
-        }
-    }
-    return 1U;
+    return 0U;
 }
 
 static void MmwDemo_transmitProcessedOutput
@@ -1397,9 +1329,7 @@ void MmwDemo_CfgUpdate(void *srcPtr, uint32_t offset, uint32_t size, int8_t subF
                 uint8_t surfaceEnabled =
                     ((sharedCfg->enabledSurfaceMask & (1U << indx)) != 0U)
                         ? 1U : 0U;
-                uint8_t targetEnabled =
-                    ((sharedCfg->enabledTargetMask & (1U << indx)) != 0U)
-                        ? 1U : 0U;
+                uint8_t targetEnabled = 0U;
                 sharedCfg->postProcReserveUsec[indx] =
                     MmwDemo_getNavPostProcReserveUsecForState(
                         indx, maxSurfacePoints,
@@ -1607,15 +1537,8 @@ static void MmwDemo_transmitProcessedOutput
      * numTLVs, totalPacketLen and each tl[] entry describe the same packet. */
     if ((navSurfacePayload != NULL) && (navSurfacePayloadSize != 0U))
     {
-        tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_NAV_SURFACE_POINTS;
+        tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_DETECTED_OBJECTS_CUSTOM;
         tl[tlvIdx].length = navSurfacePayloadSize;
-        packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
-        tlvIdx++;
-    }
-    if ((navTargetPayload != NULL) && (navTargetPayloadSize != 0U))
-    {
-        tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_NAV_TARGET_LIST;
-        tl[tlvIdx].length = navTargetPayloadSize;
         packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
         tlvIdx++;
     }
@@ -1718,14 +1641,7 @@ static void MmwDemo_transmitProcessedOutput
         tlvIdx++;
     }
 
-    if ((navTargetPayload != NULL) && (navTargetPayloadSize != 0U))
-    {
-        MMWDEMO_UART_WRITE_OR_EXIT(
-            &tl[tlvIdx], sizeof(MmwDemo_output_message_tl));
-        MMWDEMO_UART_WRITE_OR_EXIT(
-            navTargetPayload, navTargetPayloadSize);
-        tlvIdx++;
-    }
+
 
     /* Send Range profile */
     if (pGuiMonSel->logMagRange)
@@ -2165,12 +2081,6 @@ uint32_t MmwDemo_getNavPostProcReserveUsecForState(
             sizeof(MmwDemo_NavFrameHeader) +
             (uint64_t)maxSurfacePoints * sizeof(MmwDemo_NavPoint);
     }
-    if (targetEnabled != 0U)
-    {
-        packetBytes += sizeof(MmwDemo_output_message_tl) +
-            sizeof(MmwDemo_NavTargetHeader) +
-            (uint64_t)MMWDEMO_NAV_MAX_TARGETS * sizeof(MmwDemo_NavTarget);
-    }
     if (gui->logMagRange != 0U)
     {
         packetBytes += sizeof(MmwDemo_output_message_tl) +
@@ -2243,9 +2153,7 @@ static uint32_t MmwDemo_getNavPostProcReserveUsec(uint8_t subFrameIdx)
         surfaceEnabled =
             ((sharedCfg->enabledSurfaceMask & (1U << subFrameIdx)) != 0U)
                 ? 1U : 0U;
-        targetEnabled =
-            ((sharedCfg->enabledTargetMask & (1U << subFrameIdx)) != 0U)
-                ? 1U : 0U;
+        targetEnabled = 0U;
     }
     Hwi_restore(key);
     return MmwDemo_getNavPostProcReserveUsecForState(
@@ -3359,9 +3267,7 @@ static void MmwDemo_handleObjectDetResult
             navSurfaceOutputEnabled =
                 ((sharedNavFeedbackCfg->enabledSurfaceMask &
                   (1U << currSubFrameIdx)) != 0U) ? 1U : 0U;
-            navTargetOutputEnabled =
-                ((sharedNavFeedbackCfg->enabledTargetMask &
-                  (1U << currSubFrameIdx)) != 0U) ? 1U : 0U;
+            navTargetOutputEnabled = 0U;
             if ((sharedNavFeedbackCfg->maxSurfacePoints != 0U) &&
                 (sharedNavFeedbackCfg->maxSurfacePoints <=
                  MMWDEMO_NAV_MAX_SURFACE_POINTS))
@@ -3601,26 +3507,6 @@ static void MmwDemo_handleObjectDetResult
         {
             navSurfacePayloadSize = 0U;
         }
-        if (navTargetEnabled != 0U)
-        {
-            MmwDemo_NavTracker_setMotionThreshold(
-                navStaticVelocityThresholdMps);
-            (void)MmwDemo_NavTracker_process(
-                navPayload,
-                navPayloadSize,
-                gNavTargetOutput,
-                sizeof(gNavTargetOutput),
-                &navTargetPayloadSize);
-            if (MmwDemo_validateNavTargetPayload(
-                    gNavTargetOutput,
-                    navTargetPayloadSize,
-                    dpcStatsForNav->frameStartIntCounter,
-                    currSubFrameIdx) == 0U)
-            {
-                navTargetPayloadSize = 0U;
-                gNavTargetUartInvalidPayloadCount++;
-            }
-        }
     }
     else if ((navPayload != NULL) || (navPayloadSize != 0U))
     {
@@ -3630,12 +3516,7 @@ static void MmwDemo_handleObjectDetResult
         gNavSurfaceUartInvalidPayloadCount++;
     }
 
-    if ((navTargetWasEnabled[currSubFrameIdx] != 0U) &&
-        (navTargetEnabled == 0U))
-    {
-        MmwDemo_NavTracker_resetSubFrame(currSubFrameIdx);
-    }
-    navTargetWasEnabled[currSubFrameIdx] = navTargetEnabled;
+    navTargetWasEnabled[currSubFrameIdx] = 0U;
 
     /* Transmit processing results for the frame */
     navSurfacePacketsBefore = gNavSurfaceUartPacketsSent;
@@ -3645,9 +3526,8 @@ static void MmwDemo_handleObjectDetResult
                                     (navSurfacePayloadSize != 0U) ?
                                         navPayload : NULL,
                                     navSurfacePayloadSize,
-                                    (navTargetPayloadSize != 0U) ?
-                                        gNavTargetOutput : NULL,
-                                    navTargetPayloadSize);
+                                    NULL,
+                                    0U);
     if (gNavSurfaceUartPacketsSent != navSurfacePacketsBefore)
     {
         lastNavSurfacePayloadSize[currSubFrameIdx] = navSurfacePayloadSize;
@@ -4048,9 +3928,6 @@ int32_t MmwDemo_startSensor(void)
 {
     int32_t     errCode;
     MMWave_CalibrationCfg   calibrationCfg;
-
-    /* Never carry target state across independent sensor runs. */
-    MmwDemo_NavTracker_reset();
 
     /*****************************************************************************
      * Data path :: start data path first - this will pend for DPC to ack
