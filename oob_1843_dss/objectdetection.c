@@ -43,13 +43,14 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+#include <c6x.h>
 
 #define DBG_DPC_OBJDET
 
 /* Navigation builds do not spend inter-frame time on the legacy TI CFAR/AoA
  * chain. Override to 1 at compile time only for OOB comparison builds. */
 #ifndef MMWDEMO_ENABLE_LEGACY_CFAR_AOA
-#define MMWDEMO_ENABLE_LEGACY_CFAR_AOA (1)
+#define MMWDEMO_ENABLE_LEGACY_CFAR_AOA (0)
 #endif
 
 /* mmWave SDK Include Files: */
@@ -74,14 +75,7 @@
      sizeof(MmwDemo_DenseElevation_OutputSample))
 far uint8_t gNavCandidateScratch[MMWDEMO_NAV_CANDIDATE_SCRATCH_SIZE];
 
-#define MMWDEMO_NAV_OUTPUT_SIZE \
-    (sizeof(MmwDemo_NavFrameHeader) + \
-     (MMWDEMO_NAV_MAX_SURFACE_POINTS + \
-      MMWDEMO_NAV_MAX_DISCRETE_POINTS) * sizeof(MmwDemo_NavPoint))
-#pragma DATA_SECTION(gNavFrameOutput, ".l3ram");
-#pragma DATA_ALIGN(gNavFrameOutput, 8);
-far uint8_t gNavFrameOutput[MMWDEMO_NAV_OUTPUT_SIZE];
-static MmwDemo_AuxResult gMmwAuxResult;
+/* Standard TLV1/TLV7 path: Points are written directly to DPC result buffers (detObjOut/detObjOutSideInfo). */
 
 /* CCS-visible navigation diagnostics. */
 volatile int32_t gNavLastProcessError = 0;
@@ -103,9 +97,7 @@ volatile uint32_t gNavTimingMaxResultExportedCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFR
 #define MMWDEMO_NAV_DSP_CLOCK_MHZ             (600U)
 #define MMWDEMO_NAV_DEADLINE_GUARD_USEC       (5000U)
 
-/* Written by the frame-start callback and read by the DPC task. */
-static volatile uint32_t gNavLastFrameStart[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
-static volatile uint32_t gNavFramePeriodCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
+/* Timing and rate configurations received from MSS. */
 static uint32_t gNavConfiguredFramePeriodUsec[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 static uint32_t gNavTrackingPeriodUsec[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 static uint32_t gNavPostProcReserveUsec[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
@@ -125,34 +117,8 @@ MmwDemo_NavPointGen_Cfg gNavPointCfg = {
         .snrThresholdDb = 20.0f
     },
     .minMovingSpeedMps = 0.15f,
-    .surfaceRangeToleranceBins = 2U,
     .maxSurfacePoints = 384U,
-    .uartMaxSurfacePoints = 384U,
-    .maxDiscretePoints = 96U,
-    .surfaceMinRunLength = 6U,
-    .surfaceElevationNeighborBins = 1U,
-    .dbscanEnabled = 0U,
-    .dbscanMinPoints = 4U,
-    .dbscanMaxPoints = 96U,
-    .dbscanMaxClusters = 16U,
-    .dbscanEpsilonM = 0.5f,
-    .dbscanRangeScale = 0.1f,
-    .wallMinLengthM = 1.0f,
-    .wallMaxThicknessM = 0.5f,
-    .wallMinAspectRatio = 2.0f,
-    .egoMode = MMWDEMO_NAV_EGO_MODE_SCENE,
-    .sceneMinInliers = 12U,
-    .egoVelocityValidFrames = 5U,
-    .reserved16 = 0U,
-    .staticVelocityThresholdMps = 0.20f,
-    .egoVelocityXMps = 0.0f,
-    .egoVelocityYMps = 0.0f,
-    .egoVelocityZMps = 0.0f,
-    .egoConfidence = 0.0f,
-    .egoConfidenceThreshold = 0.55f,
-    .egoMaxSpeedMps = 8.0f,
-    .sceneResidualThresholdMps = 0.30f,
-    .egoSequence = 1U
+    .uartMaxSurfacePoints = 384U
 };
 
 #if defined(USE_2D_AOA_DPU)
@@ -352,23 +318,6 @@ static void *DPC_ObjDet_MemPoolGet(MemPoolObj *pool)
     return((void *)pool->currAddr);
 }
 
-#if 0 /* may be useful in future */
-/**
- *  @b Description
- *  @n
- *      Utility function for getting current memory pool usage.
- *
- *  @param[in]  pool Handle to pool object.
- *
- *  @retval
- *      Amount of pool used in bytes.
- */
-static uint32_t DPC_ObjDet_MemPoolGetCurrentUsage(MemPoolObj *pool)
-{
-    return((uint32_t)(pool->currAddr - (uintptr_t)pool->cfg.addr));
-}
-#endif
-
 /**
  *  @b Description
  *  @n
@@ -524,12 +473,6 @@ static void DPC_ObjectDetection_frameStart (DPM_DPCHandle handle)
     if (subFrameNum < MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES)
     {
         gNavTimingNavEndOffsetCycles[subFrameNum] = 0U;
-        if (gNavLastFrameStart[subFrameNum] != 0U)
-        {
-            gNavFramePeriodCycles[subFrameNum] =
-                now - gNavLastFrameStart[subFrameNum];
-        }
-        gNavLastFrameStart[subFrameNum] = now;
     }
 
     DebugP_log2("ObjDet DPC: Frame Start, frameIndx = %d, subFrameIndx = %d\n",
@@ -961,7 +904,7 @@ int32_t DPC_ObjectDetection_execute
     int32_t retVal;
     DPC_ObjectDetection_ExecuteResult *result;
     DPC_ObjectDetection_ProcessCallBackCfg *processCallBack;
-    uint32_t navOutputSize = 0U;
+    uint32_t navOutputPoints = 0U;
     uint32_t navCycleBudget = 0U;
     uint32_t navFrameCycles = 0U;
     uint32_t navPreCycles = 0U;
@@ -1021,7 +964,9 @@ int32_t DPC_ObjectDetection_execute
     /* Snapshot the dynamic navigation configuration. isValid is a generation
      * counter; zero means MSS is in the middle of updating the structure. */
     extern MmwDemo_HSRAM gHSRAM;
+    memset(&navSharedCfg, 0, sizeof(navSharedCfg));
     navShared = (volatile const MmwDemo_NavCliCfg *)&gHSRAM.navCfg;
+    asm(" "); /* compiler memory barrier */
     navCfgSeqBefore = navShared->isValid;
     if (navCfgSeqBefore != 0U)
     {
@@ -1033,32 +978,10 @@ int32_t DPC_ObjectDetection_execute
         navSharedCfg.minMovingSpeedMps = navShared->minMovingSpeedMps;
         navSharedCfg.minRangeBin = navShared->minRangeBin;
         navSharedCfg.maxRangeBin = navShared->maxRangeBin;
-        navSharedCfg.surfaceRangeToleranceBins =
-            navShared->surfaceRangeToleranceBins;
         navSharedCfg.maxSurfacePoints = navShared->maxSurfacePoints;
         navSharedCfg.uartMaxSurfacePoints =
             navShared->uartMaxSurfacePoints;
-
-        navSharedCfg.surfaceMinRunLength = navShared->surfaceMinRunLength;
-        navSharedCfg.surfaceElevationNeighborBins =
-            navShared->surfaceElevationNeighborBins;
         navSharedCfg.enabledSurfaceMask = navShared->enabledSurfaceMask;
-        navSharedCfg.egoMode = navShared->egoMode;
-        navSharedCfg.sceneMinInliers = navShared->sceneMinInliers;
-        navSharedCfg.egoVelocityValidFrames =
-            navShared->egoVelocityValidFrames;
-        navSharedCfg.staticVelocityThresholdMps =
-            navShared->staticVelocityThresholdMps;
-        navSharedCfg.egoVelocityXMps = navShared->egoVelocityXMps;
-        navSharedCfg.egoVelocityYMps = navShared->egoVelocityYMps;
-        navSharedCfg.egoVelocityZMps = navShared->egoVelocityZMps;
-        navSharedCfg.egoConfidence = navShared->egoConfidence;
-        navSharedCfg.egoConfidenceThreshold =
-            navShared->egoConfidenceThreshold;
-        navSharedCfg.egoMaxSpeedMps = navShared->egoMaxSpeedMps;
-        navSharedCfg.sceneResidualThresholdMps =
-            navShared->sceneResidualThresholdMps;
-        navSharedCfg.egoSequence = navShared->egoSequence;
         for (timingIdx = 0U;
              timingIdx < MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES;
              timingIdx++)
@@ -1070,6 +993,7 @@ int32_t DPC_ObjectDetection_execute
             navSharedCfg.postProcReserveUsec[timingIdx] =
                 navShared->postProcReserveUsec[timingIdx];
         }
+        asm(" "); /* compiler memory barrier */
         navCfgSeqAfter = navShared->isValid;
 
         if ((navCfgSeqBefore == navCfgSeqAfter) &&
@@ -1086,38 +1010,15 @@ int32_t DPC_ObjectDetection_execute
             gNavPointCfg.sourceCfg.snrThresholdDb =
                 navSharedCfg.snrThresholdDb;
             gNavPointCfg.sourceCfg.minRangeBin =
-                (uint16_t)navSharedCfg.minRangeBin;
+                (navSharedCfg.minRangeBin > 0) ? (uint16_t)navSharedCfg.minRangeBin : 0U;
             gNavPointCfg.sourceCfg.maxRangeBin =
-                (uint16_t)navSharedCfg.maxRangeBin;
+                (navSharedCfg.maxRangeBin > 0) ? (uint16_t)navSharedCfg.maxRangeBin : 0U;
             gNavPointCfg.minMovingSpeedMps =
                 navSharedCfg.minMovingSpeedMps;
-            gNavPointCfg.surfaceRangeToleranceBins =
-                navSharedCfg.surfaceRangeToleranceBins;
             gNavPointCfg.maxSurfacePoints =
                 navSharedCfg.maxSurfacePoints;
             gNavPointCfg.uartMaxSurfacePoints =
                 navSharedCfg.uartMaxSurfacePoints;
-
-            gNavPointCfg.surfaceMinRunLength =
-                navSharedCfg.surfaceMinRunLength;
-            gNavPointCfg.surfaceElevationNeighborBins =
-                navSharedCfg.surfaceElevationNeighborBins;
-            gNavPointCfg.egoMode = navSharedCfg.egoMode;
-            gNavPointCfg.sceneMinInliers = navSharedCfg.sceneMinInliers;
-            gNavPointCfg.egoVelocityValidFrames =
-                navSharedCfg.egoVelocityValidFrames;
-            gNavPointCfg.staticVelocityThresholdMps =
-                navSharedCfg.staticVelocityThresholdMps;
-            gNavPointCfg.egoVelocityXMps = navSharedCfg.egoVelocityXMps;
-            gNavPointCfg.egoVelocityYMps = navSharedCfg.egoVelocityYMps;
-            gNavPointCfg.egoVelocityZMps = navSharedCfg.egoVelocityZMps;
-            gNavPointCfg.egoConfidence = navSharedCfg.egoConfidence;
-            gNavPointCfg.egoConfidenceThreshold =
-                navSharedCfg.egoConfidenceThreshold;
-            gNavPointCfg.egoMaxSpeedMps = navSharedCfg.egoMaxSpeedMps;
-            gNavPointCfg.sceneResidualThresholdMps =
-                navSharedCfg.sceneResidualThresholdMps;
-            gNavPointCfg.egoSequence = navSharedCfg.egoSequence;
             gNavSurfaceEnabledSubFrameMask =
                 navSharedCfg.enabledSurfaceMask;
 
@@ -1303,26 +1204,40 @@ int32_t DPC_ObjectDetection_execute
         /* The only legal Nav budget is what remains before the next frame
          * after work already consumed and the complete MSS/GTRACK/UART tail.
          * Unsigned subtraction is deliberately guarded against underflow. */
-        if ((navFrameCycles != 0U) && (navFrameCycles > navPreCycles))
+        if (navFrameCycles != 0U)
         {
-            uint32_t available = navFrameCycles - navPreCycles;
-            uint32_t reserve = navGuardCycles;
-
-            /* Guard against overflow when adding the two reserves */
-            if (navPostReserveCycles > (0xFFFFFFFFU - reserve))
+            if (navFrameCycles > navPreCycles)
             {
-                reserve = 0xFFFFFFFFU;
+                uint32_t available = navFrameCycles - navPreCycles;
+                uint32_t reserve = navGuardCycles;
+
+                /* Guard against overflow when adding the two reserves */
+                if (navPostReserveCycles > (0xFFFFFFFFU - reserve))
+                {
+                    reserve = 0xFFFFFFFFU;
+                }
+                else
+                {
+                    reserve += navPostReserveCycles;
+                }
+                navCycleBudget = (available > reserve) ?
+                                 (available - reserve) : 0U;
             }
             else
             {
-                reserve += navPostReserveCycles;
+                /* Frame period already exceeded before Nav started */
+                navCycleBudget = 0U;
             }
-            navCycleBudget = (available > reserve) ?
-                             (available - reserve) : 0U;
         }
         else
         {
-            navCycleBudget = 100000U * MMWDEMO_NAV_DSP_CLOCK_MHZ;
+            /* Fallback when frame timing has not yet been published by MSS.
+             * Use 64-bit arithmetic to prevent uint32 overflow across chirp counts. */
+            uint64_t available64 = ((uint64_t)100000U * MMWDEMO_NAV_DSP_CLOCK_MHZ * subFrmObj->staticCfg.numDopplerChirps) /
+                                   ((subFrmObj->staticCfg.numTxAntennas != 0U) ? subFrmObj->staticCfg.numTxAntennas : 1U);
+            uint32_t available = (available64 > 0xFFFFFFFFULL) ? 0xFFFFFFFFU : (uint32_t)available64;
+            uint32_t reserve   = 3500U * MMWDEMO_NAV_DSP_CLOCK_MHZ;
+            navCycleBudget = (available > reserve) ? (available - reserve) : (100000U * MMWDEMO_NAV_DSP_CLOCK_MHZ);
         }
 
         gNavTimingFrameCycles[objDetObj->subFrameIndx] = navFrameCycles;
@@ -1346,9 +1261,10 @@ int32_t DPC_ObjectDetection_execute
                 navCycleBudget,
                 gNavCandidateScratch,
                 sizeof(gNavCandidateScratch),
-                gNavFrameOutput,
-                sizeof(gNavFrameOutput),
-                &navOutputSize);
+                subFrmObj->dpuCfg.aoaCfg.res.detObjOut,
+                subFrmObj->dpuCfg.aoaCfg.res.detObjOutSideInfo,
+                subFrmObj->dpuCfg.aoaCfg.res.detObjOutMaxSize,
+                &navOutputPoints);
             navProcessingCycles = Cycleprofiler_getTimeStamp() - navStartCycles;
         }
         else
@@ -1369,48 +1285,17 @@ int32_t DPC_ObjectDetection_execute
         gNavLastProcessError = retVal;
         if (retVal != 0)
         {
-            MmwDemo_NavFrameHeader *navErrorHeader =
-                (MmwDemo_NavFrameHeader *)gNavFrameOutput;
-            uint32_t status = (retVal < 0) ?
-                (uint32_t)(0 - retVal) : (uint32_t)retVal;
-
             gNavProcessErrorCount++;
-            memset(navErrorHeader, 0, sizeof(*navErrorHeader));
-            navErrorHeader->magic = MMWDEMO_NAV_MAGIC;
-            navErrorHeader->version = MMWDEMO_NAV_PROTOCOL_VERSION;
-            navErrorHeader->headerSize = sizeof(*navErrorHeader);
-            navErrorHeader->pointSize = sizeof(MmwDemo_NavPoint);
-            navErrorHeader->subFrameNumber = objDetObj->subFrameIndx;
-            navErrorHeader->radarFrameNumber =
-                objDetObj->stats.frameStartIntCounter;
-            navErrorHeader->numAzimuthBins =
-                MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
-            navErrorHeader->numElevationBins =
-                MMWDEMO_DENSE_ELEV_NUM_ELEVATION_BINS;
-            navErrorHeader->numRangeBins = denseStaticCfg.numRangeBins;
-            navErrorHeader->numDopplerBins = denseStaticCfg.numDopplerBins;
-            navErrorHeader->rangeStepMeters =
-                navStaticCfg.rangeStepMeters;
-            navErrorHeader->dopplerStepMps =
-                navStaticCfg.dopplerStepMps;
-            navErrorHeader->framePeriodSec =
-                navStaticCfg.framePeriodSec;
-            navErrorHeader->rangeBiasMeters =
-                navStaticCfg.rangeBiasMeters;
-            navErrorHeader->processingCycles = navProcessingCycles;
-            navErrorHeader->cycleBudget = navCycleBudget;
-            navErrorHeader->protocolStatus =
-                (status <= 65535U) ? (uint16_t)status : 65535U;
-            navOutputSize = sizeof(*navErrorHeader);
+            navOutputPoints = 0U;
             retVal = 0;
         }
     }
     else
     {
         gNavLastProcessError = 0;
-        navOutputSize = 0U;
+        navOutputPoints = 0U;
     }
-    gNavLastOutputSize = navOutputSize;
+    gNavLastOutputSize = navOutputPoints;
 
     /* Procedure for range bias measurement and Rx channels gain/phase offset measurement */
     if(objDetObj->commonCfg.measureRxChannelBiasCfg.enabled)
@@ -1466,10 +1351,17 @@ int32_t DPC_ObjectDetection_execute
     {
         goto exit;
     }
-    result->numObjOut = outAoaProc.numAoADetectedPoints;
+    if (navEnabled != 0U)
+    {
+        result->numObjOut = navOutputPoints;
+    }
+    else
+    {
+        result->numObjOut = outAoaProc.numAoADetectedPoints;
+    }
 #else
     /* UAV navigation output is produced by DenseElevation/NavPointGen. */
-    result->numObjOut = 0U;
+    result->numObjOut = (navEnabled != 0U) ? navOutputPoints : 0U;
 #endif
 
     /* Set DPM result with measure (bias, phase) and detection info */
@@ -1509,38 +1401,11 @@ int32_t DPC_ObjectDetection_execute
     ptrResult->ptrBuffer[0] = (uint8_t *)result;
     ptrResult->size[0] = sizeof(DPC_ObjectDetection_ExecuteResult);
 
-    /* DPM_MAX_BUFFER is 3 in SDK 3.6: slot 0 is the DPC result, slot 1 is
-     * timing, and slot 2 carries the navigation descriptor. */
+    /* DPM_MAX_BUFFER is 3 in SDK 3.6: slot 0 is the DPC result, slots 1 and 2 are unused. */
     ptrResult->ptrBuffer[1] = NULL;
     ptrResult->size[1] = 0U;
-    memset(&gMmwAuxResult, 0, sizeof(gMmwAuxResult));
-    gMmwAuxResult.magic = MMWDEMO_AUX_RESULT_MAGIC;
-    gMmwAuxResult.version = MMWDEMO_AUX_RESULT_VERSION;
-    gMmwAuxResult.headerSize = sizeof(gMmwAuxResult);
-    gMmwAuxResult.radarFrameNumber = objDetObj->stats.frameStartIntCounter;
-    gMmwAuxResult.subFrameNumber = objDetObj->subFrameIndx;
-    if (navOutputSize > 0U)
-    {
-        gMmwAuxResult.flags |= MMWDEMO_AUX_RESULT_FLAG_NAV_VALID;
-        if (navSurfaceEnabled != 0U)
-        {
-            gMmwAuxResult.flags |=
-                MMWDEMO_AUX_RESULT_FLAG_NAV_SURFACE_ENABLED;
-        }
-
-        gMmwAuxResult.navAddress = (uint32_t)gNavFrameOutput;
-        gMmwAuxResult.navSize = navOutputSize;
-    }
-    if (gMmwAuxResult.flags != 0U)
-    {
-        ptrResult->ptrBuffer[2] = (uint8_t *)&gMmwAuxResult;
-        ptrResult->size[2] = sizeof(gMmwAuxResult);
-    }
-    else
-    {
-        ptrResult->ptrBuffer[2] = NULL;
-        ptrResult->size[2] = 0U;
-    }
+    ptrResult->ptrBuffer[2] = NULL;
+    ptrResult->size[2] = 0U;
 
 exit:
 
@@ -1640,8 +1505,6 @@ static int32_t DPC_ObjectDetection_start (DPM_DPCHandle handle)
     DebugP_assert (objDetObj != NULL);
 
     objDetObj->stats.frameStartIntCounter = 0;
-    memset((void *)gNavLastFrameStart, 0, sizeof(gNavLastFrameStart));
-    memset((void *)gNavFramePeriodCycles, 0, sizeof(gNavFramePeriodCycles));
     memset((void *)gNavConfiguredFramePeriodUsec, 0,
            sizeof(gNavConfiguredFramePeriodUsec));
     memset((void *)gNavTrackingPeriodUsec, 0,
@@ -1666,9 +1529,9 @@ static int32_t DPC_ObjectDetection_start (DPM_DPCHandle handle)
            sizeof(gNavTimingMaxTailCycles));
     memset((void *)gNavTimingResultExportedCycles, 0,
            sizeof(gNavTimingResultExportedCycles));
-    memset((void *)gNavTimingMaxResultExportedCycles, 0,
-           sizeof(gNavTimingMaxResultExportedCycles));
-    gNavSurfaceEnabledSubFrameMask = 0U;
+    extern MmwDemo_HSRAM gHSRAM;
+    volatile const MmwDemo_NavCliCfg *pNavInitCfg = (volatile const MmwDemo_NavCliCfg *)&gHSRAM.navCfg;
+    gNavSurfaceEnabledSubFrameMask = (pNavInitCfg->enabledSurfaceMask != 0U) ? pNavInitCfg->enabledSurfaceMask : 0xFF;
 
     MmwDemo_DenseElevation_reset();
     MmwDemo_NavPointGen_reset();

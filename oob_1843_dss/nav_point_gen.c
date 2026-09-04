@@ -1,11 +1,10 @@
 /**
  * @file nav_point_gen.c
  *
- * @brief Per-frame surface and discrete-object point generation.
+ * @brief Per-frame surface point generation and nearest-surface reduction.
  *
- * The dense source estimator is internal scratch for nearest-surface reduction.
- * A bounded Cartesian DBSCAN then separates compact obstacle clusters from
- * wall-like surfaces before points reach GTRACK.
+ * The dense source estimator provides candidate points for nearest-surface
+ * angular ray reduction and prioritized point selection.
  */
 
 #include <stdint.h>
@@ -29,18 +28,9 @@
 /* L3 is effectively full in the xWR18xx OOB image. These temporary arrays are
  * active only during inter-frame navigation processing, so place them in the
  * otherwise unused 16-KiB L1D SRAM instead of consuming persistent L3. */
-typedef union MmwDemo_NavScratch_u
+typedef struct MmwDemo_NavScratch_t
 {
     int16_t nearestCandidate[MMWDEMO_NAV_NUM_ANGLE_CELLS];
-    struct
-    {
-        float x[MMWDEMO_NAV_DBSCAN_MAX_POINTS];
-        float y[MMWDEMO_NAV_DBSCAN_MAX_POINTS];
-        float z[MMWDEMO_NAV_DBSCAN_MAX_POINTS];
-        float compensatedDoppler[MMWDEMO_NAV_DBSCAN_MAX_POINTS];
-        uint16_t queue[MMWDEMO_NAV_DBSCAN_MAX_POINTS];
-        uint8_t label[MMWDEMO_NAV_DBSCAN_MAX_POINTS];
-    } cluster;
 } MmwDemo_NavScratch;
 
 typedef char MmwDemo_NavScratchSizeCheck[
@@ -57,30 +47,10 @@ static uint8_t gNavCellSelected[MMWDEMO_NAV_SELECTION_BYTES];
 
 #define gNavNearestCandidate (gNavScratch.nearestCandidate)
 
-#define MMWDEMO_NAV_DBSCAN_UNVISITED (0U)
-#define MMWDEMO_NAV_DBSCAN_WALL      (253U)
-#define MMWDEMO_NAV_DBSCAN_NOISE     (254U)
-
-volatile uint32_t gNavDbscanProcessCount = 0U;
-volatile uint32_t gNavDbscanLimitedCount = 0U;
-volatile uint32_t gNavDbscanWallClusterCount = 0U;
-volatile uint32_t gNavEgoValidCount = 0U;
-volatile uint32_t gNavEgoLowConfidenceCount = 0U;
-
 /* Cycle profiling for emitSurface (includes emitPrioritized + findBestUnselected).
  * Read via CCS watch to assess O(N*M) cost per review point #5. */
 volatile uint32_t gNavEmitSurfaceCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 volatile uint32_t gNavEmitSurfaceMaxCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
-
-/* External ego freshness is tracked per subframe against the radar frame
- * number. Counting process calls would expire too quickly with advanced-frame
- * configurations and would fail to expire across skipped navigation frames. */
-static uint32_t
-    gNavLastEgoSequence[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
-static uint32_t
-    gNavExternalEgoUpdateFrame[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
-static uint8_t
-    gNavExternalEgoHasFrame[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 
 static uint8_t MmwDemo_NavPointGen_isSelected(
     const uint8_t *selection,
@@ -176,41 +146,58 @@ static uint8_t MmwDemo_NavPointGen_sector(
 }
 
 static void MmwDemo_NavPointGen_copyPoint(
-    MmwDemo_NavPoint *dst,
+    DPIF_PointCloudCartesian *dstPoint,
+    DPIF_PointCloudSideInfo *dstSideInfo,
     const MmwDemo_DenseElevation_OutputSample *src,
     const MmwDemo_NavPointGen_StaticCfg *staticCfg)
 {
     float dist = (float)src->rangeIdx * staticCfg->rangeStepMeters + staticCfg->rangeBiasMeters;
-    
+    if (dist < 0.0f)
+    {
+        dist = 0.0f;
+    }
+
     float u = (float)src->azimuthUQ15 / 32767.0f;
     if (u > 1.0f) u = 1.0f;
     if (u < -1.0f) u = -1.0f;
-    float az = asinf(u) * (180.0f / 3.1415926535f);
 
     float v = (float)src->sourceVQ15 / 32767.0f;
     if (v > 1.0f) v = 1.0f;
     if (v < -1.0f) v = -1.0f;
-    float elev = asinf(v) * (180.0f / 3.1415926535f);
-    
-    float width_u = (float)src->azimuthWidthUQ15 / 32767.0f;
-    float width = dist * width_u;
-    if (width < 0.05f) width = 0.05f;
 
-    float power;
-    if (src->powerDb10 != (int16_t)-32768)
+    float x = dist * u;
+    float z = dist * v;
+    float ySq = (dist * dist) - (x * x) - (z * z);
+    float y = (ySq > 0.0f) ? sqrtf(ySq) : 0.0f;
+
+    if (dstPoint != NULL)
     {
-        power = (float)src->powerDb10 / 10.0f;
-    }
-    else
-    {
-        power = (float)src->snrDb10 / 10.0f;
+        dstPoint->x = x;
+        dstPoint->y = y;
+        dstPoint->z = z;
+        dstPoint->velocity = (float)src->dopplerIdx * staticCfg->dopplerStepMps;
     }
 
-    dst->distance_m = dist;
-    dst->width_m = width;
-    dst->azimuth_deg = az;
-    dst->elevation_deg = elev;
-    dst->power_db = power;
+    if (dstSideInfo != NULL)
+    {
+        float width_u = (float)src->azimuthWidthUQ15 / 32767.0f;
+        float width = dist * width_u;
+        if (width < 0.05f)
+        {
+            width = 0.05f;
+        }
+
+        if (src->powerDb10 != (int16_t)-32768)
+        {
+            dstSideInfo->snr = src->powerDb10;
+        }
+        else
+        {
+            dstSideInfo->snr = (int16_t)src->snrDb10;
+        }
+        /* Preserve physical obstacle width in mm in sideInfo->noise */
+        dstSideInfo->noise = (int16_t)(width * 1000.0f);
+    }
 }
 
 static uint8_t MmwDemo_NavPointGen_isHigherPriority(
@@ -233,21 +220,10 @@ static uint8_t MmwDemo_NavPointGen_isHigherPriority(
             MmwDemo_NavPointGen_abs16(current->dopplerIdx)) ? 1U : 0U;
 }
 
-static uint8_t MmwDemo_NavPointGen_deadlineExpired(
-    uint32_t deadlineStartCycles,
-    uint32_t deadlineOffsetCycles)
-{
-    return ((deadlineOffsetCycles != 0U) &&
-            ((Cycleprofiler_getTimeStamp() - deadlineStartCycles) >=
-             deadlineOffsetCycles))
-               ? 1U : 0U;
-}
-
 static int16_t MmwDemo_NavPointGen_findBestUnselected(
     const MmwDemo_DenseElevation_OutputSample *samples,
     uint16_t sampleCount,
-    int16_t requiredSector,
-    const uint8_t *eligibility)
+    int16_t requiredSector)
 {
     uint16_t sampleIndex;
     int16_t bestCell = -1;
@@ -260,8 +236,6 @@ static int16_t MmwDemo_NavPointGen_findBestUnselected(
         uint16_t cell = MmwDemo_NavPointGen_cellIndex(&samples[sampleIndex]);
         if ((gNavNearestCandidate[cell] != (int16_t)sampleIndex) ||
             (MmwDemo_NavPointGen_isSelected(gNavCellSelected, cell) != 0U) ||
-            ((eligibility != NULL) &&
-             (MmwDemo_NavPointGen_isSelected(eligibility, cell) == 0U)) ||
             ((requiredSector >= 0) &&
              ((int16_t)MmwDemo_NavPointGen_sector(&samples[sampleIndex]) !=
               requiredSector)))
@@ -281,13 +255,10 @@ static int16_t MmwDemo_NavPointGen_findBestUnselected(
 static uint16_t MmwDemo_NavPointGen_emitPrioritized(
     const MmwDemo_DenseElevation_OutputSample *samples,
     uint16_t sampleCount,
-    const uint8_t *eligibility,
     uint16_t maxOutput,
-    MmwDemo_NavPoint *output,
-    const MmwDemo_NavPointGen_StaticCfg *staticCfg,
-    uint32_t deadlineStartCycles,
-    uint32_t deadlineOffsetCycles,
-    uint8_t *timeLimited)
+    DPIF_PointCloudCartesian *outPoints,
+    DPIF_PointCloudSideInfo *outSideInfo,
+    const MmwDemo_NavPointGen_StaticCfg *staticCfg)
 {
     uint16_t count = 0U;
     uint8_t sector;
@@ -312,21 +283,17 @@ static uint16_t MmwDemo_NavPointGen_emitPrioritized(
         {
             int16_t bestCell;
             int16_t candidateIndex;
-            if (MmwDemo_NavPointGen_deadlineExpired(
-                    deadlineStartCycles, deadlineOffsetCycles) != 0U)
-            {
-                *timeLimited = 1U;
-                return count;
-            }
             bestCell = MmwDemo_NavPointGen_findBestUnselected(
-                samples, sampleCount, (int16_t)sector, eligibility);
+                samples, sampleCount, (int16_t)sector);
             if (bestCell < 0)
             {
                 break;
             }
             candidateIndex = gNavNearestCandidate[bestCell];
-            MmwDemo_NavPointGen_copyPoint(&output[count],
-                                           &samples[candidateIndex], staticCfg);
+            MmwDemo_NavPointGen_copyPoint(
+                &outPoints[count],
+                (outSideInfo != NULL) ? &outSideInfo[count] : NULL,
+                &samples[candidateIndex], staticCfg);
             MmwDemo_NavPointGen_setSelected(gNavCellSelected,
                                              (uint16_t)bestCell);
             count++;
@@ -340,21 +307,17 @@ static uint16_t MmwDemo_NavPointGen_emitPrioritized(
     {
         int16_t bestCell;
         int16_t candidateIndex;
-        if (MmwDemo_NavPointGen_deadlineExpired(
-                deadlineStartCycles, deadlineOffsetCycles) != 0U)
-        {
-            *timeLimited = 1U;
-            return count;
-        }
         bestCell = MmwDemo_NavPointGen_findBestUnselected(
-            samples, sampleCount, -1, eligibility);
+            samples, sampleCount, -1);
         if (bestCell < 0)
         {
             break;
         }
         candidateIndex = gNavNearestCandidate[bestCell];
-        MmwDemo_NavPointGen_copyPoint(&output[count],
-                                       &samples[candidateIndex], staticCfg);
+        MmwDemo_NavPointGen_copyPoint(
+            &outPoints[count],
+            (outSideInfo != NULL) ? &outSideInfo[count] : NULL,
+            &samples[candidateIndex], staticCfg);
         MmwDemo_NavPointGen_setSelected(gNavCellSelected,
                                          (uint16_t)bestCell);
         count++;
@@ -366,12 +329,10 @@ static uint16_t MmwDemo_NavPointGen_emitSurface(
     const MmwDemo_DenseElevation_OutputSample *samples,
     uint16_t sampleCount,
     uint16_t maxOutput,
-    MmwDemo_NavPoint *output,
+    DPIF_PointCloudCartesian *outPoints,
+    DPIF_PointCloudSideInfo *outSideInfo,
     const MmwDemo_NavPointGen_StaticCfg *staticCfg,
-    uint16_t *availableCount,
-    uint32_t deadlineStartCycles,
-    uint32_t deadlineOffsetCycles,
-    uint8_t *timeLimited)
+    uint16_t *availableCount)
 {
     uint16_t cell;
     uint16_t total = 0U;
@@ -385,15 +346,12 @@ static uint16_t MmwDemo_NavPointGen_emitSurface(
     }
     *availableCount = total;
     return MmwDemo_NavPointGen_emitPrioritized(
-        samples, sampleCount, NULL, maxOutput, output, staticCfg,
-        deadlineStartCycles, deadlineOffsetCycles, timeLimited);
+        samples, sampleCount, maxOutput, outPoints, outSideInfo, staticCfg);
 }
 
 static int32_t MmwDemo_NavPointGen_buildNearestMap(
     const MmwDemo_DenseElevation_OutputSample *samples,
-    uint16_t sampleCount,
-    uint32_t deadlineStartCycles,
-    uint32_t deadlineOffsetCycles)
+    uint16_t sampleCount)
 {
     uint16_t cell;
     uint16_t sampleIndex;
@@ -416,17 +374,9 @@ static int32_t MmwDemo_NavPointGen_buildNearestMap(
         {
             gNavNearestCandidate[cell] = (int16_t)sampleIndex;
         }
-        if (((sampleIndex & 63U) == 63U) &&
-            (MmwDemo_NavPointGen_deadlineExpired(
-                deadlineStartCycles, deadlineOffsetCycles) != 0U))
-        {
-            return MMWDEMO_NAV_ETIME_BUDGET;
-        }
     }
     return 0;
 }
-
-
 
 int32_t MmwDemo_NavPointGen_process(
     const MmwDemo_NavPointGen_Cfg *cfg,
@@ -436,38 +386,29 @@ int32_t MmwDemo_NavPointGen_process(
     uint32_t cycleBudget,
     uint8_t *candidateBuffer,
     uint32_t candidateBufferSize,
-    uint8_t *navBuffer,
-    uint32_t navBufferSize,
-    uint32_t *navSize)
+    DPIF_PointCloudCartesian *outPoints,
+    DPIF_PointCloudSideInfo *outSideInfo,
+    uint16_t maxOutputPoints,
+    uint32_t *numPointsOut)
 {
     MmwDemo_DenseElevation_OutputHeader *candidateHeader;
     MmwDemo_DenseElevation_OutputSample *samples;
-    MmwDemo_NavFrameHeader *navHeader;
-    MmwDemo_NavPoint *surfaceOutput;
     uint32_t candidateSize = 0U;
-    uint32_t processingStartCycles;
     uint32_t emitSurfaceStartCycles;
     uint16_t surfaceAvailable = 0U;
     uint16_t maxSurface;
-    uint16_t flags;
-    uint8_t timeLimited = 0U;
     int32_t retVal;
 
-    if (navSize != NULL)
+    if (numPointsOut != NULL)
     {
-        *navSize = 0U;
+        *numPointsOut = 0U;
     }
-    if ((cfg == NULL) || (staticCfg == NULL) || (navBuffer == NULL) ||
+    if ((cfg == NULL) || (staticCfg == NULL) || (outPoints == NULL) ||
         (candidateBuffer == NULL) ||
         (candidateBufferSize < MMWDEMO_NAV_CANDIDATE_BUFFER_SIZE) ||
-        (navSize == NULL) ||
-        (navBufferSize < sizeof(MmwDemo_NavFrameHeader)) ||
+        (numPointsOut == NULL) ||
+        (maxOutputPoints == 0U) ||
         (cfg->maxSurfacePoints == 0U) ||
-        (cfg->uartMaxSurfacePoints == 0U) ||
-        (cfg->maxSurfacePoints > MMWDEMO_NAV_MAX_SURFACE_POINTS) ||
-        (cfg->uartMaxSurfacePoints > MMWDEMO_NAV_MAX_SURFACE_POINTS) ||
-        (cfg->surfaceRangeToleranceBins > 32U) ||
-        (cfg->surfaceElevationNeighborBins > 8U) ||
         (!isfinite(staticCfg->rangeStepMeters)) ||
         !(staticCfg->rangeStepMeters > 0.0f) ||
         (!isfinite(staticCfg->dopplerStepMps)) ||
@@ -480,14 +421,14 @@ int32_t MmwDemo_NavPointGen_process(
         return MMWDEMO_NAV_EINVAL;
     }
 
-    maxSurface = (cfg->uartMaxSurfacePoints < cfg->maxSurfacePoints) ?
-                 cfg->uartMaxSurfacePoints : cfg->maxSurfacePoints;
-    if (sizeof(MmwDemo_NavFrameHeader) + (uint32_t)maxSurface * sizeof(MmwDemo_NavPoint) > navBufferSize)
+    maxSurface = (cfg->maxSurfacePoints < maxOutputPoints) ?
+                 cfg->maxSurfacePoints : maxOutputPoints;
+    if ((cfg->uartMaxSurfacePoints != 0U) &&
+        (cfg->uartMaxSurfacePoints < maxSurface))
     {
-        return MMWDEMO_NAV_EOUTPUT_CAPACITY;
+        maxSurface = cfg->uartMaxSurfacePoints;
     }
 
-    processingStartCycles = Cycleprofiler_getTimeStamp();
     retVal = MmwDemo_DenseElevation_process(
         &cfg->sourceCfg,
         &staticCfg->sourceStaticCfg,
@@ -531,34 +472,18 @@ int32_t MmwDemo_NavPointGen_process(
     /* One nearest return per azimuth/elevation ray. At equal range, retain
      * the higher-SNR source. */
     retVal = MmwDemo_NavPointGen_buildNearestMap(
-        samples, candidateHeader->numSamples,
-        deadlineStartCycles, deadlineOffsetCycles);
+        samples, candidateHeader->numSamples);
     if (retVal != 0)
     {
         return retVal;
     }
 
-    /* Surface publication and object clustering are separate products. */
-    flags = MMWDEMO_NAV_FLAG_FRAME_COMPLETE |
-            MMWDEMO_NAV_FLAG_ELEVATION_FILTERED;
-    if ((candidateHeader->flags &
-         MMWDEMO_DENSE_FLAG_TIME_BUDGET_EXCEEDED) != 0U)
-    {
-        flags |= MMWDEMO_NAV_FLAG_TIME_BUDGET_EXCEEDED;
-    }
-    if (maxSurface < cfg->maxSurfacePoints)
-    {
-        flags |= MMWDEMO_NAV_FLAG_UART_LIMITED;
-    }
-    memset(navBuffer, 0, sizeof(MmwDemo_NavFrameHeader));
-    navHeader = (MmwDemo_NavFrameHeader *)navBuffer;
-    surfaceOutput = (MmwDemo_NavPoint *)(navBuffer + sizeof(*navHeader));
-
     emitSurfaceStartCycles = Cycleprofiler_getTimeStamp();
-    navHeader->numSurfacePoints = MmwDemo_NavPointGen_emitSurface(
-        samples, candidateHeader->numSamples, maxSurface, surfaceOutput, staticCfg,
-        &surfaceAvailable, deadlineStartCycles, deadlineOffsetCycles,
-        &timeLimited);
+    *numPointsOut = (uint32_t)MmwDemo_NavPointGen_emitSurface(
+        samples, candidateHeader->numSamples, maxSurface,
+        outPoints, outSideInfo, staticCfg,
+        &surfaceAvailable);
+
     {
         uint32_t emitElapsed = Cycleprofiler_getTimeStamp() -
                                emitSurfaceStartCycles;
@@ -569,43 +494,7 @@ int32_t MmwDemo_NavPointGen_process(
             gNavEmitSurfaceMaxCycles[sfIdx] = emitElapsed;
         }
     }
-    if (timeLimited != 0U)
-    {
-        return MMWDEMO_NAV_ETIME_BUDGET;
-    }
-    navHeader->numDiscretePoints = 0U;
 
-    if (surfaceAvailable > navHeader->numSurfacePoints)
-    {
-        flags |= MMWDEMO_NAV_FLAG_SURFACE_LIMITED;
-    }
-    navHeader->magic = MMWDEMO_NAV_MAGIC;
-    navHeader->version = MMWDEMO_NAV_PROTOCOL_VERSION;
-    navHeader->headerSize = sizeof(*navHeader);
-    navHeader->pointSize = sizeof(MmwDemo_NavPoint);
-    navHeader->flags = flags;
-    navHeader->subFrameNumber = candidateHeader->subFrameNumber;
-    navHeader->numAzimuthBins = candidateHeader->numAzimuthBins;
-    navHeader->numElevationBins = candidateHeader->numElevationBins;
-    navHeader->numRangeBins = candidateHeader->numRangeBins;
-    navHeader->numDopplerBins = candidateHeader->numDopplerBins;
-    navHeader->rangeStart = candidateHeader->rangeStart;
-    navHeader->rangeEnd = candidateHeader->rangeEnd;
-    navHeader->protocolStatus = candidateHeader->protocolStatus;
-    navHeader->radarFrameNumber = candidateHeader->radarFrameNumber;
-    navHeader->rangeStepMeters = staticCfg->rangeStepMeters;
-    navHeader->dopplerStepMps = staticCfg->dopplerStepMps;
-    navHeader->framePeriodSec = staticCfg->framePeriodSec;
-    navHeader->elevationFovDeg10 =
-        (uint32_t)(uint16_t)candidateHeader->minElevationDeg10 |
-        ((uint32_t)(uint16_t)candidateHeader->maxElevationDeg10 << 16U);
-    navHeader->rangeBiasMeters = staticCfg->rangeBiasMeters;
-    navHeader->cycleBudget = cycleBudget;
-    navHeader->processingCycles =
-        Cycleprofiler_getTimeStamp() - processingStartCycles;
-
-    *navSize = sizeof(*navHeader) +
-        (uint32_t)navHeader->numSurfacePoints * sizeof(MmwDemo_NavPoint);
     return 0;
 }
 
@@ -613,9 +502,4 @@ void MmwDemo_NavPointGen_reset(void)
 {
     memset(&gNavScratch, 0, sizeof(gNavScratch));
     memset(gNavCellSelected, 0, sizeof(gNavCellSelected));
-    memset(gNavLastEgoSequence, 0, sizeof(gNavLastEgoSequence));
-    memset(gNavExternalEgoUpdateFrame, 0,
-           sizeof(gNavExternalEgoUpdateFrame));
-    memset(gNavExternalEgoHasFrame, 0,
-           sizeof(gNavExternalEgoHasFrame));
 }

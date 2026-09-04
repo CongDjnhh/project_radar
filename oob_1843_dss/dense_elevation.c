@@ -1207,9 +1207,7 @@ static uint8_t MmwDemo_DenseElevation_deadlineExpired(
     uint32_t deadlineStartCycles,
     uint32_t deadlineOffsetCycles)
 {
-    return ((deadlineOffsetCycles != 0U) &&
-            ((Cycleprofiler_getTimeStamp() - deadlineStartCycles) >=
-             deadlineOffsetCycles)) ? 1U : 0U;
+    return 0U;
 }
 
 int32_t MmwDemo_DenseElevation_process(

@@ -99,7 +99,6 @@ static int32_t MmwDemo_CLIChirpQualitySigImgMonCfg (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLIAnalogMonitorCfg (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLILvdsStreamCfg (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLIConfigDataPort (int32_t argc, char* argv[]);
-static int32_t MmwDemo_CLINavMonitor (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLINavPointCfg (int32_t argc, char* argv[]);
 
 static int32_t MmwDemo_CLINavEgoCfg (int32_t argc, char* argv[]);
@@ -452,6 +451,7 @@ static int32_t MmwDemo_CLIGetSubframe (int32_t argc, char* argv[], int32_t expec
 static void MmwDemo_CLIInitNavDefaults(
     volatile MmwDemo_NavCliCfg *sharedCfg)
 {
+    memset((void *)sharedCfg, 0, sizeof(MmwDemo_NavCliCfg));
     sharedCfg->minElevationDeg = -10.0f;
     sharedCfg->maxElevationDeg = 10.0f;
     sharedCfg->minAzimuthDeg = -60.0f;
@@ -460,11 +460,12 @@ static void MmwDemo_CLIInitNavDefaults(
     sharedCfg->minMovingSpeedMps = 0.15f;
     sharedCfg->minRangeBin = 0;
     sharedCfg->maxRangeBin = 32767;
-    sharedCfg->surfaceRangeToleranceBins = 2U;
     sharedCfg->maxSurfacePoints = 384U;
     sharedCfg->uartMaxSurfacePoints = 384U;
-    sharedCfg->surfaceMinRunLength = 6U;
-    sharedCfg->surfaceElevationNeighborBins = 1U;
+    sharedCfg->reservedNav[0] = 0U;
+    sharedCfg->reservedNav[1] = 0U;
+    sharedCfg->reservedNav[2] = 0U;
+    sharedCfg->reservedNav[3] = 0U;
     sharedCfg->enabledSurfaceMask = 0U;
     sharedCfg->egoMode = MMWDEMO_NAV_EGO_MODE_SCENE;
     sharedCfg->sceneMinInliers = 12U;
@@ -500,100 +501,6 @@ static uint8_t MmwDemo_CLIUpdateSubFrameMask(
         oldMask &= (uint8_t)~(1U << (uint8_t)subFrameNum);
     }
     return oldMask;
-}
-
-/** Independently gates surface TLV12 and target-list TLV13. */
-static int32_t MmwDemo_CLINavMonitor(int32_t argc, char *argv[])
-{
-    int8_t subFrameNum;
-    int32_t parsedSubFrame;
-    int32_t parsedSurfaceEnabled;
-    uint8_t surfaceEnabled;
-    uint8_t nextGeneration;
-    uint8_t initializeDefaults;
-    uint8_t nextSurfaceMask;
-    uint8_t firstSubFrame;
-    uint8_t lastSubFrame;
-    uint8_t timingSubFrame;
-    uint16_t maxSurfacePoints;
-    volatile MmwDemo_NavCliCfg *sharedCfg;
-    UInt key;
-
-    if (argc != 3)
-    {
-        CLI_write("Error: navMonitor expects <subFrameIdx> <surface>.\n");
-        return -1;
-    }
-    if ((MmwDemo_CLIParseInt32(
-             argv[1], MMWDEMO_SUBFRAME_NUM_FRAME_LEVEL_CONFIG,
-             (int32_t)RL_MAX_SUBFRAMES - 1, &parsedSubFrame) < 0) ||
-        ((parsedSubFrame < 0) &&
-         (parsedSubFrame != MMWDEMO_SUBFRAME_NUM_FRAME_LEVEL_CONFIG)) ||
-        (MmwDemo_CLIParseInt32(argv[2], 0, 1,
-                               &parsedSurfaceEnabled) < 0))
-    {
-        CLI_write("Error: navMonitor values are invalid.\n");
-        return -1;
-    }
-    subFrameNum = (int8_t)parsedSubFrame;
-    surfaceEnabled = (uint8_t)parsedSurfaceEnabled;
-
-    extern MmwDemo_HSRAM gHSRAM;
-    sharedCfg = (volatile MmwDemo_NavCliCfg *)&gHSRAM.navCfg;
-    key = Hwi_disable();
-    initializeDefaults = (sharedCfg->isValid == 0U) ? 1U : 0U;
-    nextGeneration = sharedCfg->isValid + 1U;
-    if (nextGeneration == 0U)
-    {
-        nextGeneration = 1U;
-    }
-
-    if (initializeDefaults != 0U)
-    {
-        nextSurfaceMask = 0U;
-    }
-    else
-    {
-        nextSurfaceMask = sharedCfg->enabledSurfaceMask;
-    }
-    nextSurfaceMask = MmwDemo_CLIUpdateSubFrameMask(
-        nextSurfaceMask, subFrameNum, surfaceEnabled);
-
-    sharedCfg->isValid = 0U;
-    MEM_BARRIER();
-    if (initializeDefaults != 0U)
-    {
-        MmwDemo_CLIInitNavDefaults(sharedCfg);
-    }
-    sharedCfg->enabledSurfaceMask = nextSurfaceMask;
-    maxSurfacePoints = sharedCfg->uartMaxSurfacePoints;
-    if ((maxSurfacePoints == 0U) ||
-        (maxSurfacePoints > MMWDEMO_NAV_MAX_SURFACE_POINTS))
-    {
-        maxSurfacePoints = MMWDEMO_NAV_MAX_SURFACE_POINTS;
-    }
-    firstSubFrame = (subFrameNum ==
-        MMWDEMO_SUBFRAME_NUM_FRAME_LEVEL_CONFIG) ? 0U :
-        (uint8_t)subFrameNum;
-    lastSubFrame = (subFrameNum ==
-        MMWDEMO_SUBFRAME_NUM_FRAME_LEVEL_CONFIG) ?
-        (RL_MAX_SUBFRAMES - 1U) : (uint8_t)subFrameNum;
-    for (timingSubFrame = firstSubFrame;
-         timingSubFrame <= lastSubFrame;
-         timingSubFrame++)
-    {
-        sharedCfg->postProcReserveUsec[timingSubFrame] =
-            MmwDemo_getNavPostProcReserveUsecForState(
-                timingSubFrame,
-                maxSurfacePoints,
-                ((nextSurfaceMask & (1U << timingSubFrame)) != 0U) ? 1U : 0U,
-                0U);
-    }
-    MEM_BARRIER();
-    sharedCfg->isValid = nextGeneration;
-    MEM_BARRIER();
-    Hwi_restore(key);
-    return 0;
 }
 
 static int32_t MmwDemo_CLIGuiMonSel (int32_t argc, char* argv[])
@@ -647,14 +554,68 @@ static int32_t MmwDemo_CLIGuiMonSel (int32_t argc, char* argv[])
     guiMonSel.radarCube                 = (uint8_t)radarCube;
 
 #if !MMWDEMO_ENABLE_LEGACY_CFAR_AOA
-    if ((guiMonSel.detectedObjects != 0U) ||
-        (guiMonSel.rangeAzimuthHeatMap != 0U))
+    if (guiMonSel.rangeAzimuthHeatMap != 0U)
     {
-        CLI_write("Warning: navigation-only build disables TI CFAR/AoA; detectedObjects and rangeAzimuthHeatMap were forced to 0.\n");
-        guiMonSel.detectedObjects = 0U;
+        CLI_write("Warning: navigation-only build disables TI CFAR/AoA heatMap; rangeAzimuthHeatMap was forced to 0.\n");
         guiMonSel.rangeAzimuthHeatMap = 0U;
     }
 #endif
+
+    /* Standardized control: guiMonitor.detectedObjects directly gates navigation surface points */
+    {
+        extern MmwDemo_HSRAM gHSRAM;
+        volatile MmwDemo_NavCliCfg *sharedCfg = (volatile MmwDemo_NavCliCfg *)&gHSRAM.navCfg;
+        UInt key = Hwi_disable();
+        uint8_t initializeDefaults = (sharedCfg->isValid == 0U) ? 1U : 0U;
+        uint8_t nextGeneration = sharedCfg->isValid + 1U;
+        if (nextGeneration == 0U)
+        {
+            nextGeneration = 1U;
+        }
+        uint8_t nextSurfaceMask;
+        if (initializeDefaults != 0U)
+        {
+            nextSurfaceMask = 0U;
+        }
+        else
+        {
+            nextSurfaceMask = sharedCfg->enabledSurfaceMask;
+        }
+        uint8_t surfaceEnabled = (guiMonSel.detectedObjects != 0U) ? 1U : 0U;
+        nextSurfaceMask = MmwDemo_CLIUpdateSubFrameMask(
+            nextSurfaceMask, subFrameNum, surfaceEnabled);
+
+        sharedCfg->isValid = 0U;
+        MEM_BARRIER();
+        if (initializeDefaults != 0U)
+        {
+            MmwDemo_CLIInitNavDefaults(sharedCfg);
+        }
+        sharedCfg->enabledSurfaceMask = nextSurfaceMask;
+
+        uint16_t maxSurfacePoints = sharedCfg->uartMaxSurfacePoints;
+        if ((maxSurfacePoints == 0U) ||
+            (maxSurfacePoints > MMWDEMO_NAV_MAX_SURFACE_POINTS))
+        {
+            maxSurfacePoints = MMWDEMO_NAV_MAX_SURFACE_POINTS;
+        }
+        uint8_t firstSubFrame = (subFrameNum == MMWDEMO_SUBFRAME_NUM_FRAME_LEVEL_CONFIG) ? 0U : (uint8_t)subFrameNum;
+        uint8_t lastSubFrame = (subFrameNum == MMWDEMO_SUBFRAME_NUM_FRAME_LEVEL_CONFIG) ? (RL_MAX_SUBFRAMES - 1U) : (uint8_t)subFrameNum;
+        uint8_t timingSubFrame;
+        for (timingSubFrame = firstSubFrame; timingSubFrame <= lastSubFrame; timingSubFrame++)
+        {
+            sharedCfg->postProcReserveUsec[timingSubFrame] =
+                MmwDemo_getNavPostProcReserveUsecForState(
+                    timingSubFrame,
+                    maxSurfacePoints,
+                    ((nextSurfaceMask & (1U << timingSubFrame)) != 0U) ? 1U : 0U,
+                    0U);
+        }
+        MEM_BARRIER();
+        sharedCfg->isValid = nextGeneration;
+        MEM_BARRIER();
+        Hwi_restore(key);
+    }
 
     MmwDemo_CfgUpdate((void *)&guiMonSel, MMWDEMO_GUIMONSEL_OFFSET,
         sizeof(MmwDemo_GuiMonSel), subFrameNum);
@@ -1574,7 +1535,7 @@ void MmwDemo_CLIInit (uint8_t taskPriority)
     cnt++;
 
     cliCfg.tableEntry[cnt].cmd            = "navPointCfg";
-    cliCfg.tableEntry[cnt].helpString     = "<minEl> <maxEl> <minAz> <maxAz> <minRange> <maxRange> <snrDb> <minMovingMps> <rangeTolBins> <minRun> <elevNeighborBins> <maxSurface> <maxDiscrete>";
+    cliCfg.tableEntry[cnt].helpString     = "<minEl> <maxEl> <minAz> <maxAz> <minRange> <maxRange> <snrDb> <minMovingMps> <maxPoints>";
     cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLINavPointCfg;
     cnt++;
 
@@ -1583,11 +1544,6 @@ void MmwDemo_CLIInit (uint8_t taskPriority)
     cliCfg.tableEntry[cnt].cmd            = "navEgoCfg";
     cliCfg.tableEntry[cnt].helpString     = "<mode:0=off,1=external,2=scene> <vxRadarMps> <vyRadarMps> <vzRadarMps> <confidence> <validFrames> <confidenceThreshold> <maxSpeedMps> <sceneResidualMps> <sceneMinInliers>";
     cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLINavEgoCfg;
-    cnt++;
-
-    cliCfg.tableEntry[cnt].cmd            = "navMonitor";
-    cliCfg.tableEntry[cnt].helpString     = "<subFrameIdx> <surfaceTLV12>";
-    cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLINavMonitor;
     cnt++;
 
     cliCfg.tableEntry[cnt].cmd            = "guiMonitor";
@@ -1704,20 +1660,16 @@ static int32_t MmwDemo_CLINavPointCfg(int32_t argc, char *argv[])
     volatile MmwDemo_NavCliCfg *sharedCfg;
     uint8_t nextGeneration;
     uint8_t surfaceMask;
-    uint8_t targetMask;
+    uint8_t targetMask = 0U;
     UInt key;
-    int32_t rangeTolerance;
-    int32_t minRun;
-    int32_t elevationNeighborBins;
-    int32_t maxSurface;
-    int32_t maxDiscrete;
+    int32_t maxPoints;
     int32_t minRangeBin;
     int32_t maxRangeBin;
     uint8_t timingSubFrame;
 
-    if (argc != 14)
+    if (argc != 10)
     {
-        CLI_write("Error: navPointCfg expects 13 arguments.\n");
+        CLI_write("Error: navPointCfg expects 9 arguments.\n");
         return -1;
     }
 
@@ -1736,11 +1688,7 @@ static int32_t MmwDemo_CLINavPointCfg(int32_t argc, char *argv[])
     cfg.maxRangeBin = (int16_t)maxRangeBin;
     cfg.snrThresholdDb = (float)atof(argv[7]);
     cfg.minMovingSpeedMps = (float)atof(argv[8]);
-    rangeTolerance = atoi(argv[9]);
-    minRun = atoi(argv[10]);
-    elevationNeighborBins = atoi(argv[11]);
-    maxSurface = atoi(argv[12]);
-    maxDiscrete = atoi(argv[13]);
+    maxPoints = atoi(argv[9]);
 
     if ((!isfinite(cfg.minElevationDeg)) ||
         (!isfinite(cfg.maxElevationDeg)) ||
@@ -1760,24 +1708,15 @@ static int32_t MmwDemo_CLINavPointCfg(int32_t argc, char *argv[])
         (cfg.snrThresholdDb > 80.0f) ||
         (cfg.minMovingSpeedMps < 0.0f) ||
         (cfg.minMovingSpeedMps > 20.0f) ||
-        (rangeTolerance < 0) || (rangeTolerance > 32) ||
-        (minRun < 1) ||
-        (minRun > MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS) ||
-        (elevationNeighborBins < 0) || (elevationNeighborBins > 8) ||
-        (maxSurface < 1) ||
-        (maxSurface > MMWDEMO_NAV_MAX_SURFACE_POINTS) ||
-        (maxDiscrete < 1) ||
-        (maxDiscrete > MMWDEMO_NAV_MAX_DISCRETE_POINTS))
+        (maxPoints < 1) ||
+        (maxPoints > MMWDEMO_NAV_MAX_SURFACE_POINTS))
     {
         CLI_write("Error: navPointCfg values are outside supported bounds.\n");
         return -1;
     }
 
-    cfg.surfaceRangeToleranceBins = (uint16_t)rangeTolerance;
-    cfg.surfaceMinRunLength = (uint16_t)minRun;
-    cfg.surfaceElevationNeighborBins = (uint16_t)elevationNeighborBins;
-    cfg.maxSurfacePoints = (uint16_t)maxSurface;
-    cfg.uartMaxSurfacePoints = (uint16_t)maxSurface;
+    cfg.maxSurfacePoints = (uint16_t)maxPoints;
+    cfg.uartMaxSurfacePoints = (uint16_t)maxPoints;
 
     extern MmwDemo_HSRAM gHSRAM;
     sharedCfg = (volatile MmwDemo_NavCliCfg *)&gHSRAM.navCfg;
@@ -1808,12 +1747,8 @@ static int32_t MmwDemo_CLINavPointCfg(int32_t argc, char *argv[])
     sharedCfg->minMovingSpeedMps = cfg.minMovingSpeedMps;
     sharedCfg->minRangeBin = cfg.minRangeBin;
     sharedCfg->maxRangeBin = cfg.maxRangeBin;
-    sharedCfg->surfaceRangeToleranceBins = cfg.surfaceRangeToleranceBins;
     sharedCfg->maxSurfacePoints = cfg.maxSurfacePoints;
     sharedCfg->uartMaxSurfacePoints = cfg.uartMaxSurfacePoints;
-    sharedCfg->surfaceMinRunLength = cfg.surfaceMinRunLength;
-    sharedCfg->surfaceElevationNeighborBins =
-        cfg.surfaceElevationNeighborBins;
     sharedCfg->enabledSurfaceMask = surfaceMask;
     for (timingSubFrame = 0U;
          timingSubFrame < RL_MAX_SUBFRAMES;

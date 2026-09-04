@@ -91,53 +91,8 @@ typedef enum MmwDemo_output_message_type_e
     /*! @brief   Raw radar cube (DPIF_RADARCUBE_FORMAT_1) */
     MMWDEMO_OUTPUT_MSG_RADAR_CUBE = 10,
 
-    /*! @brief   Current-frame nearest navigation surface point cloud */
-    MMWDEMO_OUTPUT_MSG_NAV_SURFACE_POINTS = 12,
-
-    /*! @brief   GTRACK 3-D target list generated from discrete points */
-    MMWDEMO_OUTPUT_MSG_NAV_TARGET_LIST = 13,
-    
-    /*! @brief   Custom detected clustered objects (Distance, Width, Elevation, Power) */
-    MMWDEMO_OUTPUT_MSG_DETECTED_OBJECTS_CUSTOM = 14,
-
     MMWDEMO_OUTPUT_MSG_MAX
 } MmwDemo_output_message_type;
-
-#if 0
-/*!
- * @brief
- *  Structure to hold custom detected objects
- *  Instead of sending raw point clouds, send simplified clustered objects.
- */
-typedef struct MmwDemo_DetectedObject_t {
-    float distance_m;      // Khoáº£ng cĂ¡ch tá»« Radar (m)
-    float width_m;         // Äá»™ rá»™ng váº­t lĂ½ (m)
-    float elevation_deg;   // GĂ³c ngáº©ng (Ä‘á»™)
-    float power_db;        // Má»©c nÄƒng lÆ°á»£ng (dB)
-} MmwDemo_DetectedObject;
-#endif
-
-/** Slot-2 descriptor used because the SDK DPM ABI has only buffers 0..2. */
-#define MMWDEMO_AUX_RESULT_MAGIC            (0x41555852U) /* AUXR */
-#define MMWDEMO_AUX_RESULT_VERSION          (3U)
-#define MMWDEMO_AUX_RESULT_FLAG_NAV_VALID   (1U << 0)
-#define MMWDEMO_AUX_RESULT_FLAG_NAV_SURFACE_ENABLED (1U << 1)
-#define MMWDEMO_AUX_RESULT_FLAG_NAV_TARGET_ENABLED  (1U << 2)
-
-typedef struct MmwDemo_AuxResult_t
-{
-    uint32_t magic;
-    uint16_t version;
-    uint16_t headerSize;
-    uint32_t radarFrameNumber;
-    uint16_t subFrameNumber;
-    uint16_t flags;
-    uint32_t navAddress;
-    uint32_t navSize;
-} MmwDemo_AuxResult;
-
-typedef char MmwDemo_AuxResultSizeCheck[
-    (sizeof(MmwDemo_AuxResult) == 24U) ? 1 : -1];
 
 /*!
  * @brief
@@ -225,11 +180,9 @@ typedef struct MmwDemo_NavCliCfg_t {
     float   minMovingSpeedMps;
     int16_t minRangeBin;
     int16_t maxRangeBin;
-    uint16_t surfaceRangeToleranceBins;
     uint16_t maxSurfacePoints;
     uint16_t uartMaxSurfacePoints; /* MSS feedback cap; user grid is unchanged */
-    uint8_t surfaceMinRunLength;
-    uint8_t surfaceElevationNeighborBins;
+    uint8_t  reservedNav[4];
     uint8_t isValid;
     uint8_t enabledSurfaceMask;
     uint8_t reserved[4];
