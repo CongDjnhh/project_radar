@@ -18,9 +18,6 @@ extern "C" {
 #define MMWDEMO_NAV_MAX_SURFACE_POINTS       (512U)
 #define MMWDEMO_NAV_NUM_AZIMUTH_SECTORS      (8U)
 #define MMWDEMO_NAV_NUM_ELEVATION_SECTORS    (64U)
-#define MMWDEMO_NAV_EGO_MODE_OFF              (0U)
-#define MMWDEMO_NAV_EGO_MODE_EXTERNAL         (1U)
-#define MMWDEMO_NAV_EGO_MODE_SCENE            (2U)
 
 #define MMWDEMO_NAV_EINVAL                   (-101)
 #define MMWDEMO_NAV_ECANDIDATE_PAYLOAD       (-103)

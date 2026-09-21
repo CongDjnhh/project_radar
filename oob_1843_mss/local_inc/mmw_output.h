@@ -185,20 +185,7 @@ typedef struct MmwDemo_NavCliCfg_t {
     uint8_t  reservedNav[4];
     uint8_t isValid;
     uint8_t enabledSurfaceMask;
-    uint8_t reserved[4];
-    uint8_t egoMode;
-    uint16_t sceneMinInliers;
-    uint16_t egoVelocityValidFrames;
-    uint16_t reserved16;
-    float staticVelocityThresholdMps;
-    float egoVelocityXMps;
-    float egoVelocityYMps;
-    float egoVelocityZMps;
-    float egoConfidence;
-    float egoConfidenceThreshold;
-    float egoMaxSpeedMps;
-    float sceneResidualThresholdMps;
-    uint32_t egoSequence;
+    uint8_t  reserved[50];
     /* Timing contract published by MSS after RF parsing.  Values are kept in
      * microseconds so both cores use the configured frame/subframe period and
      * never depend on a wrapping 32-bit cycle-to-cycle interval. */

@@ -3077,7 +3077,6 @@ static void MmwDemo_handleObjectDetResult
         uint16_t configuredMaxNavSurface = 384U;
         uint8_t navGeneration;
         uint8_t navSurfaceOutputEnabled = 0U;
-        uint8_t navTargetOutputEnabled = 0U;
         UInt key;
         volatile MmwDemo_NavCliCfg *sharedNavFeedbackCfg =
             (volatile MmwDemo_NavCliCfg *)&gHSRAM.navCfg;
@@ -3089,7 +3088,6 @@ static void MmwDemo_handleObjectDetResult
             navSurfaceOutputEnabled =
                 ((sharedNavFeedbackCfg->enabledSurfaceMask &
                   (1U << currSubFrameIdx)) != 0U) ? 1U : 0U;
-            navTargetOutputEnabled = 0U;
             if ((sharedNavFeedbackCfg->maxSurfacePoints != 0U) &&
                 (sharedNavFeedbackCfg->maxSurfacePoints <=
                  MMWDEMO_NAV_MAX_SURFACE_POINTS))
@@ -3184,7 +3182,7 @@ static void MmwDemo_handleObjectDetResult
                     currSubFrameIdx,
                     nextMaxNavSurface,
                     navSurfaceOutputEnabled,
-                    navTargetOutputEnabled);
+                    0U);
             MEM_BARRIER();
             sharedNavFeedbackCfg->isValid = nextGeneration;
             MEM_BARRIER();

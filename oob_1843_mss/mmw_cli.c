@@ -101,8 +101,6 @@ static int32_t MmwDemo_CLILvdsStreamCfg (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLIConfigDataPort (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLINavPointCfg (int32_t argc, char* argv[]);
 
-static int32_t MmwDemo_CLINavEgoCfg (int32_t argc, char* argv[]);
-
 /**************************************************************************
  *************************** Extern Definitions *******************************
  **************************************************************************/
@@ -467,19 +465,6 @@ static void MmwDemo_CLIInitNavDefaults(
     sharedCfg->reservedNav[2] = 0U;
     sharedCfg->reservedNav[3] = 0U;
     sharedCfg->enabledSurfaceMask = 0U;
-    sharedCfg->egoMode = MMWDEMO_NAV_EGO_MODE_SCENE;
-    sharedCfg->sceneMinInliers = 12U;
-    sharedCfg->egoVelocityValidFrames = 5U;
-    sharedCfg->reserved16 = 0U;
-    sharedCfg->staticVelocityThresholdMps = 0.20f;
-    sharedCfg->egoVelocityXMps = 0.0f;
-    sharedCfg->egoVelocityYMps = 0.0f;
-    sharedCfg->egoVelocityZMps = 0.0f;
-    sharedCfg->egoConfidence = 0.0f;
-    sharedCfg->egoConfidenceThreshold = 0.55f;
-    sharedCfg->egoMaxSpeedMps = 8.0f;
-    sharedCfg->sceneResidualThresholdMps = 0.30f;
-    sharedCfg->egoSequence = 1U;
 }
 
 static uint8_t MmwDemo_CLIUpdateSubFrameMask(
@@ -1541,10 +1526,6 @@ void MmwDemo_CLIInit (uint8_t taskPriority)
 
 
 
-    cliCfg.tableEntry[cnt].cmd            = "navEgoCfg";
-    cliCfg.tableEntry[cnt].helpString     = "<mode:0=off,1=external,2=scene> <vxRadarMps> <vyRadarMps> <vzRadarMps> <confidence> <validFrames> <confidenceThreshold> <maxSpeedMps> <sceneResidualMps> <sceneMinInliers>";
-    cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLINavEgoCfg;
-    cnt++;
 
     cliCfg.tableEntry[cnt].cmd            = "guiMonitor";
     cliCfg.tableEntry[cnt].helpString     = "<subFrameIdx> <detectedObjects> <logMagRange> <noiseProfile> <rangeAzimuthHeatMap> <rangeDopplerHeatMap> <statsInfo> [radarCube]";
@@ -1767,100 +1748,3 @@ static int32_t MmwDemo_CLINavPointCfg(int32_t argc, char *argv[])
     Hwi_restore(key);
     return 0;
 }
-
-/** Configure translation-only ego Doppler compensation in radar coordinates. */
-static int32_t MmwDemo_CLINavEgoCfg(int32_t argc, char *argv[])
-{
-    volatile MmwDemo_NavCliCfg *sharedCfg;
-    int32_t mode;
-    int32_t validFrames;
-    int32_t sceneMinInliers;
-    float velocityX;
-    float velocityY;
-    float velocityZ;
-    float confidence;
-    float confidenceThreshold;
-    float maxSpeed;
-    float sceneResidual;
-    float speedSquared;
-    uint8_t nextGeneration;
-    UInt key;
-
-    if (argc != 11)
-    {
-        CLI_write("Error: navEgoCfg expects 10 arguments.\n");
-        return -1;
-    }
-    velocityX = (float)atof(argv[2]);
-    velocityY = (float)atof(argv[3]);
-    velocityZ = (float)atof(argv[4]);
-    confidence = (float)atof(argv[5]);
-    confidenceThreshold = (float)atof(argv[7]);
-    maxSpeed = (float)atof(argv[8]);
-    sceneResidual = (float)atof(argv[9]);
-    speedSquared = velocityX * velocityX +
-                   velocityY * velocityY + velocityZ * velocityZ;
-    if ((MmwDemo_CLIParseInt32(argv[1], MMWDEMO_NAV_EGO_MODE_OFF,
-                               MMWDEMO_NAV_EGO_MODE_SCENE, &mode) < 0) ||
-        (MmwDemo_CLIParseInt32(argv[6], 1, 1000, &validFrames) < 0) ||
-        (MmwDemo_CLIParseInt32(argv[10], 3,
-                               MMWDEMO_NAV_MAX_SURFACE_POINTS,
-                               &sceneMinInliers) < 0) ||
-        (!isfinite(velocityX)) || (!isfinite(velocityY)) ||
-        (!isfinite(velocityZ)) ||
-        (!isfinite(confidence)) || (confidence < 0.0f) ||
-        (confidence > 1.0f) ||
-        (!isfinite(confidenceThreshold)) ||
-        (confidenceThreshold < 0.0f) ||
-        (confidenceThreshold > 1.0f) ||
-        (!isfinite(maxSpeed)) || (maxSpeed < 0.10f) ||
-        (maxSpeed > 20.0f) ||
-        (speedSquared > maxSpeed * maxSpeed) ||
-        (!isfinite(sceneResidual)) || (sceneResidual < 0.01f) ||
-        (sceneResidual > 5.0f))
-    {
-        CLI_write("Error: navEgoCfg values are outside supported bounds.\n");
-        return -1;
-    }
-
-    extern MmwDemo_HSRAM gHSRAM;
-    sharedCfg = (volatile MmwDemo_NavCliCfg *)&gHSRAM.navCfg;
-    key = Hwi_disable();
-    if (sharedCfg->isValid == 0U)
-    {
-        MmwDemo_CLIInitNavDefaults(sharedCfg);
-        nextGeneration = 1U;
-    }
-    else
-    {
-        nextGeneration = sharedCfg->isValid + 1U;
-        if (nextGeneration == 0U)
-        {
-            nextGeneration = 1U;
-        }
-    }
-
-    sharedCfg->isValid = 0U;
-    MEM_BARRIER();
-    sharedCfg->egoMode = (uint8_t)mode;
-    sharedCfg->egoVelocityXMps = velocityX;
-    sharedCfg->egoVelocityYMps = velocityY;
-    sharedCfg->egoVelocityZMps = velocityZ;
-    sharedCfg->egoConfidence = confidence;
-    sharedCfg->egoVelocityValidFrames = (uint16_t)validFrames;
-    sharedCfg->egoConfidenceThreshold = confidenceThreshold;
-    sharedCfg->egoMaxSpeedMps = maxSpeed;
-    sharedCfg->sceneResidualThresholdMps = sceneResidual;
-    sharedCfg->sceneMinInliers = (uint16_t)sceneMinInliers;
-    sharedCfg->egoSequence++;
-    if (sharedCfg->egoSequence == 0U)
-    {
-        sharedCfg->egoSequence = 1U;
-    }
-    MEM_BARRIER();
-    sharedCfg->isValid = nextGeneration;
-    MEM_BARRIER();
-    Hwi_restore(key);
-    return 0;
-}
-

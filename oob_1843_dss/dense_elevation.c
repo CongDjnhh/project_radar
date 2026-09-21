@@ -77,12 +77,6 @@ static int16_t gDenseFftInput[2U * MMWDEMO_DENSE_ELEV_MAX_DOPPLER_BINS];
  * help, but L1D placement guarantees zero-wait-state access. */
 static int16_t gDenseFftTwiddle[2U * MMWDEMO_DENSE_ELEV_MAX_DOPPLER_BINS];
 
-#pragma DATA_SECTION(gDenseDetRowScratch, ".l1dscratch");
-#pragma DATA_ALIGN(gDenseDetRowScratch, 8);
-/* P1.3: L1D SRAM (0 wait-state). Written then read by Shell Sort for every
- * range bin to compute the median noise floor.  256 bytes in L3 would
- * generate a cache miss on every Shell Sort gap iteration. */
-static uint16_t gDenseDetRowScratch[MMWDEMO_DENSE_ELEV_MAX_DOPPLER_BINS];
 
 #pragma DATA_SECTION(gDenseAzPower, ".l3ram");
 #pragma DATA_ALIGN(gDenseAzPower, 8);
@@ -554,40 +548,6 @@ static void MmwDemo_DenseElevation_prepareSignal(
     }
 }
 
-static uint16_t MmwDemo_DenseElevation_medianQ8(
-    const uint16_t *row,
-    uint16_t count)
-{
-    uint16_t gap;
-
-    memcpy(gDenseDetRowScratch, row, count * sizeof(uint16_t));
-    /* Shell sort keeps the exact median used by the detector while avoiding
-     * insertion sort's O(N^2) worst case for 128 Doppler bins. */
-    for (gap = count >> 1U; gap != 0U; gap >>= 1U)
-    {
-        uint16_t i;
-        for (i = gap; i < count; i++)
-        {
-            uint16_t value = gDenseDetRowScratch[i];
-            uint16_t j = i;
-            while ((j >= gap) &&
-                   (gDenseDetRowScratch[j - gap] > value))
-            {
-                gDenseDetRowScratch[j] = gDenseDetRowScratch[j - gap];
-                j -= gap;
-            }
-            gDenseDetRowScratch[j] = value;
-        }
-    }
-
-    if ((count & 1U) != 0U)
-    {
-        return gDenseDetRowScratch[count >> 1U];
-    }
-    return (uint16_t)(((uint32_t)gDenseDetRowScratch[(count >> 1U) - 1U] +
-                       (uint32_t)gDenseDetRowScratch[count >> 1U] + 1U) >> 1U);
-}
-
 static uint16_t MmwDemo_DenseElevation_thresholdQ8(
     float thresholdDb,
     uint16_t numVirtualAntennas)
@@ -648,7 +608,15 @@ static uint16_t MmwDemo_DenseElevation_selectDopplerCandidates(
     float snrThresholdDb,
     MmwDemo_DenseDopplerCandidate *candidate)
 {
-    uint16_t noiseQ8 = MmwDemo_DenseElevation_medianQ8(detRow, numDopplerBins);
+    /* TI mmWave OOB demo noise floor mechanism:
+     * The thermal receiver noise floor for a range bin is evaluated at the
+     * Nyquist Doppler frequency boundary ((numDopplerBins / 2) - 1), where
+     * zero-velocity clutter (walls, ground) and normal physical targets have
+     * no energy. Symmetric average of bins (N/2 - 1) and (N/2) provides a
+     * robust, O(1) thermal noise reference without Shell sorting or CFAR window masking. */
+    uint16_t nyquistIdx = (numDopplerBins >> 1U) - 1U;
+    uint16_t noiseQ8 = (uint16_t)(((uint32_t)detRow[nyquistIdx] +
+                                   (uint32_t)detRow[nyquistIdx + 1U] + 1U) >> 1U);
     uint16_t thresholdQ8 = MmwDemo_DenseElevation_thresholdQ8(
         snrThresholdDb, numVirtualAntennas);
     uint16_t count = 0U;
