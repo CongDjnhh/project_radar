@@ -608,15 +608,13 @@ static uint16_t MmwDemo_DenseElevation_selectDopplerCandidates(
     float snrThresholdDb,
     MmwDemo_DenseDopplerCandidate *candidate)
 {
-    /* TI mmWave OOB demo noise floor mechanism:
-     * The thermal receiver noise floor for a range bin is evaluated at the
-     * Nyquist Doppler frequency boundary ((numDopplerBins / 2) - 1), where
-     * zero-velocity clutter (walls, ground) and normal physical targets have
-     * no energy. Symmetric average of bins (N/2 - 1) and (N/2) provides a
-     * robust, O(1) thermal noise reference without Shell sorting or CFAR window masking. */
-    uint16_t nyquistIdx = (numDopplerBins >> 1U) - 1U;
-    uint16_t noiseQ8 = (uint16_t)(((uint32_t)detRow[nyquistIdx] +
-                                   (uint32_t)detRow[nyquistIdx + 1U] + 1U) >> 1U);
+    /* Average all Doppler bins to robustly estimate the noise floor (since it's log magnitude). */
+    uint32_t sumQ8 = 0;
+    uint16_t d_idx;
+    for (d_idx = 0; d_idx < numDopplerBins; d_idx++) {
+        sumQ8 += (uint32_t)detRow[d_idx];
+    }
+    uint16_t noiseQ8 = (uint16_t)(sumQ8 / numDopplerBins);
     uint16_t thresholdQ8 = MmwDemo_DenseElevation_thresholdQ8(
         snrThresholdDb, numVirtualAntennas);
     uint16_t count = 0U;

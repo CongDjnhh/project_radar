@@ -25,27 +25,31 @@
      MMWDEMO_DENSE_ELEV_MAX_OUTPUT_SAMPLES * \
      sizeof(MmwDemo_DenseElevation_OutputSample))
 
-/* L3 is effectively full in the xWR18xx OOB image. These temporary arrays are
- * active only during inter-frame navigation processing, so place them in the
- * otherwise unused 16-KiB L1D SRAM instead of consuming persistent L3. */
-typedef struct MmwDemo_NavScratch_t
-{
-    int16_t nearestCandidate[MMWDEMO_NAV_NUM_ANGLE_CELLS];
-} MmwDemo_NavScratch;
+/* ========================================================================
+ * Temporal Persistence Filter — replaces NearestMap.
+ * A 2-D history grid (Azimuth × RangeGroup) scores each cell's temporal
+ * stability.  Transient noise (score < threshold) is suppressed before
+ * UART output.  Unlike NearestMap, surfaces at *all* ranges are retained
+ * when they persist across frames, enabling multi-layer detection.
+ * ====================================================================== */
+#define NAV_HIST_NUM_AZ    MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS  /* 64 */
+#define NAV_HIST_NUM_RNG   (64U)   /* 256 range bins / 4 → 64 groups   */
+#define NAV_HIST_MAP_SIZE  (NAV_HIST_NUM_AZ * NAV_HIST_NUM_RNG) /* 4096 */
+#define NAV_HIST_MAX_SCORE  (5U)
+#define NAV_HIST_HIT_BONUS  (2U)
+#define NAV_HIST_DECAY      (1U)
+#define NAV_HIST_THRESHOLD  (1U)
 
-typedef char MmwDemo_NavScratchSizeCheck[
-    (sizeof(MmwDemo_NavScratch) <=
-     (MMWDEMO_NAV_NUM_ANGLE_CELLS * sizeof(int16_t))) ? 1 : -1];
+/* Persistent across frames → must reside in L3 (not L1D scratch). */
+#pragma DATA_SECTION(gNavHistoryMap, ".l3ram")
+#pragma DATA_ALIGN(gNavHistoryMap, 8)
+static far uint8_t gNavHistoryMap[NAV_HIST_MAP_SIZE];  /* 4,096 bytes */
 
-#pragma DATA_SECTION(gNavScratch, ".navScratch")
-#pragma DATA_ALIGN(gNavScratch, 8)
-static MmwDemo_NavScratch gNavScratch;
-
+/* gNavCellSelected is still needed by emitPrioritized for sector balancing.
+ * It is scratch (re-zeroed every frame) so L1D placement is correct. */
 #pragma DATA_SECTION(gNavCellSelected, ".navScratch")
 #pragma DATA_ALIGN(gNavCellSelected, 8)
 static uint8_t gNavCellSelected[MMWDEMO_NAV_SELECTION_BYTES];
-
-#define gNavNearestCandidate (gNavScratch.nearestCandidate)
 
 /* Cycle profiling for emitSurface (includes emitPrioritized + findBestUnselected).
  * Read via CCS watch to assess O(N*M) cost per review point #5. */
@@ -226,16 +230,16 @@ static int16_t MmwDemo_NavPointGen_findBestUnselected(
     int16_t requiredSector)
 {
     uint16_t sampleIndex;
-    int16_t bestCell = -1;
+    int16_t bestIdx = -1;
     const MmwDemo_DenseElevation_OutputSample *best = NULL;
 
-    /* Iterate only occupied source samples. The nearest-candidate equality
-     * removes duplicates without rescanning all 4096 angle cells per output. */
+    /* After temporal filtering every sample in the array is genuine.
+     * We only skip samples whose angle cell was already emitted (isSelected)
+     * to avoid duplicates in the final output. */
     for (sampleIndex = 0U; sampleIndex < sampleCount; sampleIndex++)
     {
         uint16_t cell = MmwDemo_NavPointGen_cellIndex(&samples[sampleIndex]);
-        if ((gNavNearestCandidate[cell] != (int16_t)sampleIndex) ||
-            (MmwDemo_NavPointGen_isSelected(gNavCellSelected, cell) != 0U) ||
+        if ((MmwDemo_NavPointGen_isSelected(gNavCellSelected, cell) != 0U) ||
             ((requiredSector >= 0) &&
              ((int16_t)MmwDemo_NavPointGen_sector(&samples[sampleIndex]) !=
               requiredSector)))
@@ -246,10 +250,10 @@ static int16_t MmwDemo_NavPointGen_findBestUnselected(
                 &samples[sampleIndex], best) != 0U)
         {
             best = &samples[sampleIndex];
-            bestCell = (int16_t)cell;
+            bestIdx = (int16_t)sampleIndex;
         }
     }
-    return bestCell;
+    return bestIdx;
 }
 
 static uint16_t MmwDemo_NavPointGen_emitPrioritized(
@@ -281,21 +285,19 @@ static uint16_t MmwDemo_NavPointGen_emitPrioritized(
 
         while ((emittedInSector < quota) && (count < maxOutput))
         {
-            int16_t bestCell;
-            int16_t candidateIndex;
-            bestCell = MmwDemo_NavPointGen_findBestUnselected(
+            int16_t bestIdx;
+            bestIdx = MmwDemo_NavPointGen_findBestUnselected(
                 samples, sampleCount, (int16_t)sector);
-            if (bestCell < 0)
+            if (bestIdx < 0)
             {
                 break;
             }
-            candidateIndex = gNavNearestCandidate[bestCell];
             MmwDemo_NavPointGen_copyPoint(
                 &outPoints[count],
                 (outSideInfo != NULL) ? &outSideInfo[count] : NULL,
-                &samples[candidateIndex], staticCfg);
+                &samples[bestIdx], staticCfg);
             MmwDemo_NavPointGen_setSelected(gNavCellSelected,
-                                             (uint16_t)bestCell);
+                MmwDemo_NavPointGen_cellIndex(&samples[bestIdx]));
             count++;
             emittedInSector++;
         }
@@ -305,21 +307,19 @@ static uint16_t MmwDemo_NavPointGen_emitPrioritized(
      * priority rather than signed angle/index. */
     while (count < maxOutput)
     {
-        int16_t bestCell;
-        int16_t candidateIndex;
-        bestCell = MmwDemo_NavPointGen_findBestUnselected(
+        int16_t bestIdx;
+        bestIdx = MmwDemo_NavPointGen_findBestUnselected(
             samples, sampleCount, -1);
-        if (bestCell < 0)
+        if (bestIdx < 0)
         {
             break;
         }
-        candidateIndex = gNavNearestCandidate[bestCell];
         MmwDemo_NavPointGen_copyPoint(
             &outPoints[count],
             (outSideInfo != NULL) ? &outSideInfo[count] : NULL,
-            &samples[candidateIndex], staticCfg);
+            &samples[bestIdx], staticCfg);
         MmwDemo_NavPointGen_setSelected(gNavCellSelected,
-                                         (uint16_t)bestCell);
+            MmwDemo_NavPointGen_cellIndex(&samples[bestIdx]));
         count++;
     }
     return count;
@@ -334,48 +334,98 @@ static uint16_t MmwDemo_NavPointGen_emitSurface(
     const MmwDemo_NavPointGen_StaticCfg *staticCfg,
     uint16_t *availableCount)
 {
-    uint16_t cell;
-    uint16_t total = 0U;
-
-    for (cell = 0U; cell < MMWDEMO_NAV_NUM_ANGLE_CELLS; cell++)
-    {
-        if (gNavNearestCandidate[cell] >= 0)
-        {
-            total++;
-        }
-    }
-    *availableCount = total;
+    /* After temporal filtering, every sample in the array is a confirmed
+     * surface.  availableCount simply reports how many survived the filter. */
+    *availableCount = sampleCount;
     return MmwDemo_NavPointGen_emitPrioritized(
         samples, sampleCount, maxOutput, outPoints, outSideInfo, staticCfg);
 }
 
-static int32_t MmwDemo_NavPointGen_buildNearestMap(
+/* ========================================================================
+ * Temporal Persistence Filter — 3 phase pipeline
+ * ====================================================================== */
+
+/**
+ * Phase 1: DECAY — age every cell in the history grid by 1.
+ * Cells that haven't been refreshed recently fade to zero.
+ */
+static void MmwDemo_NavPointGen_historyDecay(void)
+{
+    uint16_t i;
+    for (i = 0U; i < NAV_HIST_MAP_SIZE; i++)
+    {
+        if (gNavHistoryMap[i] > 0U)
+        {
+            gNavHistoryMap[i] -= NAV_HIST_DECAY;
+        }
+    }
+}
+
+/**
+ * Phase 2: HIT — boost the score for every (azimuth, rangeGroup) cell
+ * that has a candidate sample in the current frame.
+ */
+static void MmwDemo_NavPointGen_historyHit(
     const MmwDemo_DenseElevation_OutputSample *samples,
     uint16_t sampleCount)
 {
-    uint16_t cell;
-    uint16_t sampleIndex;
+    uint16_t s;
+    for (s = 0U; s < sampleCount; s++)
+    {
+        int16_t az = (int16_t)samples[s].azimuthIdx +
+                     (int16_t)(NAV_HIST_NUM_AZ / 2U);
+        uint16_t rngGrp = samples[s].rangeIdx >> 2U;
 
-    for (cell = 0U; cell < MMWDEMO_NAV_NUM_ANGLE_CELLS; cell++)
-    {
-        gNavNearestCandidate[cell] = -1;
-    }
-    for (sampleIndex = 0U; sampleIndex < sampleCount; sampleIndex++)
-    {
-        int16_t currentIndex;
-        cell = MmwDemo_NavPointGen_cellIndex(&samples[sampleIndex]);
-        currentIndex = gNavNearestCandidate[cell];
-        if ((currentIndex < 0) ||
-            (samples[sampleIndex].rangeIdx < samples[currentIndex].rangeIdx) ||
-            ((samples[sampleIndex].rangeIdx ==
-              samples[currentIndex].rangeIdx) &&
-             (samples[sampleIndex].snrDb10 >
-              samples[currentIndex].snrDb10)))
+        if (az < 0) { az = 0; }
+        if (az >= (int16_t)NAV_HIST_NUM_AZ) { az = (int16_t)NAV_HIST_NUM_AZ - 1; }
+        if (rngGrp >= NAV_HIST_NUM_RNG) { rngGrp = NAV_HIST_NUM_RNG - 1U; }
+
         {
-            gNavNearestCandidate[cell] = (int16_t)sampleIndex;
+            uint16_t idx = (uint16_t)az * NAV_HIST_NUM_RNG + rngGrp;
+            uint8_t score = gNavHistoryMap[idx] + NAV_HIST_HIT_BONUS;
+            if (score > NAV_HIST_MAX_SCORE)
+            {
+                score = NAV_HIST_MAX_SCORE;
+            }
+            gNavHistoryMap[idx] = score;
         }
     }
-    return 0;
+}
+
+/**
+ * Phase 3: FILTER — compact the sample array in-place, keeping only
+ * samples whose history cell score meets the persistence threshold.
+ * Returns the number of surviving samples.
+ */
+static uint16_t MmwDemo_NavPointGen_historyFilter(
+    MmwDemo_DenseElevation_OutputSample *samples,
+    uint16_t sampleCount)
+{
+    uint16_t writeIdx = 0U;
+    uint16_t s;
+    for (s = 0U; s < sampleCount; s++)
+    {
+        int16_t az = (int16_t)samples[s].azimuthIdx +
+                     (int16_t)(NAV_HIST_NUM_AZ / 2U);
+        uint16_t rngGrp = samples[s].rangeIdx >> 2U;
+
+        if (az < 0) { az = 0; }
+        if (az >= (int16_t)NAV_HIST_NUM_AZ) { az = (int16_t)NAV_HIST_NUM_AZ - 1; }
+        if (rngGrp >= NAV_HIST_NUM_RNG) { rngGrp = NAV_HIST_NUM_RNG - 1U; }
+
+        {
+            uint16_t idx = (uint16_t)az * NAV_HIST_NUM_RNG + rngGrp;
+            if (gNavHistoryMap[idx] >= NAV_HIST_THRESHOLD)
+            {
+                if (writeIdx != s)
+                {
+                    samples[writeIdx] = samples[s];
+                }
+                writeIdx++;
+            }
+        }
+    }
+    return writeIdx;
 }
 
 int32_t MmwDemo_NavPointGen_process(
@@ -469,14 +519,13 @@ int32_t MmwDemo_NavPointGen_process(
 
     samples = (MmwDemo_DenseElevation_OutputSample *)(
         candidateBuffer + candidateHeader->headerSize);
-    /* One nearest return per azimuth/elevation ray. At equal range, retain
-     * the higher-SNR source. */
-    retVal = MmwDemo_NavPointGen_buildNearestMap(
+    /* Temporal persistence filter: decay → hit → filter.
+     * Replaces buildNearestMap() to allow multi-layer detection
+     * while rejecting transient noise (ghost points). */
+    MmwDemo_NavPointGen_historyDecay();
+    MmwDemo_NavPointGen_historyHit(samples, candidateHeader->numSamples);
+    candidateHeader->numSamples = MmwDemo_NavPointGen_historyFilter(
         samples, candidateHeader->numSamples);
-    if (retVal != 0)
-    {
-        return retVal;
-    }
 
     emitSurfaceStartCycles = Cycleprofiler_getTimeStamp();
     *numPointsOut = (uint32_t)MmwDemo_NavPointGen_emitSurface(
@@ -500,6 +549,6 @@ int32_t MmwDemo_NavPointGen_process(
 
 void MmwDemo_NavPointGen_reset(void)
 {
-    memset(&gNavScratch, 0, sizeof(gNavScratch));
+    memset(gNavHistoryMap, 0, sizeof(gNavHistoryMap));
     memset(gNavCellSelected, 0, sizeof(gNavCellSelected));
 }

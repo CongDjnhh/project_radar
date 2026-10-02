@@ -61,8 +61,8 @@
 #include <ti/utils/hsiheader/hsiheader.h>
 
 /* MMWAVE Demo Include Files */
-#include "local_inc/mmw_mss.h"
-#include "local_inc/mmw_res.h"
+#include <ti/demo/xwr18xx/mmw/mss/mmw_mss.h>
+#include <ti/demo/xwr18xx/mmw/mmw_res.h>
 
 extern MmwDemo_MSS_MCB    gMmwMssMCB;
 

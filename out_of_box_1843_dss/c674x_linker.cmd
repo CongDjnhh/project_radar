@@ -30,16 +30,6 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-/*
- * The C674x .text output section is intentionally split across L2 memory
- * ranges.  Functions in the first range can therefore reach the compiler's
- * __push_rts/__pop_rts helpers through linker-generated trampolines and emit
- * diagnostic #10370-D.  TI recommends retaining push/pop optimization for
- * mmWave DSP applications; disabling it increases code size globally.  Keep
- * the optimized code and suppress only this expected placement diagnostic.
- */
---diag_suppress=10370
-
 #define L1P_CACHE_SIZE (16*1024)
 #define L1D_CACHE_SIZE (16*1024)
 #define MMWAVE_L3RAM_SIZE (MMWAVE_L3RAM_NUM_BANK*MMWAVE_SHMEM_BANK_SIZE)
@@ -91,18 +81,19 @@ SECTIONS
        and allowed to overflow into Z and cannot be split from Y to Z. Some sections
        like bss are not allowed to be split so > notation is used for them */
 
-    .fardata:  {} >> L2SRAM_UMAP0 | L2SRAM_UMAP1 | L3SRAM
-    .const:    {} >> L2SRAM_UMAP0 | L2SRAM_UMAP1 | L3SRAM
-    .switch:   {} >> L2SRAM_UMAP0 | L2SRAM_UMAP1 | L3SRAM
-    .cio:      {} >> L2SRAM_UMAP0 | L2SRAM_UMAP1 | L3SRAM
-    .data:     {} >> L2SRAM_UMAP0 | L2SRAM_UMAP1 | L3SRAM
+    .fardata:  {} >> L2SRAM_UMAP0 | L2SRAM_UMAP1
+    .const:    {} >> L2SRAM_UMAP0 | L2SRAM_UMAP1
+    .switch:   {} >> L2SRAM_UMAP0 | L2SRAM_UMAP1
+    .cio:      {} >> L2SRAM_UMAP0 | L2SRAM_UMAP1
+    .data:     {} >> L2SRAM_UMAP0 | L2SRAM_UMAP1
 
-    .rodata:   {} > L2SRAM_UMAP0 | L2SRAM_UMAP1 | L3SRAM
-    .bss:      {} > L2SRAM_UMAP0 | L2SRAM_UMAP1 | L3SRAM
-    .neardata: {} > L2SRAM_UMAP0 | L2SRAM_UMAP1 | L3SRAM
-    .stack:    {} > L2SRAM_UMAP0 | L2SRAM_UMAP1 | L3SRAM
-    .cinit:    {} > L2SRAM_UMAP0 | L2SRAM_UMAP1 | L3SRAM
-    .far:      {} > L2SRAM_UMAP0 | L2SRAM_UMAP1 | L3SRAM
+    .rodata:   {} > L2SRAM_UMAP0 | L2SRAM_UMAP1
+    .bss:      {} > L2SRAM_UMAP0 | L2SRAM_UMAP1
+    .neardata: {} > L2SRAM_UMAP0 | L2SRAM_UMAP1
+    .stack:    {} > L2SRAM_UMAP0 | L2SRAM_UMAP1
+    .cinit:    {} > L2SRAM_UMAP0 | L2SRAM_UMAP1
+    .far:      {} > L2SRAM_UMAP0 | L2SRAM_UMAP1
 
-    .text: {} >> L2SRAM_UMAP1 | L2SRAM_UMAP0 | L3SRAM
+    .text: {} >> L2SRAM_UMAP1 | L2SRAM_UMAP0
 }
+

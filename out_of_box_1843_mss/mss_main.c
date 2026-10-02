@@ -485,7 +485,7 @@
  *    case of resource allocation across more than one DPCs and/or demo's own
  *    processing that is post-DPC processing. This partitioning
  *    can be seen in the mmw_res.h file. This file is passed as a compiler command line
- *    define @verbatim "--define=APP_RESOURCE_FILE=""local_inc/mmw_res.h"" @endverbatim
+ *    define @verbatim "--define=APP_RESOURCE_FILE="<ti/demo/xwr18xx/mmw/mmw_res.h>" @endverbatim
  *    in mmw_mss.mak and mmw_dss.mak when building the DPC sources as part of building the demo application and
  *    is referred in object detection DPC sources where needed as
  *    @verbatim #include APP_RESOURCE_FILE @endverbatim
@@ -621,18 +621,22 @@
 #include <ti/utils/mathutils/mathutils.h>
 
 /* Demo Include Files */
-#include "local_inc/mmw_config.h"
+#include <ti/demo/xwr18xx/mmw/include/mmw_config.h>
 #include <ti/demo/utils/mmwdemo_rfparser.h>
 #include <ti/demo/utils/mmwdemo_adcconfig.h>
 #include <ti/demo/utils/mmwdemo_monitor.h>
-#include "local_inc/mmw_output.h"
-#include "local_inc/mmw_res.h"
-#include "local_inc/mmw_mss.h"
+#include <ti/demo/xwr18xx/mmw/include/mmw_output.h>
+#include <ti/demo/xwr18xx/mmw/mmw_res.h>
+#include <ti/demo/xwr18xx/mmw/mss/mmw_mss.h>
 #include <ti/board/antenna_geometry.h>
 #include <ti/demo/utils/mmwdemo_flash.h>
 
 /* Profiler Include Files */
 #include <ti/utils/cycleprofiler/cycle_profiler.h>
+
+#ifdef SYS_COMMON_RTRIM_MODIFY_EN
+#include <ti/utils/rtrim/rtrimutils.h>
+#endif
 
 /**
  * @brief Task Priority settings:
@@ -1158,8 +1162,7 @@ static void MmwDemo_measurementResultOutput(DPU_AoAProc_compRxChannelBiasCfg *co
 *       number of chirps per frame * sizeof(uint32_t)
 *    7. If rangeDopplerHeatMap flag is set, the log magnitude range-Doppler matrix,
 *       size = number of range bins * number of Doppler bins * sizeof(uint16_t)
-*    8. If radarCube flag is set, the raw DPIF radar cube in format 1
-*    9. If statsInfo flag is set, the stats information
+*    8. If statsInfo flag is set, the stats information
 *   @param[in] uartHandle   UART driver handle
 *   @param[in] result       Pointer to result from object detection DPC processing
 *   @param[in] timingInfo   Pointer to timing information provided from core that runs data path
@@ -1186,7 +1189,6 @@ static void MmwDemo_transmitProcessedOutput
     cmplx16ImRe_t *azimuthStaticHeatMap;
     DPIF_PointCloudSideInfo *objOutSideInfo;
     DPC_ObjectDetection_Stats *stats;
-    void *radarCubeData = NULL;
     
     /* Get subframe configuration */
     subFrameCfg = &gMmwMssMCB.subFrameCfg[result->subFrameIdx];
@@ -1223,19 +1225,10 @@ static void MmwDemo_transmitProcessedOutput
         DebugP_assert ((uint32_t)stats != SOC_TRANSLATEADDR_INVALID);
 
 
-        if (pGuiMonSel->radarCube == 1U)
-        {
-            /* This DSP object-detection chain produces format 1 only. */
-            DebugP_assert (result->radarCube.datafmt == DPIF_RADARCUBE_FORMAT_1);
-            DebugP_assert ((result->radarCube.data != NULL) &&
-                           (result->radarCube.dataSize != 0U));
-
-            radarCubeData = (void *)SOC_translateAddress(
-                                      (uint32_t)result->radarCube.data,
-                                      SOC_TranslateAddr_Dir_FROM_OTHER_CPU,
-                                      &errCode);
-            DebugP_assert ((uint32_t)radarCubeData != SOC_TRANSLATEADDR_INVALID);
-        }
+        result->radarCube.data = (void *) SOC_translateAddress((uint32_t) result->radarCube.data,
+                                                     SOC_TranslateAddr_Dir_FROM_OTHER_CPU,
+                                                     &errCode);
+        DebugP_assert ((uint32_t) result->radarCube.data!= SOC_TRANSLATEADDR_INVALID);
     }
 
     /* Header: */
@@ -1296,13 +1289,6 @@ static void MmwDemo_transmitProcessedOutput
     {
         tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_RANGE_DOPPLER_HEAT_MAP;
         tl[tlvIdx].length = subFrameCfg->numRangeBins * subFrameCfg->numDopplerBins * sizeof(uint16_t);
-        packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
-        tlvIdx++;
-    }
-    if (pGuiMonSel->radarCube == 1U)
-    {
-        tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_RADAR_CUBE;
-        tl[tlvIdx].length = result->radarCube.dataSize;
         packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
         tlvIdx++;
     }
@@ -1422,20 +1408,6 @@ static void MmwDemo_transmitProcessedOutput
         UART_writePolling (uartHandle,
                 (uint8_t*)detMatrix,
                 tl[tlvIdx].length);
-        tlvIdx++;
-    }
-
-    /* Send the raw range-FFT radar cube. The DPC result remains owned by DSS
-     * until MmwDemo_handleObjectDetResult reports RESULT_EXPORTED. */
-    if (pGuiMonSel->radarCube == 1U)
-    {
-        UART_writePolling (uartHandle,
-                           (uint8_t*)&tl[tlvIdx],
-                           sizeof(MmwDemo_output_message_tl));
-
-        UART_writePolling (uartHandle,
-                           (uint8_t*)radarCubeData,
-                           tl[tlvIdx].length);
         tlvIdx++;
     }
 
@@ -1861,10 +1833,6 @@ static int32_t MmwDemo_dataPathConfig (void)
         subFrameCfg->numChirpsPerSubFrame = RFparserOutParams.numChirpsPerFrame;
         subFrameCfg->numVirtualAntennas = RFparserOutParams.numVirtualAntennas;
 
-        /* DPC pre-start config */
-        memset(&objDetPreStartCfg, 0, sizeof(DPC_ObjectDetection_PreStartCfg));
-        objDetPreStartCfg.subFrameNum = subFrameIndx;
-
         errCode = MmwDemo_ADCBufConfig(gMmwMssMCB.adcBufHandle,
                                  gMmwMssMCB.cfg.openCfg.chCfg.rxChannelEn,
                                  subFrameCfg->numChirpsPerChirpEvent,
@@ -1885,8 +1853,11 @@ static int32_t MmwDemo_dataPathConfig (void)
             goto exit;
         }
 
+        /* DPC pre-start config */
         {
             int32_t idx;
+
+            objDetPreStartCfg.subFrameNum = subFrameIndx;
 
             /* Fill static configuration */
             staticCfg->ADCBufData.data = (void *)SOC_XWR18XX_MSS_ADCBUF_BASE_ADDRESS;
@@ -1929,21 +1900,21 @@ static int32_t MmwDemo_dataPathConfig (void)
 
             if (RFparserOutParams.numRangeBins >= 1022) 
             {        
-                // staticCfg->rangeFFTtuning.fftOutputDivShift = 0;
+                staticCfg->rangeFFTtuning.fftOutputDivShift = 0;
                 /* scale only 2 stages */
-                // staticCfg->rangeFFTtuning.numLastButterflyStagesToScale = 2; 
+                staticCfg->rangeFFTtuning.numLastButterflyStagesToScale = 2; 
             } 
             else if (RFparserOutParams.numRangeBins==512)
             {        
-                // staticCfg->rangeFFTtuning.fftOutputDivShift = 1;
+                staticCfg->rangeFFTtuning.fftOutputDivShift = 1;
                 /* scale last stage */
-                // staticCfg->rangeFFTtuning.numLastButterflyStagesToScale = 1; 
+                staticCfg->rangeFFTtuning.numLastButterflyStagesToScale = 1; 
             } 
             else    
             {        
-                // staticCfg->rangeFFTtuning.fftOutputDivShift = 2;
+                staticCfg->rangeFFTtuning.fftOutputDivShift = 2;
                 /* no scaling needed as ADC data is 16-bit and we have 8 bits to grow */
-                // staticCfg->rangeFFTtuning.numLastButterflyStagesToScale = 0; 
+                staticCfg->rangeFFTtuning.numLastButterflyStagesToScale = 0; 
             }
 
             for (idx = 0; idx < RFparserOutParams.numRxAntennas; idx++)
@@ -2243,9 +2214,9 @@ static void MmwDemo_DPC_ObjectDetection_reportFxn
                               memUsage->L3RamTotal - memUsage->L3RamUsage);
 
                 System_printf("%20s %12d %12d %12d\n", "localRam(L2)",
-                              memUsage->CoreL2RamTotal,
-                              memUsage->CoreL2RamUsage,
-                              memUsage->CoreL2RamTotal - memUsage->CoreL2RamUsage);
+                              memUsage->CoreLocalRamTotal,
+                              memUsage->CoreLocalRamUsage,
+                              memUsage->CoreLocalRamTotal - memUsage->CoreLocalRamUsage);
             }
 
             switch(arg0)
@@ -3864,6 +3835,14 @@ static void MmwDemo_initTask(UArg arg0, UArg arg1)
     }
     System_printf ("Debug: mmWave Control Synchronization was successful\n");
 
+#ifdef SYS_COMMON_RTRIM_MODIFY_EN
+    /* Only when RTRIM MODIFICATION enabled for customer certification purpose */
+    /* Read RTRIM, changing the default RTRIM value 12 to 6 */
+    System_printf ("Trim Value: %d\n", rtrim_get());
+    rtrim_set(6U);
+    System_printf ("Trim Value: %d\n", rtrim_get());
+#endif
+
     /*****************************************************************************
      * Launch the mmWave control execution task
      * - This should have a higher priroity than any other task which uses the
@@ -4000,6 +3979,14 @@ int main (void)
         return -1;
     }    
     
+    /* Wait for BSS powerup */
+    if (SOC_waitBSSPowerUp(socHandle, &errCode) < 0)
+    {
+        /* Debug Message: */
+        System_printf ("Debug: SOC_waitBSSPowerUp failed with Error [%d]\n", errCode);
+        return 0;
+    }
+
     /* Check if the SOC is a secure device */
     if (SOC_isSecureDevice(socHandle, &errCode))
     {

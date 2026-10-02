@@ -71,7 +71,7 @@
 #include <ti/common/sys_common.h>
 #include <ti/common/mmwave_sdk_version.h>
 #include <ti/control/dpm/dpm.h>
-#include <ti/datapath/dpc/objectdetection/objdetdsp/objectdetection.h>
+#include <ti/datapath/dpc/objectdetection/objdethwa/objectdetection.h>
 #include <ti/drivers/soc/soc.h>
 #include <ti/drivers/esm/esm.h>
 #include <ti/drivers/osal/DebugP.h>
@@ -79,9 +79,9 @@
 
 /* Demo Include Files */
 #include <ti/demo/utils/mmwdemo_rfparser.h>
-#include "local_inc/mmw_output.h"
-#include "local_inc/mmw_config.h"
-#include "local_inc/mmw_dss.h"
+#include <ti/demo/xwr18xx/mmw/include/mmw_output.h>
+#include <ti/demo/xwr18xx/mmw/include/mmw_config.h>
+#include <ti/demo/xwr18xx/mmw/dss/mmw_dss.h>
 #include <ti/utils/cycleprofiler/cycle_profiler.h>
 
 /**
@@ -90,7 +90,7 @@
 #define MMWDEMO_DPC_OBJDET_DPM_TASK_PRIORITY      5
 
 /*! L3 RAM buffer for object detection DPC */
-uint8_t gMmwL3[SOC_L3RAM_SIZE - 0x20000];
+uint8_t gMmwL3[SOC_L3RAM_SIZE];
 #ifndef SOC_XWR68XX
 /* EDMA 4K silicon bug related : Align heap to 4K address boundary so that
  * non heap related changes (such as program code) does not alter the 4K related
@@ -100,11 +100,7 @@ uint8_t gMmwL3[SOC_L3RAM_SIZE - 0x20000];
 #pragma DATA_SECTION(gMmwL3, ".l3ram");
 
  /*! L2 RAM buffer for object detection DPC */
-#define MMWDEMO_OBJDET_L1RAM_SIZE (16U * 1024U)
-#define MMWDEMO_OBJDET_L2RAM_SIZE (80U * 1024U)
-uint8_t gDPC_ObjDetL1Heap[MMWDEMO_OBJDET_L1RAM_SIZE];
-#pragma DATA_ALIGN(gDPC_ObjDetL1Heap, 4096U);
-#pragma DATA_SECTION(gDPC_ObjDetL1Heap, ".dpc_l1Heap");
+#define MMWDEMO_OBJDET_L2RAM_SIZE (49U * 1024U)
 uint8_t gDPC_ObjDetL2Heap[MMWDEMO_OBJDET_L2RAM_SIZE];
 #ifndef SOC_XWR68XX
 /* EDMA 4K silicon bug related : Align heap to 4K address boundary so that
@@ -641,13 +637,11 @@ static void MmwDemo_dssInitTask(UArg arg0, UArg arg1)
     memset ((void *)&objDetInitParams, 0, sizeof(DPC_ObjectDetection_InitParams));
 
     /* Note this must be after MmwDemo_dataPathOpen() above which opens the hwa */
-    //objDetInitParams.hwaHandle = gMmwDssMCB.dataPathObj.hwaHandle;
+    objDetInitParams.hwaHandle = gMmwDssMCB.dataPathObj.hwaHandle;
     objDetInitParams.L3ramCfg.addr = (void *)&gMmwL3[0];
     objDetInitParams.L3ramCfg.size = sizeof(gMmwL3);
-    objDetInitParams.CoreL2RamCfg.addr = &gDPC_ObjDetL2Heap[0];
-    objDetInitParams.CoreL2RamCfg.size = sizeof(gDPC_ObjDetL2Heap);
-    objDetInitParams.CoreL1RamCfg.addr = &gDPC_ObjDetL1Heap[0];
-    objDetInitParams.CoreL1RamCfg.size = sizeof(gDPC_ObjDetL1Heap);
+    objDetInitParams.CoreLocalRamCfg.addr = &gDPC_ObjDetL2Heap[0];
+    objDetInitParams.CoreLocalRamCfg.size = sizeof(gDPC_ObjDetL2Heap);
     for (edmaCCIdx = 0; edmaCCIdx < EDMA_NUM_CC; edmaCCIdx++)
     {
         objDetInitParams.edmaHandle[edmaCCIdx] = gMmwDssMCB.dataPathObj.edmaHandle[edmaCCIdx];

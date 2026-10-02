@@ -904,6 +904,7 @@ static int32_t MmwDemo_RFParser_parseCtrlConfig
                                                 centerFreq * outParams->chirpInterval);            
             outParams->dopplerResolution    =   MMWDEMO_RFPARSER_SPEED_OF_LIGHT_IN_METERS_PER_SEC /
                                                 (2.f * outParams->numChirpsPerFrame * centerFreq * outParams->chirpInterval);            
+            outParams->centerFreq           =   centerFreq;
             
 #ifdef MMWDEMO_RFPARSER_DBG        
             System_printf("Ant setting virtualAzim: %d , virtual Elev :%d\n",

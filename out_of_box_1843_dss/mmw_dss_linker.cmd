@@ -10,7 +10,6 @@ SECTIONS
     .hwaBufs: load = HWA_RAM, type = NOINIT
     .l3ram: {} >> L3SRAM
     .dpc_l2Heap: { } >> L2SRAM_UMAP0 | L2SRAM_UMAP1
-    .dpc_l1Heap: { } >> L1DSRAM
     .demoSharedMem: { } >> HSRAM
 }
 /*----------------------------------------------------------------------------*/

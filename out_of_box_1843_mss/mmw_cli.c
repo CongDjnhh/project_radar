@@ -60,8 +60,8 @@
 #include <ti/utils/mathutils/mathutils.h>
 
 /* Demo Include Files */
-#include "local_inc/mmw_config.h"
-#include "local_inc/mmw_mss.h"
+#include <ti/demo/xwr18xx/mmw/include/mmw_config.h>
+#include <ti/demo/xwr18xx/mmw/mss/mmw_mss.h>
 #include <ti/demo/utils/mmwdemo_adcconfig.h>
 #include <ti/demo/utils/mmwdemo_rfparser.h>
 
@@ -413,28 +413,10 @@ static int32_t MmwDemo_CLIGuiMonSel (int32_t argc, char* argv[])
 {
     MmwDemo_GuiMonSel   guiMonSel;
     int8_t              subFrameNum;
-    int32_t             radarCube = 0;
 
-    /* Keep the SDK's original 8-argument form backward compatible. */
-    if ((argc != 8) && (argc != 9))
-    {
-        CLI_write ("Error: Invalid usage of the CLI command\n");
-        return -1;
-    }
-
-    if(MmwDemo_CLIGetSubframe(argc, argv, argc, &subFrameNum) < 0)
+    if(MmwDemo_CLIGetSubframe(argc, argv, 8, &subFrameNum) < 0)
     {
         return -1;
-    }
-
-    if (argc == 9)
-    {
-        radarCube = atoi(argv[8]);
-        if ((radarCube != 0) && (radarCube != 1))
-        {
-            CLI_write ("Error: radarCube must be 0 or 1\n");
-            return -1;
-        }
     }
 
     /* Initialize the guiMonSel configuration: */
@@ -447,7 +429,6 @@ static int32_t MmwDemo_CLIGuiMonSel (int32_t argc, char* argv[])
     guiMonSel.rangeAzimuthHeatMap       = atoi (argv[5]);
     guiMonSel.rangeDopplerHeatMap       = atoi (argv[6]);
     guiMonSel.statsInfo                 = atoi (argv[7]);
-    guiMonSel.radarCube                 = (uint8_t)radarCube;
 
     MmwDemo_CfgUpdate((void *)&guiMonSel, MMWDEMO_GUIMONSEL_OFFSET,
         sizeof(MmwDemo_GuiMonSel), subFrameNum);
@@ -1368,7 +1349,7 @@ void MmwDemo_CLIInit (uint8_t taskPriority)
     cnt++;
 
     cliCfg.tableEntry[cnt].cmd            = "guiMonitor";
-    cliCfg.tableEntry[cnt].helpString     = "<subFrameIdx> <detectedObjects> <logMagRange> <noiseProfile> <rangeAzimuthHeatMap> <rangeDopplerHeatMap> <statsInfo> [radarCube]";
+    cliCfg.tableEntry[cnt].helpString     = "<subFrameIdx> <detectedObjects> <logMagRange> <noiseProfile> <rangeAzimuthHeatMap> <rangeDopplerHeatMap> <statsInfo>";
     cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLIGuiMonSel;
     cnt++;
 

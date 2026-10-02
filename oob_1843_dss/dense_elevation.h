@@ -123,6 +123,7 @@ typedef struct MmwDemo_DenseElevation_OutputHeader_t
     uint16_t protocolStatus; /* 0 success; positive magnitude of DSP error */
     uint32_t processingCycles;
     uint32_t radarFrameNumber;
+    uint32_t reservedPad;    /* Pad to 48 bytes for 8-byte alignment */
 } MmwDemo_DenseElevation_OutputHeader;
 
 typedef struct MmwDemo_DenseElevation_StaticCfg_t
@@ -188,7 +189,7 @@ typedef char MmwDemo_DenseSamplePowerOffsetCheck[
 typedef char MmwDemo_DenseSampleElevWidthOffsetCheck[
     (offsetof(MmwDemo_DenseElevation_OutputSample, elevationWidthUQ15) == 16U) ? 1 : -1];
 typedef char MmwDemo_DenseHeaderSizeCheck[
-    (sizeof(MmwDemo_DenseElevation_OutputHeader) == 44U) ? 1 : -1];
+    (sizeof(MmwDemo_DenseElevation_OutputHeader) == 48U) ? 1 : -1];
 
 #ifdef __cplusplus
 }

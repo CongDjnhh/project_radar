@@ -104,9 +104,9 @@ ANTDEF_AntGeometry gAntDef_default = {
  */
 ANTDEF_AntGeometry gAntDef_AWR1843AOP = {
      .txAnt = {
-                {0, 2},
+                {0, 0},
                 {0, 1},
-                {0, 0}
+                {0, 2}
        },
      .rxAnt = {
                 {3, 0},
@@ -117,4 +117,18 @@ ANTDEF_AntGeometry gAntDef_AWR1843AOP = {
 };
 #endif
 
-float gAntennaSpacing = -1.0f; /* Antenna spacing value based correction factor set to default */
+#if defined(SOC_XWR68XX)
+#ifdef ISK
+float gAntennaSpacing = 2.5e-3;
+#elif defined(ODS)
+float gAntennaSpacing = 2.426e-3;
+#elif defined(AOP)
+float gAntennaSpacing = 2.5e-3;
+#elif defined(DEFAULT_ANT_DESIGN)
+float gAntennaSpacing = 2.5e-3;
+#else
+float gAntennaSpacing = -1; /* Antenna spacing value based correction factor set to default */
+#endif
+#else
+float gAntennaSpacing = -1; /* Antenna spacing value based correction factor set to default or not applicable for other SOCs */
+#endif
