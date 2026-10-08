@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file nav_point_gen.h
  *
  * @brief Frame-synchronous navigation point generation and wire ABI.
@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "dense_elevation.h"
+#include "local_inc/mmw_output.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -21,8 +22,6 @@ extern "C" {
 
 #define MMWDEMO_NAV_EINVAL                   (-101)
 #define MMWDEMO_NAV_ECANDIDATE_PAYLOAD       (-103)
-#define MMWDEMO_NAV_ETIME_BUDGET             (-104)
-#define MMWDEMO_NAV_EFRAME_SLACK              (-105)
 
 /** Configuration is fully runtime supplied. Range bounds use [min,max]. */
 typedef struct MmwDemo_NavPointGen_Cfg_t
@@ -47,13 +46,9 @@ typedef struct MmwDemo_NavPointGen_StaticCfg_t
 int32_t MmwDemo_NavPointGen_process(
     const MmwDemo_NavPointGen_Cfg *cfg,
     const MmwDemo_NavPointGen_StaticCfg *staticCfg,
-    uint32_t deadlineStartCycles,
-    uint32_t deadlineOffsetCycles,
-    uint32_t cycleBudget,
     uint8_t *candidateBuffer,
     uint32_t candidateBufferSize,
-    DPIF_PointCloudCartesian *outPoints,
-    DPIF_PointCloudSideInfo *outSideInfo,
+    MmwDemo_CustomObstacle *outObstacles,
     uint16_t maxOutputPoints,
     uint32_t *numPointsOut);
 

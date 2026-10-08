@@ -1,4 +1,4 @@
-/**
+﻿/**
  *   @file  mmw_output.h
  *
  *   @brief
@@ -91,6 +91,9 @@ typedef enum MmwDemo_output_message_type_e
     /*! @brief   Raw radar cube (DPIF_RADARCUBE_FORMAT_1) */
     MMWDEMO_OUTPUT_MSG_RADAR_CUBE = 10,
 
+    /*! @brief   Custom obstacle point cloud (x, y, z, v, snr, width) */
+    MMWDEMO_OUTPUT_MSG_CUSTOM_OBSTACLES = 20,
+
     MMWDEMO_OUTPUT_MSG_MAX
 } MmwDemo_output_message_type;
 
@@ -164,11 +167,22 @@ typedef struct MmwDemo_output_message_stats_t
 
 /**
  * @brief
+ *  Custom Obstacle point cloud structure requested by user
+ */
+typedef struct MmwDemo_CustomObstacle_t {
+    float x;
+    float y;
+    float z;
+    float velocity;
+    int16_t snr;
+    int16_t width;
+} MmwDemo_CustomObstacle;
+
+/**
+ * @brief
  *  Size of HSRAM Payload data array.
  */
-#define MMWDEMO_HSRAM_PAYLOAD_SIZE        (SOC_HSRAM_SIZE - sizeof(DPC_ObjectDetection_ExecuteResult) - \
-                                            sizeof(MmwDemo_output_message_stats) - \
-                                            sizeof(MmwDemo_NavCliCfg))
+#define MMWDEMO_HSRAM_PAYLOAD_SIZE (1024)
 
 /** Runtime navigation configuration shared atomically from MSS to DSS. */
 typedef struct MmwDemo_NavCliCfg_t {
@@ -176,15 +190,16 @@ typedef struct MmwDemo_NavCliCfg_t {
     float   maxElevationDeg;
     float   minAzimuthDeg;
     float   maxAzimuthDeg;
-    float   snrThresholdDb;
     float   minMovingSpeedMps;
     int16_t minRangeBin;
     int16_t maxRangeBin;
     uint16_t maxSurfacePoints;
     uint16_t uartMaxSurfacePoints; /* MSS feedback cap; user grid is unchanged */
-    uint8_t  reservedNav[4];
-    uint8_t isValid;
-    uint8_t enabledSurfaceMask;
+    /* snrThresholdDb was removed: detection sensitivity is owned by the CFAR
+     * configuration (CLI cfarCfg). The 4 bytes keep the struct size stable. */
+    uint8_t  reservedNav[8];
+    uint8_t  isValid;
+    uint8_t  enabledSurfaceMask;
     uint8_t  reserved[50];
     /* Timing contract published by MSS after RF parsing.  Values are kept in
      * microseconds so both cores use the configured frame/subframe period and
@@ -211,6 +226,10 @@ typedef struct MmwDemo_HSRAM_t
 
     /*! @brief   Output message stats reported by DSS */
     MmwDemo_output_message_stats   outStats;
+
+    /*! @brief   Custom obstacles payload */
+    uint16_t                       numCustomObstacles;
+    MmwDemo_CustomObstacle         customObstacles[512U];
 
     /*! @brief   Payload data of result */
     uint8_t                        payload[MMWDEMO_HSRAM_PAYLOAD_SIZE];

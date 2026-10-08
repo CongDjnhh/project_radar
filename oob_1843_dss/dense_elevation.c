@@ -2,7 +2,8 @@
  * @file dense_elevation.c
  *
  * @brief Frame-synchronous navigation source extraction with continuous
- *        elevation filtering. TI CFAR is not used by this path.
+ *        elevation filtering, seeded by the TI CFAR range-Doppler detection
+ *        list supplied in MmwDemo_DenseElevation_StaticCfg.
  */
 
 #include <stddef.h>
@@ -19,9 +20,7 @@
 #define DENSE_Q15_SCALE                  (32768.0f)
 #define DENSE_Q19_SHIFT                  (19U)
 #define DENSE_MIN_POWER                  (1.0f)
-#define DENSE_MAX_DOPPLER_CANDIDATES     (3U)
 #define DENSE_MAX_AZIMUTH_PEAKS          (2U)
-#define DENSE_DOPPLER_GUARD_BINS         (1U)
 #define DENSE_AZIMUTH_GUARD_BINS         (2U)
 #define DENSE_AZIMUTH_SECTORS            (8U)
 /* Reject elevation phase when the normalized secondary-row power is more
@@ -45,7 +44,6 @@ typedef struct MmwDemo_DenseDopplerCandidate_t
 {
     uint16_t index;
     uint16_t snrDb10;
-    uint16_t magnitudeQ8;
 } MmwDemo_DenseDopplerCandidate;
 
 /* Geometry-dependent azimuth steering. Elevation is estimated from the
@@ -94,6 +92,9 @@ static far uint8_t gDenseAzValid[MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS];
 #pragma DATA_ALIGN(gDenseOutputPriority, 8);
 static far uint32_t
     gDenseOutputPriority[MMWDEMO_DENSE_ELEV_MAX_OUTPUT_SAMPLES];
+
+#pragma DATA_SECTION(gDenseRangeFftDone, ".l3ram");
+static far uint8_t gDenseRangeFftDone[1024];
 
 #pragma DATA_SECTION(gDenseTdmComp, ".l3ram");
 #pragma DATA_ALIGN(gDenseTdmComp, 8);
@@ -548,48 +549,6 @@ static void MmwDemo_DenseElevation_prepareSignal(
     }
 }
 
-static uint16_t MmwDemo_DenseElevation_thresholdQ8(
-    float thresholdDb,
-    uint16_t numVirtualAntennas)
-{
-    uint16_t fftAntennas = 1U;
-    float threshold;
-
-    while (fftAntennas < numVirtualAntennas)
-    {
-        fftAntennas <<= 1U;
-    }
-    /* TI dopplerproc output is Q8 average log2 magnitude. TI documents the
-     * user-dB conversion as 256 * TdB / 6 * N/N'. */
-    threshold = 256.0f * thresholdDb * (float)numVirtualAntennas /
-                (6.0f * (float)fftAntennas);
-    if (threshold > 65535.0f)
-    {
-        return 65535U;
-    }
-    return (uint16_t)(threshold + 0.5f);
-}
-
-static uint16_t MmwDemo_DenseElevation_deltaQ8ToDb10(
-    uint16_t deltaQ8,
-    uint16_t numVirtualAntennas)
-{
-    uint16_t fftAntennas = 1U;
-    uint32_t value;
-
-    while (fftAntennas < numVirtualAntennas)
-    {
-        fftAntennas <<= 1U;
-    }
-    value = ((uint32_t)deltaQ8 * 60U * fftAntennas +
-             (128U * numVirtualAntennas)) /
-            (256U * numVirtualAntennas);
-    if (value > 65535U)
-    {
-        value = 65535U;
-    }
-    return (uint16_t)value;
-}
 
 static uint16_t MmwDemo_DenseElevation_circularDistance(
     uint16_t a,
@@ -600,80 +559,6 @@ static uint16_t MmwDemo_DenseElevation_circularDistance(
     uint16_t wrapped = size - distance;
     return (distance < wrapped) ? distance : wrapped;
 }
-
-static uint16_t MmwDemo_DenseElevation_selectDopplerCandidates(
-    const uint16_t *detRow,
-    uint16_t numDopplerBins,
-    uint16_t numVirtualAntennas,
-    float snrThresholdDb,
-    MmwDemo_DenseDopplerCandidate *candidate)
-{
-    /* Average all Doppler bins to robustly estimate the noise floor (since it's log magnitude). */
-    uint32_t sumQ8 = 0;
-    uint16_t d_idx;
-    for (d_idx = 0; d_idx < numDopplerBins; d_idx++) {
-        sumQ8 += (uint32_t)detRow[d_idx];
-    }
-    uint16_t noiseQ8 = (uint16_t)(sumQ8 / numDopplerBins);
-    uint16_t thresholdQ8 = MmwDemo_DenseElevation_thresholdQ8(
-        snrThresholdDb, numVirtualAntennas);
-    uint16_t count = 0U;
-    uint16_t pass;
-
-    for (pass = 0U; pass < DENSE_MAX_DOPPLER_CANDIDATES; pass++)
-    {
-        uint16_t bestIndex = 0U;
-        uint16_t bestMagnitude = 0U;
-        uint8_t found = 0U;
-        uint16_t d;
-
-        for (d = 0U; d < numDopplerBins; d++)
-        {
-            uint16_t previous = (d == 0U) ? (numDopplerBins - 1U) : (d - 1U);
-            uint16_t next = (d + 1U == numDopplerBins) ? 0U : (d + 1U);
-            uint32_t required = (uint32_t)noiseQ8 + thresholdQ8;
-            uint16_t k;
-            uint8_t separated = 1U;
-
-            if (((uint32_t)detRow[d] < required) ||
-                (detRow[d] < detRow[previous]) ||
-                (detRow[d] < detRow[next]))
-            {
-                continue;
-            }
-            for (k = 0U; k < count; k++)
-            {
-                if (MmwDemo_DenseElevation_circularDistance(
-                        d, candidate[k].index, numDopplerBins) <=
-                    DENSE_DOPPLER_GUARD_BINS)
-                {
-                    separated = 0U;
-                    break;
-                }
-            }
-            if ((separated != 0U) &&
-                ((found == 0U) || (detRow[d] > bestMagnitude)))
-            {
-                bestIndex = d;
-                bestMagnitude = detRow[d];
-                found = 1U;
-            }
-        }
-
-        if (found == 0U)
-        {
-            break;
-        }
-        candidate[count].index = bestIndex;
-        candidate[count].magnitudeQ8 = bestMagnitude;
-        candidate[count].snrDb10 = MmwDemo_DenseElevation_deltaQ8ToDb10(
-            (uint16_t)(bestMagnitude - noiseQ8), numVirtualAntennas);
-        count++;
-    }
-    return count;
-}
-
-
 
 static uint8_t MmwDemo_DenseElevation_sector(int8_t signedAzimuth)
 {
@@ -831,13 +716,10 @@ static void MmwDemo_DenseElevation_processDoppler(
                   (float)MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
         float referencePower;
         float elevationPower;
-        float referenceNormalized;
-        float elevationNormalized;
         float crossReal;
         float crossImag;
         float phase;
         float v;
-        float elevationLimitScale;
 
         memset(rowSum, 0, sizeof(rowSum));
         for (ant = 0U; ant < numVirtualAntennas; ant++)
@@ -857,49 +739,51 @@ static void MmwDemo_DenseElevation_processDoppler(
         elevationPower =
             rowSum[gDenseElevationRow].real * rowSum[gDenseElevationRow].real +
             rowSum[gDenseElevationRow].imag * rowSum[gDenseElevationRow].imag;
-        if ((referencePower < DENSE_MIN_POWER) ||
-            (elevationPower < DENSE_MIN_POWER))
+
+        if (referencePower < DENSE_MIN_POWER)
         {
             continue;
         }
 
-        referenceNormalized = referencePower /
-            ((float)gDenseRowAntCount[gDenseReferenceRow] *
-             (float)gDenseRowAntCount[gDenseReferenceRow]);
-        elevationNormalized = elevationPower /
-            ((float)gDenseRowAntCount[gDenseElevationRow] *
-             (float)gDenseRowAntCount[gDenseElevationRow]);
-        if (elevationNormalized <
-            referenceNormalized * DENSE_MIN_ELEVATION_ROW_RATIO)
+        /* Check configured azimuth FOV */
+        if ((u < minAzSin) || (u > maxAzSin))
         {
             continue;
         }
 
-        /* P_reference * conj(P_elevation), matching TI AoAProc.
-         * Antenna offsets (x, z) are in lambda/2 units.
-         * Inter-row x offset already removed by azimuth steering.
-         * Residual cross-row phase is \pi * gDenseVerticalBaseline * sin(elevation). */
-        crossReal =
-            rowSum[gDenseReferenceRow].real * rowSum[gDenseElevationRow].real +
-            rowSum[gDenseReferenceRow].imag * rowSum[gDenseElevationRow].imag;
-        crossImag =
-            rowSum[gDenseReferenceRow].imag * rowSum[gDenseElevationRow].real -
-            rowSum[gDenseReferenceRow].real * rowSum[gDenseElevationRow].imag;
-        phase = atan2sp(crossImag, crossReal);
-        v = phase / (DENSE_PI * (float)gDenseVerticalBaseline);
+        /* Continuous elevation estimation from cross-row phase */
+        if (elevationPower >= DENSE_MIN_POWER)
+        {
+            crossReal =
+                rowSum[gDenseReferenceRow].real * rowSum[gDenseElevationRow].real +
+                rowSum[gDenseReferenceRow].imag * rowSum[gDenseElevationRow].imag;
+            crossImag =
+                rowSum[gDenseReferenceRow].imag * rowSum[gDenseElevationRow].real -
+                rowSum[gDenseReferenceRow].real * rowSum[gDenseElevationRow].imag;
+            phase = atan2sp(crossImag, crossReal);
+            v = phase / (DENSE_PI * (float)gDenseVerticalBaseline);
 
-        /* This continuous source estimate is the authoritative elevation
-         * filter. The 16-bin elevationIdx is never used for acceptance. */
-        if ((v < minElevSin) || (v > maxElevSin) ||
-            ((u * u + v * v) > 1.0f))
-        {
-            continue;
+            /* Clamp elevation within configured elevation FOV */
+            if (v < minElevSin) { v = minElevSin; }
+            if (v > maxElevSin) { v = maxElevSin; }
+
+            /* Ensure u^2 + v^2 <= 1.0f by clamping v if necessary */
+            float maxV2 = 1.0f - (u * u);
+            if (maxV2 > 0.0f)
+            {
+                float maxV = sqrtf(maxV2);
+                if (v > maxV) { v = maxV; }
+                if (v < -maxV) { v = -maxV; }
+            }
+            else
+            {
+                v = 0.0f;
+            }
         }
-        elevationLimitScale = sqrtf(1.0f - v * v);
-        if ((u < elevationLimitScale * minAzSin) ||
-            (u > elevationLimitScale * maxAzSin))
+        else
         {
-            continue;
+            /* If elevation row signal is weak, fallback to boresight horizontal */
+            v = 0.0f;
         }
 
         gDenseAzPower[a] = referencePower;
@@ -1019,7 +903,7 @@ static void MmwDemo_DenseElevation_processDoppler(
             }
             if ((gDenseAzValid[nextLeft] == 0U) ||
                 (gDenseAzPower[nextLeft] < powerDropThreshold) ||
-                (MmwDemo_DenseElevation_circularDistance((uint16_t)azimuth, (uint16_t)nextLeft, MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS) > 4U))
+                (MmwDemo_DenseElevation_circularDistance((uint16_t)azimuth, (uint16_t)nextLeft, MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS) > 12U))
             {
                 break;
             }
@@ -1035,7 +919,7 @@ static void MmwDemo_DenseElevation_processDoppler(
             }
             if ((gDenseAzValid[nextRight] == 0U) ||
                 (gDenseAzPower[nextRight] < powerDropThreshold) ||
-                (MmwDemo_DenseElevation_circularDistance((uint16_t)azimuth, (uint16_t)nextRight, MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS) > 4U))
+                (MmwDemo_DenseElevation_circularDistance((uint16_t)azimuth, (uint16_t)nextRight, MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS) > 12U))
             {
                 break;
             }
@@ -1081,10 +965,21 @@ static void MmwDemo_DenseElevation_processDoppler(
             }
         }
 
-        /* Azimuth center-of-mass and angular width (same as before). */
-        u_cm = 2.0f * (sumAz / sumPower) / (float)MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
+        /* Azimuth center-of-mass and angular width. */
+        if (sumPower > 0.0f)
+        {
+            u_cm = 2.0f * (sumAz / sumPower) / (float)MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
+        }
+        else
+        {
+            u_cm = 2.0f * (float)signedA / (float)MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
+        }
         distance = MmwDemo_DenseElevation_circularDistance((uint16_t)left, (uint16_t)right,
                        MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS);
+        if (distance == 0U)
+        {
+            distance = 1U;
+        }
         u_width = 2.0f * (float)distance / (float)MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
 
         /* Elevation weighted centroid and span across the region.
@@ -1169,19 +1064,9 @@ static int16_t MmwDemo_DenseElevation_deg10(float degree)
                                          : (scaled - 0.5f));
 }
 
-static uint8_t MmwDemo_DenseElevation_deadlineExpired(
-    uint32_t deadlineStartCycles,
-    uint32_t deadlineOffsetCycles)
-{
-    return 0U;
-}
-
 int32_t MmwDemo_DenseElevation_process(
     const MmwDemo_DenseElevation_Cfg *cfg,
     const MmwDemo_DenseElevation_StaticCfg *staticCfg,
-    uint32_t deadlineStartCycles,
-    uint32_t deadlineOffsetCycles,
-    uint32_t cycleBudget,
     uint8_t *outBuffer,
     uint32_t outBufferSize,
     uint16_t maxOutputSamples,
@@ -1189,7 +1074,6 @@ int32_t MmwDemo_DenseElevation_process(
 {
     MmwDemo_DenseElevation_OutputHeader *header;
     MmwDemo_DenseElevation_OutputSample *output;
-    const uint16_t *detMatrix;
     uint16_t minRange;
     uint16_t maxRange;
     uint16_t outputCapacity;
@@ -1205,8 +1089,6 @@ int32_t MmwDemo_DenseElevation_process(
     uint8_t outputLimited = 0U;
     uint32_t processingStartCycles;
     uint32_t processingCycles;
-    uint32_t range;
-    uint16_t numVirtualAntennas;
     int32_t configureError;
 
     if (outSize != NULL)
@@ -1221,12 +1103,10 @@ int32_t MmwDemo_DenseElevation_process(
         (cfg->maxElevationDeg != cfg->maxElevationDeg) ||
         (cfg->minAzimuthDeg != cfg->minAzimuthDeg) ||
         (cfg->maxAzimuthDeg != cfg->maxAzimuthDeg) ||
-        (cfg->snrThresholdDb != cfg->snrThresholdDb) ||
         (cfg->minElevationDeg < -90.0f) || (cfg->maxElevationDeg > 90.0f) ||
         (cfg->minAzimuthDeg < -90.0f) || (cfg->maxAzimuthDeg > 90.0f) ||
         (cfg->minElevationDeg > cfg->maxElevationDeg) ||
-        (cfg->minAzimuthDeg > cfg->maxAzimuthDeg) ||
-        (cfg->snrThresholdDb < 0.0f) || (cfg->snrThresholdDb > 80.0f))
+        (cfg->minAzimuthDeg > cfg->maxAzimuthDeg))
     {
         return MMWDEMO_DENSE_EINVAL;
     }
@@ -1270,63 +1150,38 @@ int32_t MmwDemo_DenseElevation_process(
 
     header = (MmwDemo_DenseElevation_OutputHeader *)outBuffer;
     output = (MmwDemo_DenseElevation_OutputSample *)(outBuffer + sizeof(*header));
-    detMatrix = (const uint16_t *)staticCfg->detMatrix.data;
-    numVirtualAntennas =
-        (uint16_t)(staticCfg->numTxAntennas * staticCfg->numRxAntennas);
     memset(sectorCount, 0, sizeof(sectorCount));
-    for (range = minRange; range <= maxRange; range++)
+    
     {
-        const uint16_t *detRow =
-            &detMatrix[(uint32_t)range * staticCfg->numDopplerBins];
-        MmwDemo_DenseDopplerCandidate
-            candidate[DENSE_MAX_DOPPLER_CANDIDATES];
-        uint16_t candidateCount;
-        uint16_t k;
+        uint32_t p;
+        memset(gDenseRangeFftDone, 0, sizeof(gDenseRangeFftDone));
+        
+        for (p = 0U; p < staticCfg->numCfarPeaks; p++)
+        {
+            uint16_t rngIdx = staticCfg->cfarRngDopSnrList[p].rangeIdx;
+            uint16_t dopIdx = staticCfg->cfarRngDopSnrList[p].dopplerIdx;
+            int16_t snr = staticCfg->cfarRngDopSnrList[p].snr;
+            MmwDemo_DenseDopplerCandidate candidate;
 
-        if (MmwDemo_DenseElevation_deadlineExpired(
-                deadlineStartCycles, deadlineOffsetCycles) != 0U)
-        {
-            return MMWDEMO_DENSE_ETIME_BUDGET;
-        }
-        candidateCount = MmwDemo_DenseElevation_selectDopplerCandidates(
-            detRow, staticCfg->numDopplerBins, numVirtualAntennas,
-            cfg->snrThresholdDb, candidate);
-        if (MmwDemo_DenseElevation_deadlineExpired(
-                deadlineStartCycles, deadlineOffsetCycles) != 0U)
-        {
-            return MMWDEMO_DENSE_ETIME_BUDGET;
-        }
-
-        if (candidateCount == 0U)
-        {
-            continue;
-        }
-
-        /* Complex Doppler symbols are regenerated only for occupied ranges.
-         * One FFT per antenna supplies every selected Doppler candidate. */
-        MmwDemo_DenseElevation_dopplerFftForRange(
-            (uint16_t)range, staticCfg);
-        if (MmwDemo_DenseElevation_deadlineExpired(
-                deadlineStartCycles, deadlineOffsetCycles) != 0U)
-        {
-            return MMWDEMO_DENSE_ETIME_BUDGET;
-        }
-        for (k = 0U; k < candidateCount; k++)
-        {
-            if (MmwDemo_DenseElevation_deadlineExpired(
-                    deadlineStartCycles, deadlineOffsetCycles) != 0U)
+            if (rngIdx < minRange || rngIdx > maxRange)
             {
-                return MMWDEMO_DENSE_ETIME_BUDGET;
+                continue;
             }
+
+            /* Complex Doppler symbols are regenerated only for occupied ranges.
+             * One FFT per antenna supplies every selected Doppler candidate. */
+            if (rngIdx < sizeof(gDenseRangeFftDone) && gDenseRangeFftDone[rngIdx] == 0U)
+            {
+                MmwDemo_DenseElevation_dopplerFftForRange(rngIdx, staticCfg);
+                gDenseRangeFftDone[rngIdx] = 1U;
+            }
+
+            candidate.index = dopIdx;
+            candidate.snrDb10 = (uint16_t)snr;
             MmwDemo_DenseElevation_processDoppler(
-                (uint16_t)range, &candidate[k], cfg, staticCfg,
+                rngIdx, &candidate, cfg, staticCfg,
                 output, outputCapacity, &outputCount,
                 sectorCount, &outputLimited);
-            if (MmwDemo_DenseElevation_deadlineExpired(
-                    deadlineStartCycles, deadlineOffsetCycles) != 0U)
-            {
-                return MMWDEMO_DENSE_ETIME_BUDGET;
-            }
         }
     }
 
@@ -1334,10 +1189,6 @@ int32_t MmwDemo_DenseElevation_process(
     if (outputLimited != 0U)
     {
         flags |= MMWDEMO_DENSE_FLAG_OUTPUT_LIMITED;
-    }
-    if ((cycleBudget != 0U) && (processingCycles > cycleBudget))
-    {
-        flags |= MMWDEMO_DENSE_FLAG_TIME_BUDGET_EXCEEDED;
     }
     if (staticCfg->staticClutterRemovalEnabled != 0U)
     {

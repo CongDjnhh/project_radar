@@ -1404,6 +1404,15 @@ static void MmwDemo_transmitProcessedOutput
         tlvIdx++;
     }
 
+    /* Custom point cloud (TLV 20) with x,y,z,v,snr,width */
+    if ((pGuiMonSel->customObstacles == 1) && (gHSRAM.numCustomObstacles > 0U))
+    {
+        tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_CUSTOM_OBSTACLES;
+        tl[tlvIdx].length = sizeof(MmwDemo_CustomObstacle) * gHSRAM.numCustomObstacles;
+        packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
+        tlvIdx++;
+    }
+
 
 
     if (pGuiMonSel->logMagRange)
@@ -1492,6 +1501,17 @@ static void MmwDemo_transmitProcessedOutput
         UART_writePolling(
             objOutSideInfo,
             sizeof(DPIF_PointCloudSideInfo) * result->numObjOut);
+        tlvIdx++;
+    }
+
+    /* Send Custom Obstacles TLV 20. */
+    if ((pGuiMonSel->customObstacles == 1) && (gHSRAM.numCustomObstacles > 0U))
+    {
+        UART_writePolling(
+            &tl[tlvIdx], sizeof(MmwDemo_output_message_tl));
+        UART_writePolling(
+            gHSRAM.customObstacles,
+            sizeof(MmwDemo_CustomObstacle) * gHSRAM.numCustomObstacles);
         tlvIdx++;
     }
 

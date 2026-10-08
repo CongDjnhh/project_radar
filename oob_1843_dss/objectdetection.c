@@ -1,4 +1,8 @@
 /*
+}
+/*
+/*
+}
  *   @file  objectdetection.c
  *
  *   @brief
@@ -47,10 +51,12 @@
 
 #define DBG_DPC_OBJDET
 
-/* Navigation builds do not spend inter-frame time on the legacy TI CFAR/AoA
- * chain. Override to 1 at compile time only for OOB comparison builds. */
+/* The CFAR range-Doppler detection list always runs: it is the navigation
+ * source input. This switch only adds the legacy TI AoA point cloud (TLV 1)
+ * on top; navigation output is always exported through gHSRAM custom
+ * obstacles (TLV 20). */
 #ifndef MMWDEMO_ENABLE_LEGACY_CFAR_AOA
-#define MMWDEMO_ENABLE_LEGACY_CFAR_AOA (0)
+#define MMWDEMO_ENABLE_LEGACY_CFAR_AOA (1)
 #endif
 
 /* mmWave SDK Include Files: */
@@ -81,11 +87,8 @@ far uint8_t gNavCandidateScratch[MMWDEMO_NAV_CANDIDATE_SCRATCH_SIZE];
 volatile int32_t gNavLastProcessError = 0;
 volatile uint32_t gNavProcessErrorCount = 0U;
 volatile uint32_t gNavLastOutputSize = 0U;
-volatile uint32_t gNavTimingFrameCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 volatile uint32_t gNavTimingPreCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 volatile uint32_t gNavTimingMaxPreCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
-volatile uint32_t gNavTimingPostReserveCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
-volatile uint32_t gNavTimingBudgetCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 volatile uint32_t gNavTimingProcessCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 volatile uint32_t gNavTimingMaxProcessCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 volatile uint32_t gNavTimingNavEndOffsetCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
@@ -94,13 +97,9 @@ volatile uint32_t gNavTimingMaxTailCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 volatile uint32_t gNavTimingResultExportedCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 volatile uint32_t gNavTimingMaxResultExportedCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 
-#define MMWDEMO_NAV_DSP_CLOCK_MHZ             (600U)
-#define MMWDEMO_NAV_DEADLINE_GUARD_USEC       (5000U)
-
-/* Timing and rate configurations received from MSS. */
-static uint32_t gNavConfiguredFramePeriodUsec[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
+/* Tracking period per sub-frame, published by MSS over HSRAM. Feeds the
+ * Doppler-based motion prediction of the two-frame confirmation filter. */
 static uint32_t gNavTrackingPeriodUsec[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
-static uint32_t gNavPostProcReserveUsec[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 /* Last coherent MSS publications. A generation transition must not turn a
  * valid navigation stream off for one frame. */
 static uint8_t gNavSurfaceEnabledSubFrameMask;
@@ -113,8 +112,7 @@ MmwDemo_NavPointGen_Cfg gNavPointCfg = {
         .minAzimuthDeg = -60.0f,
         .maxAzimuthDeg = 60.0f,
         .minRangeBin = 0U,
-        .maxRangeBin = 32767U,
-        .snrThresholdDb = 20.0f
+        .maxRangeBin = 32767U
     },
     .minMovingSpeedMps = 0.15f,
     .maxSurfacePoints = 384U,
@@ -897,21 +895,17 @@ int32_t DPC_ObjectDetection_execute
     DPU_RangeProcHWA_OutParams outRangeProc;
     DPU_StaticClutterProc_OutParams outStaticClutter;
     DPU_DopplerProcHWA_OutParams outDopplerProc;
-#if MMWDEMO_ENABLE_LEGACY_CFAR_AOA
+    /* CFAR range-Doppler detection list is the navigation source input,
+     * so the CFAR DPU output is always available. */
     DPU_CFARCAProcHWA_OutParams outCfarcaProc;
+#if MMWDEMO_ENABLE_LEGACY_CFAR_AOA
     DPU_AoAProcHWA_OutParams outAoaProc;
 #endif
     int32_t retVal;
     DPC_ObjectDetection_ExecuteResult *result;
     DPC_ObjectDetection_ProcessCallBackCfg *processCallBack;
     uint32_t navOutputPoints = 0U;
-    uint32_t navCycleBudget = 0U;
-    uint32_t navFrameCycles = 0U;
     uint32_t navPreCycles = 0U;
-    uint32_t navPostReserveCycles = 0U;
-    uint32_t navGuardCycles = 0U;
-    uint32_t navDeadlineOffsetCycles = 0U;
-    uint32_t measuredTailReserveCycles = 0U;
     uint32_t navStartCycles = 0U;
     uint32_t navProcessingCycles = 0U;
     MmwDemo_DenseElevation_StaticCfg denseStaticCfg;
@@ -974,7 +968,6 @@ int32_t DPC_ObjectDetection_execute
         navSharedCfg.maxElevationDeg = navShared->maxElevationDeg;
         navSharedCfg.minAzimuthDeg = navShared->minAzimuthDeg;
         navSharedCfg.maxAzimuthDeg = navShared->maxAzimuthDeg;
-        navSharedCfg.snrThresholdDb = navShared->snrThresholdDb;
         navSharedCfg.minMovingSpeedMps = navShared->minMovingSpeedMps;
         navSharedCfg.minRangeBin = navShared->minRangeBin;
         navSharedCfg.maxRangeBin = navShared->maxRangeBin;
@@ -986,12 +979,8 @@ int32_t DPC_ObjectDetection_execute
              timingIdx < MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES;
              timingIdx++)
         {
-            navSharedCfg.framePeriodUsec[timingIdx] =
-                navShared->framePeriodUsec[timingIdx];
             navSharedCfg.trackingPeriodUsec[timingIdx] =
                 navShared->trackingPeriodUsec[timingIdx];
-            navSharedCfg.postProcReserveUsec[timingIdx] =
-                navShared->postProcReserveUsec[timingIdx];
         }
         asm(" "); /* compiler memory barrier */
         navCfgSeqAfter = navShared->isValid;
@@ -1007,8 +996,6 @@ int32_t DPC_ObjectDetection_execute
                 navSharedCfg.minAzimuthDeg;
             gNavPointCfg.sourceCfg.maxAzimuthDeg =
                 navSharedCfg.maxAzimuthDeg;
-            gNavPointCfg.sourceCfg.snrThresholdDb =
-                navSharedCfg.snrThresholdDb;
             gNavPointCfg.sourceCfg.minRangeBin =
                 (navSharedCfg.minRangeBin > 0) ? (uint16_t)navSharedCfg.minRangeBin : 0U;
             gNavPointCfg.sourceCfg.maxRangeBin =
@@ -1026,12 +1013,8 @@ int32_t DPC_ObjectDetection_execute
                  timingIdx < MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES;
                  timingIdx++)
             {
-                gNavConfiguredFramePeriodUsec[timingIdx] =
-                    navSharedCfg.framePeriodUsec[timingIdx];
                 gNavTrackingPeriodUsec[timingIdx] =
                     navSharedCfg.trackingPeriodUsec[timingIdx];
-                gNavPostProcReserveUsec[timingIdx] =
-                    navSharedCfg.postProcReserveUsec[timingIdx];
             }
         }
     }
@@ -1062,6 +1045,69 @@ int32_t DPC_ObjectDetection_execute
     {
         goto exit;
     }
+
+    /* Procedure for range bias measurement and Rx channels gain/phase offset measurement */
+    if(objDetObj->commonCfg.measureRxChannelBiasCfg.enabled)
+    {
+        DPC_ObjDet_rangeBiasRxChPhaseMeasure(&subFrmObj->staticCfg,
+            objDetObj->commonCfg.measureRxChannelBiasCfg.targetDistance,
+            objDetObj->commonCfg.measureRxChannelBiasCfg.searchWinSize,
+            subFrmObj->dpuCfg.dopplerCfg.hwRes.detMatrix.data,
+            (uint32_t *) subFrmObj->dpuCfg.rangeCfg.hwRes.radarCube.data,
+            &objDetObj->compRxChanCfgMeasureOut);
+    }
+
+    /* The CFAR range-Doppler detection list feeds the navigation source
+     * estimator, so CFAR runs in every build. */
+    if (subFrmObj->isAoAHWAparamSetOverlappedWithCFAR == true)
+    {
+        retVal = DPU_CFARCAProcHWA_config(subFrmObj->dpuCFARCAObj, &subFrmObj->dpuCfg.cfarCfg);
+        if (retVal != 0)
+        {
+            goto exit;
+        }
+    }
+
+    retVal = DPU_CFARCAProcHWA_process(subFrmObj->dpuCFARCAObj, &outCfarcaProc);
+    if (retVal != 0)
+    {
+        goto exit;
+    }
+
+    DebugP_log1("ObjDet DPC: number of detected objects after CFAR = %d\n",
+                outCfarcaProc.numCfarDetectedPoints);
+
+#if MMWDEMO_ENABLE_LEGACY_CFAR_AOA
+    /* Optional legacy TI AoA point cloud (TLV 1) on top of the navigation
+     * path. Disabling it removes only AoAProc, never the CFAR above. */
+    if (subFrmObj->isAoAHWAparamSetOverlappedWithCFAR == true)
+    {
+        DPU_AoAProc_compRxChannelBiasCfg outCompRxCfg;
+
+        /* Generate FFT window, note doppler window is used for AoA */
+        DPC_ObjDet_GenDopplerWindow(&subFrmObj->dpuCfg.dopplerCfg);
+        DPC_ObjDet_GetRxChPhaseComp(&subFrmObj->staticCfg,
+                                    &objDetObj->commonCfg.compRxChanCfg, &outCompRxCfg);
+        subFrmObj->dpuCfg.aoaCfg.dynCfg.compRxChanCfg = &outCompRxCfg;
+        retVal = DPU_AoAProcHWA_config(subFrmObj->dpuAoAObj, &subFrmObj->dpuCfg.aoaCfg);
+        if (retVal != 0)
+        {
+            goto exit;
+        }
+    }
+
+    retVal = DPU_AoAProcHWA_process(subFrmObj->dpuAoAObj,
+                 outCfarcaProc.numCfarDetectedPoints, &outAoaProc);
+    if (retVal != 0)
+    {
+        goto exit;
+    }
+    result->numObjOut = outAoaProc.numAoADetectedPoints;
+#else
+    /* Navigation publishes through gHSRAM.customObstacles (TLV 20); the
+     * legacy TLV-1 point cloud is intentionally empty. */
+    result->numObjOut = 0U;
+#endif
 
     /* Build source-estimator configuration only for the navigation path. */
     if (navEnabled != 0U)
@@ -1112,6 +1158,8 @@ int32_t DPC_ObjectDetection_execute
                 }
             }
         }
+        denseStaticCfg.cfarRngDopSnrList = subFrmObj->dpuCfg.cfarCfg.res.cfarRngDopSnrList;
+        denseStaticCfg.numCfarPeaks = outCfarcaProc.numCfarDetectedPoints;
         denseStaticCfg.subFrameNum = objDetObj->subFrameIndx;
         denseStaticCfg.frameNumber = objDetObj->stats.frameStartIntCounter;
     }
@@ -1125,59 +1173,9 @@ int32_t DPC_ObjectDetection_execute
         navStaticCfg.rangeStepMeters = subFrmObj->staticCfg.rangeStep;
         navStaticCfg.dopplerStepMps = subFrmObj->staticCfg.dopplerStep;
         navStaticCfg.rangeBiasMeters = denseCompRxCfg.rangeBias;
-        if ((gNavConfiguredFramePeriodUsec[objDetObj->subFrameIndx] != 0U) &&
-            (gNavConfiguredFramePeriodUsec[objDetObj->subFrameIndx] <=
-             (0xFFFFFFFFU / MMWDEMO_NAV_DSP_CLOCK_MHZ)))
-        {
-            navFrameCycles =
-                gNavConfiguredFramePeriodUsec[objDetObj->subFrameIndx] *
-                MMWDEMO_NAV_DSP_CLOCK_MHZ;
-        }
-        if (gNavPostProcReserveUsec[objDetObj->subFrameIndx] >
-            (0xFFFFFFFFU / MMWDEMO_NAV_DSP_CLOCK_MHZ))
-        {
-            navPostReserveCycles = 0xFFFFFFFFU;
-        }
-        else
-        {
-            navPostReserveCycles =
-                gNavPostProcReserveUsec[objDetObj->subFrameIndx] *
-                MMWDEMO_NAV_DSP_CLOCK_MHZ;
-        }
-        /* Once real end-to-end frames have completed, never reserve less than
-         * the observed Nav-end -> RESULT_EXPORTED high-water mark plus 10%
-         * (at least 1 ms). The MSS estimate remains the frame-zero baseline. */
-        if (gNavTimingMaxTailCycles[objDetObj->subFrameIndx] != 0U)
-        {
-            uint32_t tailMarginCycles =
-                gNavTimingMaxTailCycles[objDetObj->subFrameIndx] / 10U;
-            if (tailMarginCycles <
-                (1000U * MMWDEMO_NAV_DSP_CLOCK_MHZ))
-            {
-                tailMarginCycles = 1000U * MMWDEMO_NAV_DSP_CLOCK_MHZ;
-            }
-            if (gNavTimingMaxTailCycles[objDetObj->subFrameIndx] >
-                (0xFFFFFFFFU - tailMarginCycles))
-            {
-                measuredTailReserveCycles = 0xFFFFFFFFU;
-            }
-            else
-            {
-                measuredTailReserveCycles =
-                    gNavTimingMaxTailCycles[objDetObj->subFrameIndx] +
-                    tailMarginCycles;
-            }
-            if (measuredTailReserveCycles > navPostReserveCycles)
-            {
-                uint32_t maxTailCap = navFrameCycles / 4U;
-                if (maxTailCap < (20000U * MMWDEMO_NAV_DSP_CLOCK_MHZ))
-                {
-                    maxTailCap = 20000U * MMWDEMO_NAV_DSP_CLOCK_MHZ;
-                }
-                navPostReserveCycles = (measuredTailReserveCycles < maxTailCap) ?
-                                       measuredTailReserveCycles : maxTailCap;
-            }
-        }
+        navStaticCfg.framePeriodSec =
+            (float)gNavTrackingPeriodUsec[objDetObj->subFrameIndx] /
+            1000000.0f;
         navPreCycles = Cycleprofiler_getTimeStamp() -
                        objDetObj->stats.frameStartTimeStamp;
         if (navPreCycles >
@@ -1185,92 +1183,17 @@ int32_t DPC_ObjectDetection_execute
         {
             gNavTimingMaxPreCycles[objDetObj->subFrameIndx] = navPreCycles;
         }
-        navStaticCfg.framePeriodSec =
-            (float)gNavTrackingPeriodUsec[objDetObj->subFrameIndx] /
-            1000000.0f;
 
-        /* Start with five percent of the configured period, but never less
-         * than 5 ms. This covers deadline-check granularity and unmodelled
-         * interrupt/control jitter until hardware high-water marks take over. */
-        navGuardCycles = navFrameCycles / 20U;
-        if (navGuardCycles <
-            (MMWDEMO_NAV_DEADLINE_GUARD_USEC *
-             MMWDEMO_NAV_DSP_CLOCK_MHZ))
-        {
-            navGuardCycles = MMWDEMO_NAV_DEADLINE_GUARD_USEC *
-                             MMWDEMO_NAV_DSP_CLOCK_MHZ;
-        }
-
-        /* The only legal Nav budget is what remains before the next frame
-         * after work already consumed and the complete MSS/GTRACK/UART tail.
-         * Unsigned subtraction is deliberately guarded against underflow. */
-        if (navFrameCycles != 0U)
-        {
-            if (navFrameCycles > navPreCycles)
-            {
-                uint32_t available = navFrameCycles - navPreCycles;
-                uint32_t reserve = navGuardCycles;
-
-                /* Guard against overflow when adding the two reserves */
-                if (navPostReserveCycles > (0xFFFFFFFFU - reserve))
-                {
-                    reserve = 0xFFFFFFFFU;
-                }
-                else
-                {
-                    reserve += navPostReserveCycles;
-                }
-                navCycleBudget = (available > reserve) ?
-                                 (available - reserve) : 0U;
-            }
-            else
-            {
-                /* Frame period already exceeded before Nav started */
-                navCycleBudget = 0U;
-            }
-        }
-        else
-        {
-            /* Fallback when frame timing has not yet been published by MSS.
-             * Use 64-bit arithmetic to prevent uint32 overflow across chirp counts. */
-            uint64_t available64 = ((uint64_t)100000U * MMWDEMO_NAV_DSP_CLOCK_MHZ * subFrmObj->staticCfg.numDopplerChirps) /
-                                   ((subFrmObj->staticCfg.numTxAntennas != 0U) ? subFrmObj->staticCfg.numTxAntennas : 1U);
-            uint32_t available = (available64 > 0xFFFFFFFFULL) ? 0xFFFFFFFFU : (uint32_t)available64;
-            uint32_t reserve   = 3500U * MMWDEMO_NAV_DSP_CLOCK_MHZ;
-            navCycleBudget = (available > reserve) ? (available - reserve) : (100000U * MMWDEMO_NAV_DSP_CLOCK_MHZ);
-        }
-
-        gNavTimingFrameCycles[objDetObj->subFrameIndx] = navFrameCycles;
-        gNavTimingPreCycles[objDetObj->subFrameIndx] = navPreCycles;
-        gNavTimingPostReserveCycles[objDetObj->subFrameIndx] =
-            navPostReserveCycles;
-        gNavTimingBudgetCycles[objDetObj->subFrameIndx] = navCycleBudget;
-
-        if (navCycleBudget != 0U)
-        {
-            navStartCycles = Cycleprofiler_getTimeStamp();
-            /* deadline = total time from frame start that Nav may consume.
-             * This activates the deadlineExpired() bail-out checks already
-             * present in every hot loop of DenseElevation and NavPointGen. */
-            navDeadlineOffsetCycles = navPreCycles + navCycleBudget;
-            retVal = MmwDemo_NavPointGen_process(
-                &gNavPointCfg,
-                &navStaticCfg,
-                objDetObj->stats.frameStartTimeStamp,
-                navDeadlineOffsetCycles,
-                navCycleBudget,
-                gNavCandidateScratch,
-                sizeof(gNavCandidateScratch),
-                subFrmObj->dpuCfg.aoaCfg.res.detObjOut,
-                subFrmObj->dpuCfg.aoaCfg.res.detObjOutSideInfo,
-                subFrmObj->dpuCfg.aoaCfg.res.detObjOutMaxSize,
-                &navOutputPoints);
-            navProcessingCycles = Cycleprofiler_getTimeStamp() - navStartCycles;
-        }
-        else
-        {
-            retVal = MMWDEMO_NAV_EFRAME_SLACK;
-        }
+        navStartCycles = Cycleprofiler_getTimeStamp();
+        retVal = MmwDemo_NavPointGen_process(
+            &gNavPointCfg,
+            &navStaticCfg,
+            gNavCandidateScratch,
+            sizeof(gNavCandidateScratch),
+            gHSRAM.customObstacles,
+            512U,
+            &navOutputPoints);
+        navProcessingCycles = Cycleprofiler_getTimeStamp() - navStartCycles;
         gNavTimingProcessCycles[objDetObj->subFrameIndx] =
             navProcessingCycles;
         gNavTimingNavEndOffsetCycles[objDetObj->subFrameIndx] =
@@ -1296,73 +1219,7 @@ int32_t DPC_ObjectDetection_execute
         navOutputPoints = 0U;
     }
     gNavLastOutputSize = navOutputPoints;
-
-    /* Procedure for range bias measurement and Rx channels gain/phase offset measurement */
-    if(objDetObj->commonCfg.measureRxChannelBiasCfg.enabled)
-    {
-        DPC_ObjDet_rangeBiasRxChPhaseMeasure(&subFrmObj->staticCfg,
-            objDetObj->commonCfg.measureRxChannelBiasCfg.targetDistance,
-            objDetObj->commonCfg.measureRxChannelBiasCfg.searchWinSize,
-            subFrmObj->dpuCfg.dopplerCfg.hwRes.detMatrix.data,
-            (uint32_t *) subFrmObj->dpuCfg.rangeCfg.hwRes.radarCube.data,
-            &objDetObj->compRxChanCfgMeasureOut);
-    }
-
-#if MMWDEMO_ENABLE_LEGACY_CFAR_AOA
-    /* Optional TI OOB comparison path. Navigation does not consume this
-     * point cloud; enabling it adds CFAR/AoA processing to every frame. */
-    if (subFrmObj->isAoAHWAparamSetOverlappedWithCFAR == true)
-    {
-        retVal = DPU_CFARCAProcHWA_config(subFrmObj->dpuCFARCAObj, &subFrmObj->dpuCfg.cfarCfg);
-        if (retVal != 0)
-        {
-            goto exit;
-        }
-    }
-
-    retVal = DPU_CFARCAProcHWA_process(subFrmObj->dpuCFARCAObj, &outCfarcaProc);
-    if (retVal != 0)
-    {
-        goto exit;
-    }
-
-    DebugP_log1("ObjDet DPC: number of detected objects after CFAR = %d\n",
-                outCfarcaProc.numCfarDetectedPoints);
-
-    if (subFrmObj->isAoAHWAparamSetOverlappedWithCFAR == true)
-    {
-        DPU_AoAProc_compRxChannelBiasCfg outCompRxCfg;
-
-        /* Generate FFT window, note doppler window is used for AoA */
-        DPC_ObjDet_GenDopplerWindow(&subFrmObj->dpuCfg.dopplerCfg);
-        DPC_ObjDet_GetRxChPhaseComp(&subFrmObj->staticCfg,
-                                    &objDetObj->commonCfg.compRxChanCfg, &outCompRxCfg);
-        subFrmObj->dpuCfg.aoaCfg.dynCfg.compRxChanCfg = &outCompRxCfg;
-        retVal = DPU_AoAProcHWA_config(subFrmObj->dpuAoAObj, &subFrmObj->dpuCfg.aoaCfg);
-        if (retVal != 0)
-        {
-            goto exit;
-        }
-    }
-
-    retVal = DPU_AoAProcHWA_process(subFrmObj->dpuAoAObj,
-                 outCfarcaProc.numCfarDetectedPoints, &outAoaProc);
-    if (retVal != 0)
-    {
-        goto exit;
-    }
-    if (navEnabled != 0U)
-    {
-        result->numObjOut = navOutputPoints;
-    }
-    else
-    {
-        result->numObjOut = outAoaProc.numAoADetectedPoints;
-    }
-#else
-    /* UAV navigation output is produced by DenseElevation/NavPointGen. */
-    result->numObjOut = (navEnabled != 0U) ? navOutputPoints : 0U;
-#endif
+    gHSRAM.numCustomObstacles = (uint16_t)navOutputPoints;
 
     /* Set DPM result with measure (bias, phase) and detection info */
 
@@ -1505,19 +1362,11 @@ static int32_t DPC_ObjectDetection_start (DPM_DPCHandle handle)
     DebugP_assert (objDetObj != NULL);
 
     objDetObj->stats.frameStartIntCounter = 0;
-    memset((void *)gNavConfiguredFramePeriodUsec, 0,
-           sizeof(gNavConfiguredFramePeriodUsec));
     memset((void *)gNavTrackingPeriodUsec, 0,
            sizeof(gNavTrackingPeriodUsec));
-    memset((void *)gNavPostProcReserveUsec, 0,
-           sizeof(gNavPostProcReserveUsec));
-    memset((void *)gNavTimingFrameCycles, 0, sizeof(gNavTimingFrameCycles));
     memset((void *)gNavTimingPreCycles, 0, sizeof(gNavTimingPreCycles));
     memset((void *)gNavTimingMaxPreCycles, 0,
            sizeof(gNavTimingMaxPreCycles));
-    memset((void *)gNavTimingPostReserveCycles, 0,
-           sizeof(gNavTimingPostReserveCycles));
-    memset((void *)gNavTimingBudgetCycles, 0, sizeof(gNavTimingBudgetCycles));
     memset((void *)gNavTimingProcessCycles, 0, sizeof(gNavTimingProcessCycles));
     memset((void *)gNavTimingMaxProcessCycles, 0,
            sizeof(gNavTimingMaxProcessCycles));

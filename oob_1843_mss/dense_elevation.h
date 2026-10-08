@@ -1,7 +1,10 @@
-/**
+﻿/**
  * @file dense_elevation.h
  *
- * @brief Frame-synchronous navigation source cloud, independent of TI CFAR.
+ * @brief Frame-synchronous navigation source cloud seeded by the TI CFAR
+ *        range-Doppler detection list (MmwDemo_DenseElevation_StaticCfg).
+ *        Detection sensitivity is owned by the CFAR configuration
+ *        (CLI cfarCfg), not by this module.
  */
 
 #ifndef MMWDEMO_DENSE_ELEVATION_H
@@ -38,7 +41,7 @@ extern "C" {
 #define MMWDEMO_DENSE_FLAG_FOV_FILTERED             (1U << 4)
 #define MMWDEMO_DENSE_FLAG_FRAME_COMPLETE           (1U << 5)
 #define MMWDEMO_DENSE_FLAG_OUTPUT_LIMITED           (1U << 6)
-#define MMWDEMO_DENSE_FLAG_TIME_BUDGET_EXCEEDED     (1U << 7)
+#include <ti/datapath/dpif/dpif_pointcloud.h>
 #define MMWDEMO_DENSE_FLAG_STATIC_CLUTTER_APPLIED   (1U << 8)
 #define MMWDEMO_DENSE_FLAG_AZIMUTH_NMS              (1U << 9)
 #define MMWDEMO_DENSE_REQUIRED_FLAGS \
@@ -65,7 +68,6 @@ extern "C" {
 #define MMWDEMO_DENSE_EDETMATRIX_FORMAT              (-11)
 #define MMWDEMO_DENSE_EDETMATRIX_SIZE                (-12)
 #define MMWDEMO_DENSE_EUNSUPPORTED_MIMO               (-13)
-#define MMWDEMO_DENSE_ETIME_BUDGET                    (-14)
 
 typedef struct MmwDemo_DenseElevation_Cfg_t
 {
@@ -75,7 +77,6 @@ typedef struct MmwDemo_DenseElevation_Cfg_t
     float maxAzimuthDeg;
     uint16_t minRangeBin;
     uint16_t maxRangeBin;
-    float snrThresholdDb;
 } MmwDemo_DenseElevation_Cfg;
 
 /** One navigation source. sourceVQ15 is the continuous v=sin(elevation)
@@ -123,6 +124,7 @@ typedef struct MmwDemo_DenseElevation_OutputHeader_t
     uint16_t protocolStatus; /* 0 success; positive magnitude of DSP error */
     uint32_t processingCycles;
     uint32_t radarFrameNumber;
+    uint32_t reservedPad;    /* Pad to 48 bytes for 8-byte alignment */
 } MmwDemo_DenseElevation_OutputHeader;
 
 typedef struct MmwDemo_DenseElevation_StaticCfg_t
@@ -141,22 +143,16 @@ typedef struct MmwDemo_DenseElevation_StaticCfg_t
     uint8_t  staticClutterRemovalEnabled;
     uint8_t  isTdmMimoValid;
     uint8_t  subFrameNum;
-    uint8_t  reserved[2];
-    uint32_t frameNumber;
+    DPIF_CFARDetList *cfarRngDopSnrList;
+    uint32_t numCfarPeaks; uint32_t frameNumber;
 } MmwDemo_DenseElevation_StaticCfg;
 
 /** Process every configured range in the current radar frame. Work is never
- * continued in a later frame. deadlineStartCycles/deadlineOffsetCycles define
- * one absolute frame-relative deadline shared by ObjectDetection, Nav and
- * Dense; cycleBudget is retained as Nav-entry telemetry for the output header.
- * A nonzero deadlineOffsetCycles returns MMWDEMO_DENSE_ETIME_BUDGET instead of
- * publishing partial data when that common deadline expires. */
+ * continued in a later frame: each call publishes the complete source cloud
+ * for the radar frame held in staticCfg, or a negative error code. */
 int32_t MmwDemo_DenseElevation_process(
     const MmwDemo_DenseElevation_Cfg *cfg,
     const MmwDemo_DenseElevation_StaticCfg *staticCfg,
-    uint32_t deadlineStartCycles,
-    uint32_t deadlineOffsetCycles,
-    uint32_t cycleBudget,
     uint8_t *outBuffer,
     uint32_t outBufferSize,
     uint16_t maxOutputSamples,
@@ -188,7 +184,7 @@ typedef char MmwDemo_DenseSamplePowerOffsetCheck[
 typedef char MmwDemo_DenseSampleElevWidthOffsetCheck[
     (offsetof(MmwDemo_DenseElevation_OutputSample, elevationWidthUQ15) == 16U) ? 1 : -1];
 typedef char MmwDemo_DenseHeaderSizeCheck[
-    (sizeof(MmwDemo_DenseElevation_OutputHeader) == 44U) ? 1 : -1];
+    (sizeof(MmwDemo_DenseElevation_OutputHeader) == 48U) ? 1 : -1];
 
 #ifdef __cplusplus
 }

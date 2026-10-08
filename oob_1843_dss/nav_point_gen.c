@@ -26,19 +26,29 @@
      sizeof(MmwDemo_DenseElevation_OutputSample))
 
 /* ========================================================================
- * Temporal Persistence Filter — replaces NearestMap.
- * A 2-D history grid (Azimuth × RangeGroup) scores each cell's temporal
- * stability.  Transient noise (score < threshold) is suppressed before
- * UART output.  Unlike NearestMap, surfaces at *all* ranges are retained
- * when they persist across frames, enabling multi-layer detection.
+ * Motion-compensated two-frame confirmation — replaces the decay/hit/count
+ * persistence grid. The old filter admitted every sample because the hit
+ * bonus (+NAV_HIST_HIT_BONUS) was applied before the threshold test inside
+ * the same frame, so nothing was ever rejected.
+ *
+ * A sample is published only when its (azimuth, range-group) cell — or the
+ * cell the target is predicted to have occupied one frame ago — was also
+ * detected in the previous frame:
+ *   - single-frame spikes (RFI, multipath flicker) are suppressed;
+ *   - persistent surfaces at every range are retained (multi-layer);
+ *   - closing targets stay confirmed because the lookup follows the
+ *     Doppler-predicted range walk (positive Doppler = approaching, so the
+ *     previous range was larger).
+ * Cost per frame: O(samples + grid clear) byte operations. A newly detected
+ * surface is withheld for one frame; platform yaw likewise costs one
+ * re-confirmation frame (azimuth cells shift with the platform).
  * ====================================================================== */
 #define NAV_HIST_NUM_AZ    MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS  /* 64 */
-#define NAV_HIST_NUM_RNG   (64U)   /* 256 range bins / 4 → 64 groups   */
+#define NAV_HIST_NUM_RNG   (64U)   /* range bins grouped 4 per cell    */
 #define NAV_HIST_MAP_SIZE  (NAV_HIST_NUM_AZ * NAV_HIST_NUM_RNG) /* 4096 */
-#define NAV_HIST_MAX_SCORE  (5U)
-#define NAV_HIST_HIT_BONUS  (2U)
-#define NAV_HIST_DECAY      (1U)
-#define NAV_HIST_THRESHOLD  (1U)
+#define NAV_HIST_RANGE_GROUP_SHIFT (2U)
+#define NAV_HIST_AZ_SPREAD (1U)    /* hits also mark neighbour azimuths */
+#define NAV_MOTION_MAX_RANGE_BINS  (16) /* clamp of Doppler prediction   */
 
 /* Persistent across frames → must reside in L3 (not L1D scratch). */
 #pragma DATA_SECTION(gNavHistoryMap, ".l3ram")
@@ -150,8 +160,7 @@ static uint8_t MmwDemo_NavPointGen_sector(
 }
 
 static void MmwDemo_NavPointGen_copyPoint(
-    DPIF_PointCloudCartesian *dstPoint,
-    DPIF_PointCloudSideInfo *dstSideInfo,
+    MmwDemo_CustomObstacle *dstObstacle,
     const MmwDemo_DenseElevation_OutputSample *src,
     const MmwDemo_NavPointGen_StaticCfg *staticCfg)
 {
@@ -174,16 +183,13 @@ static void MmwDemo_NavPointGen_copyPoint(
     float ySq = (dist * dist) - (x * x) - (z * z);
     float y = (ySq > 0.0f) ? sqrtf(ySq) : 0.0f;
 
-    if (dstPoint != NULL)
+    if (dstObstacle != NULL)
     {
-        dstPoint->x = x;
-        dstPoint->y = y;
-        dstPoint->z = z;
-        dstPoint->velocity = (float)src->dopplerIdx * staticCfg->dopplerStepMps;
-    }
+        dstObstacle->x = x;
+        dstObstacle->y = y;
+        dstObstacle->z = z;
+        dstObstacle->velocity = (float)src->dopplerIdx * staticCfg->dopplerStepMps;
 
-    if (dstSideInfo != NULL)
-    {
         float width_u = (float)src->azimuthWidthUQ15 / 32767.0f;
         float width = dist * width_u;
         if (width < 0.05f)
@@ -193,14 +199,14 @@ static void MmwDemo_NavPointGen_copyPoint(
 
         if (src->powerDb10 != (int16_t)-32768)
         {
-            dstSideInfo->snr = src->powerDb10;
+            dstObstacle->snr = src->powerDb10;
         }
         else
         {
-            dstSideInfo->snr = (int16_t)src->snrDb10;
+            dstObstacle->snr = (int16_t)src->snrDb10;
         }
-        /* Preserve physical obstacle width in mm in sideInfo->noise */
-        dstSideInfo->noise = (int16_t)(width * 1000.0f);
+        /* Preserve physical obstacle width in mm */
+        dstObstacle->width = (int16_t)(width * 1000.0f);
     }
 }
 
@@ -260,8 +266,7 @@ static uint16_t MmwDemo_NavPointGen_emitPrioritized(
     const MmwDemo_DenseElevation_OutputSample *samples,
     uint16_t sampleCount,
     uint16_t maxOutput,
-    DPIF_PointCloudCartesian *outPoints,
-    DPIF_PointCloudSideInfo *outSideInfo,
+    MmwDemo_CustomObstacle *outObstacles,
     const MmwDemo_NavPointGen_StaticCfg *staticCfg)
 {
     uint16_t count = 0U;
@@ -293,8 +298,7 @@ static uint16_t MmwDemo_NavPointGen_emitPrioritized(
                 break;
             }
             MmwDemo_NavPointGen_copyPoint(
-                &outPoints[count],
-                (outSideInfo != NULL) ? &outSideInfo[count] : NULL,
+                &outObstacles[count],
                 &samples[bestIdx], staticCfg);
             MmwDemo_NavPointGen_setSelected(gNavCellSelected,
                 MmwDemo_NavPointGen_cellIndex(&samples[bestIdx]));
@@ -315,8 +319,7 @@ static uint16_t MmwDemo_NavPointGen_emitPrioritized(
             break;
         }
         MmwDemo_NavPointGen_copyPoint(
-            &outPoints[count],
-            (outSideInfo != NULL) ? &outSideInfo[count] : NULL,
+            &outObstacles[count],
             &samples[bestIdx], staticCfg);
         MmwDemo_NavPointGen_setSelected(gNavCellSelected,
             MmwDemo_NavPointGen_cellIndex(&samples[bestIdx]));
@@ -329,8 +332,7 @@ static uint16_t MmwDemo_NavPointGen_emitSurface(
     const MmwDemo_DenseElevation_OutputSample *samples,
     uint16_t sampleCount,
     uint16_t maxOutput,
-    DPIF_PointCloudCartesian *outPoints,
-    DPIF_PointCloudSideInfo *outSideInfo,
+    MmwDemo_CustomObstacle *outObstacles,
     const MmwDemo_NavPointGen_StaticCfg *staticCfg,
     uint16_t *availableCount)
 {
@@ -338,106 +340,140 @@ static uint16_t MmwDemo_NavPointGen_emitSurface(
      * surface.  availableCount simply reports how many survived the filter. */
     *availableCount = sampleCount;
     return MmwDemo_NavPointGen_emitPrioritized(
-        samples, sampleCount, maxOutput, outPoints, outSideInfo, staticCfg);
+        samples, sampleCount, maxOutput, outObstacles, staticCfg);
 }
 
 /* ========================================================================
- * Temporal Persistence Filter — 3 phase pipeline
+ * Motion-compensated two-frame confirmation pipeline
  * ====================================================================== */
 
-/**
- * Phase 1: DECAY — age every cell in the history grid by 1.
- * Cells that haven't been refreshed recently fade to zero.
- */
-static void MmwDemo_NavPointGen_historyDecay(void)
+static uint16_t MmwDemo_NavPointGen_histIndex(int16_t az, uint16_t rngGrp)
 {
-    uint16_t i;
-    for (i = 0U; i < NAV_HIST_MAP_SIZE; i++)
+    /* Sample azimuthIdx is a signed peak bin (-32..+31); the grid row is
+     * unsigned (0..63), so shift before clamping. */
+    az += (int16_t)(NAV_HIST_NUM_AZ / 2U);
+    if (az < 0)
     {
-        if (gNavHistoryMap[i] > 0U)
-        {
-            gNavHistoryMap[i] -= NAV_HIST_DECAY;
-        }
+        az = 0;
     }
+    else if (az >= (int16_t)NAV_HIST_NUM_AZ)
+    {
+        az = (int16_t)NAV_HIST_NUM_AZ - 1;
+    }
+    if (rngGrp >= NAV_HIST_NUM_RNG)
+    {
+        rngGrp = NAV_HIST_NUM_RNG - 1U;
+    }
+    return (uint16_t)((uint16_t)az * NAV_HIST_NUM_RNG + rngGrp);
 }
 
 /**
- * Phase 2: HIT — boost the score for every (azimuth, rangeGroup) cell
- * that has a candidate sample in the current frame.
- */
-static void MmwDemo_NavPointGen_historyHit(
-    const MmwDemo_DenseElevation_OutputSample *samples,
-    uint16_t sampleCount)
-{
-    uint16_t s;
-    for (s = 0U; s < sampleCount; s++)
-    {
-        int16_t az = (int16_t)samples[s].azimuthIdx +
-                     (int16_t)(NAV_HIST_NUM_AZ / 2U);
-        uint16_t rngGrp = samples[s].rangeIdx >> 2U;
-
-        if (az < 0) { az = 0; }
-        if (az >= (int16_t)NAV_HIST_NUM_AZ) { az = (int16_t)NAV_HIST_NUM_AZ - 1; }
-        if (rngGrp >= NAV_HIST_NUM_RNG) { rngGrp = NAV_HIST_NUM_RNG - 1U; }
-
-        {
-            uint16_t idx = (uint16_t)az * NAV_HIST_NUM_RNG + rngGrp;
-            uint8_t score = gNavHistoryMap[idx] + NAV_HIST_HIT_BONUS;
-            if (score > NAV_HIST_MAX_SCORE)
-            {
-                score = NAV_HIST_MAX_SCORE;
-            }
-            gNavHistoryMap[idx] = score;
-        }
-    }
-}
-
-/**
- * Phase 3: FILTER — compact the sample array in-place, keeping only
- * samples whose history cell score meets the persistence threshold.
- * Returns the number of surviving samples.
+ * Phase 1: CONFIRM — keep only samples whose (azimuth, range-group) cell,
+ * or the Doppler-predicted previous position, was also detected last frame.
+ * Compacts the array in place and returns the survivor count.
  */
 static uint16_t MmwDemo_NavPointGen_historyFilter(
     MmwDemo_DenseElevation_OutputSample *samples,
-    uint16_t sampleCount)
+    uint16_t sampleCount,
+    const MmwDemo_NavPointGen_StaticCfg *staticCfg)
 {
+    float binsPerFrame;
     uint16_t writeIdx = 0U;
     uint16_t s;
+
+    if (staticCfg->framePeriodSec <= 0.0f)
+    {
+        /* Frame timing not yet published by MSS: fail open instead of
+         * suppressing every sample on the first frames after boot. */
+        return sampleCount;
+    }
+    binsPerFrame = staticCfg->dopplerStepMps * staticCfg->framePeriodSec /
+                   staticCfg->rangeStepMeters;
+
     for (s = 0U; s < sampleCount; s++)
     {
-        int16_t az = (int16_t)samples[s].azimuthIdx +
-                     (int16_t)(NAV_HIST_NUM_AZ / 2U);
-        uint16_t rngGrp = samples[s].rangeIdx >> 2U;
+        int16_t az = samples[s].azimuthIdx;
+        int32_t rangeBin = (int32_t)samples[s].rangeIdx;
+        float raw = (float)samples[s].dopplerIdx * binsPerFrame;
+        int32_t delta;
+        int32_t prevBin;
+        int32_t bin;
+        uint8_t hit;
 
-        if (az < 0) { az = 0; }
-        if (az >= (int16_t)NAV_HIST_NUM_AZ) { az = (int16_t)NAV_HIST_NUM_AZ - 1; }
-        if (rngGrp >= NAV_HIST_NUM_RNG) { rngGrp = NAV_HIST_NUM_RNG - 1U; }
-
+        delta = (raw >= 0.0f) ? (int32_t)(raw + 0.5f)
+                              : -(int32_t)(-raw + 0.5f);
+        if (delta > NAV_MOTION_MAX_RANGE_BINS)
         {
-            uint16_t idx = (uint16_t)az * NAV_HIST_NUM_RNG + rngGrp;
-            if (gNavHistoryMap[idx] >= NAV_HIST_THRESHOLD)
+            delta = NAV_MOTION_MAX_RANGE_BINS;
+        }
+        if (delta < -NAV_MOTION_MAX_RANGE_BINS)
+        {
+            delta = -NAV_MOTION_MAX_RANGE_BINS;
+        }
+        prevBin = rangeBin + delta;
+
+        hit = gNavHistoryMap[MmwDemo_NavPointGen_histIndex(
+            az, (uint16_t)rangeBin >> NAV_HIST_RANGE_GROUP_SHIFT)];
+        if (hit == 0U)
+        {
+            /* +/-1 bin around the predicted previous position absorbs the
+             * Doppler-quantisation error and group-boundary rounding. */
+            for (bin = prevBin - 1; (bin <= prevBin + 1) && (hit == 0U); bin++)
             {
-                if (writeIdx != s)
+                if (bin < 0)
                 {
-                    samples[writeIdx] = samples[s];
+                    continue;
                 }
-                writeIdx++;
+                hit = gNavHistoryMap[MmwDemo_NavPointGen_histIndex(
+                    az, (uint16_t)bin >> NAV_HIST_RANGE_GROUP_SHIFT)];
             }
+        }
+
+        if (hit != 0U)
+        {
+            if (writeIdx != s)
+            {
+                samples[writeIdx] = samples[s];
+            }
+            writeIdx++;
         }
     }
     return writeIdx;
 }
 
+/**
+ * Phase 2: RECORD — publish this frame's detections (before suppression) as
+ * next frame's history. Hits mark the azimuth neighbours too, so a peak that
+ * jitters one azimuth bin between frames still confirms. Recording every
+ * detection keeps a newly appeared surface confirmable on its second frame.
+ */
+static void MmwDemo_NavPointGen_historyWrite(
+    const MmwDemo_DenseElevation_OutputSample *samples,
+    uint16_t sampleCount)
+{
+    uint16_t s;
+    int16_t a;
+
+    memset(gNavHistoryMap, 0, sizeof(gNavHistoryMap));
+    for (s = 0U; s < sampleCount; s++)
+    {
+        int16_t az = samples[s].azimuthIdx;
+        uint16_t rngGrp =
+            samples[s].rangeIdx >> NAV_HIST_RANGE_GROUP_SHIFT;
+
+        for (a = az - NAV_HIST_AZ_SPREAD; a <= az + NAV_HIST_AZ_SPREAD; a++)
+        {
+            gNavHistoryMap[MmwDemo_NavPointGen_histIndex(a, rngGrp)] = 1U;
+        }
+    }
+}
+
 int32_t MmwDemo_NavPointGen_process(
     const MmwDemo_NavPointGen_Cfg *cfg,
     const MmwDemo_NavPointGen_StaticCfg *staticCfg,
-    uint32_t deadlineStartCycles,
-    uint32_t deadlineOffsetCycles,
-    uint32_t cycleBudget,
     uint8_t *candidateBuffer,
     uint32_t candidateBufferSize,
-    DPIF_PointCloudCartesian *outPoints,
-    DPIF_PointCloudSideInfo *outSideInfo,
+    MmwDemo_CustomObstacle *outObstacles,
     uint16_t maxOutputPoints,
     uint32_t *numPointsOut)
 {
@@ -453,7 +489,7 @@ int32_t MmwDemo_NavPointGen_process(
     {
         *numPointsOut = 0U;
     }
-    if ((cfg == NULL) || (staticCfg == NULL) || (outPoints == NULL) ||
+    if ((cfg == NULL) || (staticCfg == NULL) || (outObstacles == NULL) ||
         (candidateBuffer == NULL) ||
         (candidateBufferSize < MMWDEMO_NAV_CANDIDATE_BUFFER_SIZE) ||
         (numPointsOut == NULL) ||
@@ -463,6 +499,7 @@ int32_t MmwDemo_NavPointGen_process(
         !(staticCfg->rangeStepMeters > 0.0f) ||
         (!isfinite(staticCfg->dopplerStepMps)) ||
         (!isfinite(staticCfg->framePeriodSec)) ||
+        (staticCfg->framePeriodSec < 0.0f) ||
         (!isfinite(staticCfg->rangeBiasMeters)) ||
         (staticCfg->sourceStaticCfg.subFrameNum >=
          MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES) ||
@@ -482,9 +519,6 @@ int32_t MmwDemo_NavPointGen_process(
     retVal = MmwDemo_DenseElevation_process(
         &cfg->sourceCfg,
         &staticCfg->sourceStaticCfg,
-        deadlineStartCycles,
-        deadlineOffsetCycles,
-        cycleBudget,
         candidateBuffer,
         candidateBufferSize,
         MMWDEMO_DENSE_ELEV_MAX_OUTPUT_SAMPLES,
@@ -519,18 +553,21 @@ int32_t MmwDemo_NavPointGen_process(
 
     samples = (MmwDemo_DenseElevation_OutputSample *)(
         candidateBuffer + candidateHeader->headerSize);
-    /* Temporal persistence filter: decay → hit → filter.
-     * Replaces buildNearestMap() to allow multi-layer detection
-     * while rejecting transient noise (ghost points). */
-    MmwDemo_NavPointGen_historyDecay();
-    MmwDemo_NavPointGen_historyHit(samples, candidateHeader->numSamples);
-    candidateHeader->numSamples = MmwDemo_NavPointGen_historyFilter(
-        samples, candidateHeader->numSamples);
+    /* Motion-compensated two-frame confirmation: confirm against last
+     * frame's history, then record this frame's detections so the next
+     * frame can confirm them. Replaces buildNearestMap(): multi-layer
+     * detection is kept while single-frame transient noise is rejected. */
+    {
+        uint16_t detectedCount = candidateHeader->numSamples;
+        candidateHeader->numSamples = MmwDemo_NavPointGen_historyFilter(
+            samples, detectedCount, staticCfg);
+        MmwDemo_NavPointGen_historyWrite(samples, detectedCount);
+    }
 
     emitSurfaceStartCycles = Cycleprofiler_getTimeStamp();
     *numPointsOut = (uint32_t)MmwDemo_NavPointGen_emitSurface(
         samples, candidateHeader->numSamples, maxSurface,
-        outPoints, outSideInfo, staticCfg,
+        outObstacles, staticCfg,
         &surfaceAvailable);
 
     {
