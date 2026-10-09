@@ -42,6 +42,7 @@
 /* MCU + SDK Files*/
 #include <drivers/uart.h>
 #include <kernel/dpl/SemaphoreP.h>
+#include <kernel/dpl/HwiP.h>
 #include "FreeRTOS.h"
 #include "task.h"
 
@@ -368,11 +369,30 @@ extern "C"
         void                   *gHTrackModule;
         bool                    gtrackEnabled;
         bool                    gtrackInstanceCreated;
+        uint16_t                maxNumPoints;
+        uint16_t                maxNumTracks;
+        float                   deltaT;
         GTRACK_sceneryParams    appSceneryParams;
         GTRACK_gatingParams     appGatingParams;
         GTRACK_stateParams      appStateParams;
         GTRACK_allocationParams appAllocationParams;
     } MmwDemo_trackerRansacConfig;
+
+    /* Power optimization configuration */
+    typedef struct MmwDemo_powerOptConfig_t
+    {
+        uint32_t dspStateAfterFrameProc;
+        uint32_t isHwaDynamicClkGate;
+        uint32_t hwaStateAfterFrameProc;
+    } MmwDemo_powerOptConfig;
+
+    /* Config for Errata ANA#46: Spurs caused due to data transfer activity */
+    typedef struct MmwDemo_adcDataDithDelayCfg_t
+    {
+        uint8_t     isDitherEn;
+        uint16_t    ditherVal;
+        HwiP_Object chirpAvailHwiObject;
+    } MmwDemo_adcDataDithDelayCfg;
     /**
      * @brief
      *  Millimeter Wave Demo MCB
@@ -533,7 +553,15 @@ extern "C"
         /*! @brief this structure is used to store tracker configuration */
         MmwDemo_trackerRansacConfig trackerCfg;
 
+        /*! @brief Power optimization config */
+        MmwDemo_powerOptConfig powerOptCfg;
+
+        /*! @brief ADC data dithering config */
+        MmwDemo_adcDataDithDelayCfg adcDataDithDelayCfg;
+
     } MmwDemo_MSS_MCB;
+
+    #define gMmwMssMCB gMmw_MCB
 
     /*!
      * @brief
@@ -556,10 +584,18 @@ extern "C"
      *************************** Extern Definitions ***************************
      **************************************************************************/
 
-
 #ifdef ENET_STREAM
     extern int32_t MmwDemo_mssEnetCfgDone(void);
 #endif
+
+    /* CLI and Sensor Control APIs */
+    extern void    MmwDemo_CLIInit(uint8_t taskPriority);
+    extern int32_t MmwDemo_openSensor(bool isFirstTimeOpen);
+    extern int32_t MmwDemo_configSensor(void);
+    extern int32_t MmwDemo_startSensor(void);
+    extern void    MmwDemo_stopSensor(void);
+    extern int32_t MmwDemo_dataPathConfig(void);
+    extern int32_t MmwDemo_trackerConfig(void);
 
     /* functions to manage the dynamic configuration */
     extern uint8_t MmwDemo_isAllCfgInPendingState(void);

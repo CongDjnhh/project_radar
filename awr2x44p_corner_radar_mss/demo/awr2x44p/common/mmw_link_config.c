@@ -38,6 +38,8 @@
  *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#ifndef MMWAVELINK_ON_MSS
+
 /**************************************************************************
  *************************** Include Files ********************************
  **************************************************************************/
@@ -2113,3 +2115,5 @@ int32_t MmwaveLink_sensorStop(void)
 
     return 0;
 }
+
+#endif /* !MMWAVELINK_ON_MSS */

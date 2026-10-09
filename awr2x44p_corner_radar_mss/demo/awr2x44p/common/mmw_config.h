@@ -250,6 +250,24 @@ extern "C"
         /*! @brief      Field of view config used in AoA estimation */
         DPC_ObjectDetection_FovAoaCfg aoaFovCfg;
 
+        /*! @brief Flag indicating if @ref cfarCfg is pending processing. */
+        uint8_t isCfarCfgPending : 1;
+
+        /*! @brief Flag indicating if @ref rangeCfarCfg is pending processing. */
+        uint8_t isRangeCfarCfgPending : 1;
+
+        /*! @brief Flag indicating if @ref compressionCfg is pending processing. */
+        uint8_t isCompressionCfgPending : 1;
+
+        /*! @brief Flag indicating if @ref localMaxCfg is pending processing. */
+        uint8_t isLocalMaxCfgPending : 1;
+
+        /*! @brief Flag indicating if @ref intfStatsdBCfg is pending processing. */
+        uint8_t isIntfStatsdBCfgPending : 1;
+
+        /*! @brief Flag indicating if @ref aoaFovCfg is pending processing. */
+        uint8_t isFovAoaCfgPending : 1;
+
     } MmwDemo_datapathCfg;
 #endif
 

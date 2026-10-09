@@ -55,5 +55,10 @@ void sendResultsExportedCommand(DPM_Buffer *ptrResult);
 #endif
 
 int32_t gtrack_heap_init(void);
+int32_t MmwDemo_trackerConfig(void);
+void    MmwDemo_loadRansac(void);
+int32_t MmwDemo_loadGtrackCfg(void);
+int32_t MmwDemo_updateTrackerCfg(bool enable, uint16_t maxPoints, uint16_t maxTracks, float deltaT);
+int32_t MmwDemo_updateRansacCfg(bool enable, uint16_t iterations, float thresh);
 
 #endif // MMWDEMO_TRACKER_H

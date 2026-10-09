@@ -37,6 +37,8 @@
  *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#ifndef MMWAVELINK_ON_MSS
+
 /* Standard Include Files*/
 #include <stdbool.h>
 
@@ -198,7 +200,7 @@ exit:
     return numBandsEmpty;
 }
 
-#ifdef TRACKER_ON_MSS
+#if defined(TRACKER_ON_MSS) && !defined(MMWAVELINK_ON_MSS)
 
 int32_t MmwDemo_trackerConfig()
 {
@@ -2193,7 +2195,7 @@ static int32_t MmwDemo_dataPathConfig(void)
             // }
 #else
 
-            objDetCommonCfg = objDetCommonCfg; // TODO JIT: take action
+            (void)objDetCommonCfg;
 #endif
         }
     }
@@ -2288,3 +2290,4 @@ int32_t MmwDemo_startSensor(void)
 }
 
 #endif
+#endif /* !MMWAVELINK_ON_MSS */

@@ -53,7 +53,9 @@
 #include "../../alg/gtrack/gtrack.h"
 #include "../../datapath/dpc/objdethwaDDMA/objectdetection.h"
 #include "../common/mmw_output.h"
+#include "../common/chirp_design_HECR.h"
 #include "mmw_mss.h"
+#include "mss_tracker.h"
 
 #define GTRACK_HEAP_MEM_SIZE (60 * 1024U)
 #define INVDET_EPSILON       0.000001
@@ -376,3 +378,194 @@ void sendResultsExportedCommand(DPM_Buffer *ptrResult){
     }
 }
 #endif
+
+void MmwDemo_GAppAllocParams(void)
+{
+    GTRACK_allocationParams *allocationParams;
+    allocationParams = (GTRACK_allocationParams *)&gMmw_MCB.trackerCfg.appAllocationParams;
+
+    allocationParams->snrThre         = HECR_APP_ALLOC_SNR_THRE;
+    allocationParams->snrThreObscured = HECR_APP_ALLOC_SNR_THRE_OBSC;
+    allocationParams->velocityThre    = HECR_APP_ALLOC_VEL_THRE;
+    allocationParams->pointsThre      = HECR_APP_ALLOC_PTS_THRE;
+    allocationParams->maxDistanceThre = HECR_APP_ALLOC_MX_DIS_THRE;
+    allocationParams->maxVelThre      = HECR_APP_ALLOC_MX_VEL_THRE;
+}
+
+void MmwDemo_GAppGatingParams(void)
+{
+    GTRACK_gatingParams *gatingParams;
+    gatingParams = (GTRACK_gatingParams *)&gMmw_MCB.trackerCfg.appGatingParams;
+
+    gatingParams->gain           = HECR_APP_GATING_GAIN;
+    gatingParams->limitsArray[0] = HECR_APP_GATING_LIM_ARR_0;
+    gatingParams->limitsArray[1] = HECR_APP_GATING_LIM_ARR_1;
+    gatingParams->limitsArray[2] = HECR_APP_GATING_LIM_ARR_2;
+    gatingParams->limitsArray[3] = HECR_APP_GATING_LIM_ARR_3;
+}
+
+void MmwDemo_GAppStateParams(void)
+{
+    GTRACK_stateParams *stateParams;
+    stateParams = (GTRACK_stateParams *)&gMmw_MCB.trackerCfg.appStateParams;
+
+    stateParams->det2actThre     = HECR_APP_STATE_DET2_ACT_THRE;
+    stateParams->det2freeThre    = HECR_APP_STATE_DET2_FREE_THRE;
+    stateParams->active2freeThre = HECR_APP_STATE_ACT2_FREE_THRE;
+    stateParams->static2freeThre = HECR_APP_STATE_STATIC2_FREE_THRE;
+    stateParams->exit2freeThre   = HECR_APP_STATE_EXIT2_FREE_THRE;
+    stateParams->sleep2freeThre  = HECR_APP_STATE_SLEEP2_FREE_THRE;
+}
+
+void MmwDemo_GAppSceneryParams(void)
+{
+    GTRACK_sceneryParams *sceneryParams;
+    sceneryParams = (GTRACK_sceneryParams *)&gMmw_MCB.trackerCfg.appSceneryParams;
+
+    sceneryParams->sensorPosition.x = HECR_SCENE_SENSOR_POS_X;
+    sceneryParams->sensorPosition.y = HECR_SCENE_SENSOR_POS_Y;
+    sceneryParams->sensorPosition.z = HECR_SCENE_SENSOR_POS_Z;
+
+    sceneryParams->sensorOrientation.azimTilt = HECR_SCENE_SENSOR_ORIN_AZIM_TILT;
+    sceneryParams->sensorOrientation.elevTilt = HECR_SCENE_SENSOR_ORIN_ELEV_TILT;
+
+    sceneryParams->numBoundaryBoxes  = HECR_SCENE_NUM_BOUND_BOX;
+    sceneryParams->boundaryBox[0].x1 = HECR_SCENE_BOUND_BOX_X1;
+    sceneryParams->boundaryBox[0].x2 = HECR_SCENE_BOUND_BOX_X2;
+    sceneryParams->boundaryBox[0].y1 = HECR_SCENE_BOUND_BOX_Y1;
+    sceneryParams->boundaryBox[0].y2 = HECR_SCENE_BOUND_BOX_Y2;
+    sceneryParams->boundaryBox[0].z1 = HECR_SCENE_BOUND_BOX_Z1;
+    sceneryParams->boundaryBox[0].z2 = HECR_SCENE_BOUND_BOX_Z2;
+
+    sceneryParams->numStaticBoxes = HECR_SCENE_NUM_STATIC_BOX;
+}
+
+void MmwDemo_loadRansac(void)
+{
+    gMmw_MCB.trackerCfg.ransacEnabled    = HECR_RANSAC_ENABLE;
+    gMmw_MCB.trackerCfg.ransacIterations = HECR_RANSAC_INTERATIONS;
+    gMmw_MCB.trackerCfg.ransacThresh     = HECR_RANSAC_THRESHOLD;
+}
+
+int32_t MmwDemo_loadGtrackCfg(void)
+{
+    int32_t                   retVal = 0;
+    int32_t                   errCode;
+    GTRACK_moduleConfig       config;
+    GTRACK_advancedParameters advParams;
+
+    // delete gtrack instance if it already exists
+    if (gMmw_MCB.trackerCfg.gtrackInstanceCreated)
+    {
+        gtrack_delete(gMmw_MCB.trackerCfg.gHTrackModule);
+        gMmw_MCB.trackerCfg.gHTrackModule         = NULL;
+        gMmw_MCB.trackerCfg.gtrackInstanceCreated = false;
+    }
+
+    if (!gMmw_MCB.trackerCfg.gtrackEnabled)
+    {
+        return retVal;
+    }
+    else
+    {
+        // create gtrack instance
+        memset((void *)&config, 0, sizeof(GTRACK_moduleConfig));
+        memset((void *)&advParams, 0, sizeof(GTRACK_advancedParameters));
+
+        config.stateVectorType = GTRACK_STATE_VECTORS_3DA;
+        config.verbose         = GTRACK_VERBOSE_NONE;
+
+        config.maxNumPoints             = (gMmw_MCB.trackerCfg.maxNumPoints > 0) ? gMmw_MCB.trackerCfg.maxNumPoints : HECR_GTRACK_MAX_NUM_PT;
+        config.maxNumTracks             = (gMmw_MCB.trackerCfg.maxNumTracks > 0) ? gMmw_MCB.trackerCfg.maxNumTracks : HECR_GTRACK_MAX_NUM_TRCK;
+        config.initialRadialVelocity    = HECR_GTRACK_INIT_RAD_VEL;
+        config.maxRadialVelocity        = HECR_GTRACK_MAX_RAD_VEL;
+        config.radialVelocityResolution = HECR_GTRACK_RAD_VEL_RESO;
+        config.maxAcceleration[0]       = HECR_GTRACK_MAX_ACC_0;
+        config.maxAcceleration[1]       = HECR_GTRACK_MAX_ACC_1;
+        config.maxAcceleration[2]       = HECR_GTRACK_MAX_ACC_2;
+        config.deltaT                   = (gMmw_MCB.trackerCfg.deltaT > 0.0f) ? gMmw_MCB.trackerCfg.deltaT : HECR_GTRACK_DELTA_T;
+
+        advParams.allocationParams = &gMmw_MCB.trackerCfg.appAllocationParams;
+        advParams.gatingParams     = &gMmw_MCB.trackerCfg.appGatingParams;
+        advParams.stateParams      = &gMmw_MCB.trackerCfg.appStateParams;
+        advParams.sceneryParams    = &gMmw_MCB.trackerCfg.appSceneryParams;
+
+        config.advParams                  = &advParams;
+        gMmw_MCB.trackerCfg.gHTrackModule = gtrack_create(&config, &errCode);
+        if (gMmw_MCB.trackerCfg.gHTrackModule == NULL)
+        {
+            return -1;
+        }
+
+        gMmw_MCB.trackerCfg.gtrackInstanceCreated = true;
+        gMmw_MCB.trackerCfg.gtrackEnabled         = true;
+        return retVal;
+    }
+}
+
+int32_t MmwDemo_trackerConfig(void)
+{
+    int32_t retVal;
+
+    MmwDemo_loadRansac();
+    MmwDemo_GAppSceneryParams();
+    MmwDemo_GAppAllocParams();
+    MmwDemo_GAppGatingParams();
+    MmwDemo_GAppStateParams();
+    gMmw_MCB.trackerCfg.maxNumPoints = HECR_GTRACK_MAX_NUM_PT;
+    gMmw_MCB.trackerCfg.maxNumTracks = HECR_GTRACK_MAX_NUM_TRCK;
+    gMmw_MCB.trackerCfg.deltaT       = HECR_GTRACK_DELTA_T;
+    gMmw_MCB.trackerCfg.gtrackEnabled = HECR_GTRACK_ENABLE;
+    retVal = MmwDemo_loadGtrackCfg();
+
+    return retVal;
+}
+
+int32_t MmwDemo_updateTrackerCfg(bool enable, uint16_t maxPoints, uint16_t maxTracks, float deltaT)
+{
+    gMmw_MCB.trackerCfg.gtrackEnabled = enable;
+    if (!enable)
+    {
+        if (gMmw_MCB.trackerCfg.gtrackInstanceCreated)
+        {
+            gtrack_delete(gMmw_MCB.trackerCfg.gHTrackModule);
+            gMmw_MCB.trackerCfg.gHTrackModule         = NULL;
+            gMmw_MCB.trackerCfg.gtrackInstanceCreated = false;
+        }
+        return 0;
+    }
+
+    if (maxPoints > 0)
+    {
+        gMmw_MCB.trackerCfg.maxNumPoints = maxPoints;
+    }
+    if (maxTracks > 0)
+    {
+        gMmw_MCB.trackerCfg.maxNumTracks = maxTracks;
+    }
+    if (deltaT > 0.0f)
+    {
+        gMmw_MCB.trackerCfg.deltaT = deltaT;
+    }
+
+    MmwDemo_GAppSceneryParams();
+    MmwDemo_GAppAllocParams();
+    MmwDemo_GAppGatingParams();
+    MmwDemo_GAppStateParams();
+    return MmwDemo_loadGtrackCfg();
+}
+
+int32_t MmwDemo_updateRansacCfg(bool enable, uint16_t iterations, float thresh)
+{
+    gMmw_MCB.trackerCfg.ransacEnabled = enable;
+    if (iterations > 0)
+    {
+        gMmw_MCB.trackerCfg.ransacIterations = iterations;
+    }
+    if (thresh > 0.0f)
+    {
+        gMmw_MCB.trackerCfg.ransacThresh = thresh;
+    }
+    return 0;
+}
+

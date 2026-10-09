@@ -84,6 +84,7 @@
                                     <listOptionValue value="APP_RESOURCE_FILE='&lt;'ti/demo/awr2x44P/mmw_ddm/mmw_resDDM.h'&gt;'"/>
                                     <listOptionValue value="MMWAVE_SDK_DEVICE=awr2x44P"/>
                                     <listOptionValue value="SUBSYS_MSS"/>
+                                    <listOptionValue value="MMWAVELINK_ON_MSS"/>
                                     <listOptionValue value="_DEBUG_=1"/>
                                 </option>
                                 <option id="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.MCPU.1597617762" superClass="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.MCPU" value="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.MCPU.cortex-r5" valueType="enumerated"/>
@@ -123,6 +124,8 @@
                                     <listOptionValue value="${MMWAVE_SDK_INSTALL_PATH}/ti/utils/testlogger/lib"/>
                                     <listOptionValue value="${MMWAVE_SDK_INSTALL_PATH}/ti/utils/hsiheader/lib"/>
                                     <listOptionValue value="${PROJECT_LOC}/alg/gtrack/lib/"/>
+                                    <listOptionValue value="${MMWAVE_SDK_INSTALL_PATH}/ti/control/mmwave/lib"/>
+                                    <listOptionValue value="${MMWAVE_SDK_INSTALL_PATH}/ti/utils/cli/lib"/>
                                     <listOptionValue value="${PROJECT_ROOT}\mss\mssgenerated"/>
                                     <listOptionValue value="${PROJECT_LOC}"/>
                                 </option>
@@ -134,6 +137,8 @@
                                     <listOptionValue value="libc.a"/>
                                     <listOptionValue value="libtestlogger_awr2x44P.aer5f"/>
                                     <listOptionValue value="mmwavelink_r5f.lib"/>
+                                    <listOptionValue value="libcli_awr2x44P.aer5f"/>
+                                    <listOptionValue value="libmmwave_awr2x44P.aer5f"/>
                                     <listOptionValue value="libmathutils.aer5f"/>
                                     <listOptionValue value="libhsiheader_awr2x44P.aer5f"/>
                                     <listOptionValue value="libgtrack3D_awr2x44p.aer5f"/>
@@ -256,6 +261,7 @@
                                     <listOptionValue value="APP_RESOURCE_FILE='&lt;'ti/demo/awr2x44P/mmw_ddm/mmw_resDDM.h'&gt;'"/>
                                     <listOptionValue value="MMWAVE_SDK_DEVICE=awr2x44P"/>
                                     <listOptionValue value="SUBSYS_MSS"/>
+                                    <listOptionValue value="MMWAVELINK_ON_MSS"/>
                                 </option>
                                 <option id="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.MCPU.1277074737" superClass="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.MCPU" value="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.MCPU.cortex-r5" valueType="enumerated"/>
                                 <option id="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.MFLOAT_ABI.1177298850" superClass="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.MFLOAT_ABI" value="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.MFLOAT_ABI.hard" valueType="enumerated"/>
@@ -294,6 +300,8 @@
                                     <listOptionValue value="${MMWAVE_SDK_INSTALL_PATH}/ti/utils/testlogger/lib"/>
                                     <listOptionValue value="${MMWAVE_SDK_INSTALL_PATH}/ti/utils/hsiheader/lib"/>
                                     <listOptionValue value="${PROJECT_LOC}/alg/gtrack/lib/"/>
+                                    <listOptionValue value="${MMWAVE_SDK_INSTALL_PATH}/ti/control/mmwave/lib"/>
+                                    <listOptionValue value="${MMWAVE_SDK_INSTALL_PATH}/ti/utils/cli/lib"/>
                                     <listOptionValue value="${PROJECT_ROOT}\mss\mssgenerated"/>
                                     <listOptionValue value="${PROJECT_LOC}"/>
                                 </option>
@@ -305,6 +313,8 @@
                                     <listOptionValue value="libc.a"/>
                                     <listOptionValue value="libtestlogger_awr2x44P.aer5f"/>
                                     <listOptionValue value="mmwavelink_r5f.lib"/>
+                                    <listOptionValue value="libcli_awr2x44P.aer5f"/>
+                                    <listOptionValue value="libmmwave_awr2x44P.aer5f"/>
                                     <listOptionValue value="libmathutils.aer5f"/>
                                     <listOptionValue value="libhsiheader_awr2x44P.aer5f"/>
                                     <listOptionValue value="libgtrack3D_awr2x44p.aer5f"/>
