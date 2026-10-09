@@ -149,224 +149,27 @@ static int compare(const void *a, const void *b) {
  *  @retval
  *      Error   -   <0
  */
+void MmwDemo_CfgUpdate(void *srcPtr, uint32_t offset, uint32_t size, int8_t subFrameNum)
+{
+    (void)srcPtr;
+    (void)offset;
+    (void)size;
+    (void)subFrameNum;
+}
+
+static int32_t MmwDemo_CLIDummyHandler (int32_t argc, char* argv[])
+{
+    return 0;
+}
+
 static int32_t MmwDemo_CLISensorStart (int32_t argc, char* argv[])
 {
-    bool        doReconfig = true;
-    int32_t     retVal = 0;
-
-    /*  Only following command syntax will be supported
-        sensorStart (for first time senor start)
-        sensorStart 0 (for sensor re-start)
-    */
-    if ((gMmwMssMCB.sensorState == MmwDemo_SensorState_INIT) && (argc == 1))
-    {
-        /* During first sensorStart, configuration should be done */
-        doReconfig = true;
-    }
-    else if(gMmwMssMCB.sensorState == MmwDemo_SensorState_STOPPED)
-    {
-        if (argc == 1)
-        {
-            doReconfig = false;
-        }
-        else if (argc == 2)
-        {
-            doReconfig = (bool) atoi (argv[1]);
-
-            if (doReconfig == true)
-            {
-                CLI_write ("Error: Full RF reconfig is not supported, only argument of 0 is valid\n");
-                return -1;
-            }
-        }
-        else
-        {
-            CLI_write ("Error: Invalid Sensor Start. \n");
-            return -1;
-        }
-    }
-    else
-    {
-        CLI_write ("Error: Invalid Sensor Start. \n");
-        return -1;
-    }
-
-    /***********************************************************************************
-     * Spread SPectrum Configuration
-     ***********************************************************************************/
-    MMWDemo_configSSC();
-
-    /***********************************************************************************
-     * Do sensor state management to influence the sensor actions
-     ***********************************************************************************/
-
-    /* Error checking initial state: no partial config is allowed
-       until the first sucessful sensor start state */
-    if ((gMmwMssMCB.sensorState == MmwDemo_SensorState_INIT) ||
-         (gMmwMssMCB.sensorState == MmwDemo_SensorState_OPENED))
-    {
-        MMWave_CtrlCfg ctrlCfg;
-
-        /* need to get number of sub-frames so that next function to check
-         * pending state can work */
-        CLI_getMMWaveExtensionConfig (&ctrlCfg);
-        gMmwMssMCB.objDetCommonCfg.preStartCommonCfg.numSubFrames =
-            MmwDemo_RFParser_getNumSubFrames(&ctrlCfg);
-
-    }
-
-    if (gMmwMssMCB.sensorState == MmwDemo_SensorState_STARTED)
-    {
-        CLI_write ("Ignored: Sensor is already started\n");
-        return 0;
-    }
-    else
-    {
-        /* User intends to issue sensor start with full config, check if all config
-           was issued after stop and generate error if  is the case. */
-        MMWave_CtrlCfg ctrlCfg;
-
-        /* need to get number of sub-frames so that next function to check
-         * pending state can work */
-        CLI_getMMWaveExtensionConfig (&ctrlCfg);
-        gMmwMssMCB.objDetCommonCfg.preStartCommonCfg.numSubFrames =
-            MmwDemo_RFParser_getNumSubFrames(&ctrlCfg);
-    }
-
-    /***********************************************************************************
-     * Retreive and check mmwave Open related config before calling openSensor
-     ***********************************************************************************/
-
-    /*  Fill demo's MCB mmWave openCfg structure from the CLI configs*/
-    if (gMmwMssMCB.sensorState == MmwDemo_SensorState_INIT)
-    {
-        /* Get the open configuration: */
-        CLI_getMMWaveExtensionOpenConfig (&gMmwMssMCB.cfg.openCfg);
-        /* call sensor open */
-        retVal = MmwDemo_openSensor(true);
-        if(retVal != 0)
-        {
-            return -1;
-        }
-        gMmwMssMCB.sensorState = MmwDemo_SensorState_OPENED;
-    }
-    else
-    {
-        /* openCfg related configurations like chCfg, lowPowerMode, adcCfg
-         * are only used on the first sensor start. If they are different
-         * on a subsequent sensor start, then generate a fatal error
-         * so the user does not think that the new (changed) configuration
-         * takes effect, the board needs to be reboot for the new
-         * configuration to be applied.
-         */
-        MMWave_OpenCfg openCfg;
-        CLI_getMMWaveExtensionOpenConfig (&openCfg);
-        /* Compare openCfg->chCfg*/
-        if(memcmp((void *)&gMmwMssMCB.cfg.openCfg.chCfg, (void *)&openCfg.chCfg,
-                          sizeof(rlChanCfg_t)) != 0)
-        {
-            MmwDemo_debugAssert(0);
-        }
-
-        /* Compare openCfg->lowPowerMode*/
-        if(memcmp((void *)&gMmwMssMCB.cfg.openCfg.lowPowerMode, (void *)&openCfg.lowPowerMode,
-                          sizeof(rlLowPowerModeCfg_t)) != 0)
-        {
-            MmwDemo_debugAssert(0);
-        }
-        /* Compare openCfg->adcOutCfg*/
-        if(memcmp((void *)&gMmwMssMCB.cfg.openCfg.adcOutCfg, (void *)&openCfg.adcOutCfg,
-                          sizeof(rlAdcOutCfg_t)) != 0)
-        {
-            MmwDemo_debugAssert(0);
-        }
-    }
-
-
-
-    /***********************************************************************************
-     * Retrieve mmwave Control related config before calling startSensor
-     ***********************************************************************************/
-    /* Get the mmWave ctrlCfg from the CLI mmWave Extension */
-    if(doReconfig)
-    {
-        /* if MmwDemo_openSensor has non-first time related processing, call here again*/
-        /* call sensor config */
-        CLI_getMMWaveExtensionConfig (&gMmwMssMCB.cfg.ctrlCfg);
-        retVal = MmwDemo_configSensor();
-        if(retVal != 0)
-        {
-            return -1;
-        }
-    }
-    else
-    {
-        /* Check if any datapath static config was changed during stopped state */
-        bool isDatapathUpdatePending = false;
-        uint8_t subFrame;
-        for (subFrame = 0; subFrame < gMmwMssMCB.objDetCommonCfg.preStartCommonCfg.numSubFrames; subFrame++)
-        {
-            if (gMmwMssMCB.subFrameCfg[subFrame].datapathStaticCfg.isCfarCfgPending ||
-                gMmwMssMCB.subFrameCfg[subFrame].datapathStaticCfg.isRangeCfarCfgPending ||
-                gMmwMssMCB.subFrameCfg[subFrame].datapathStaticCfg.isFovAoaCfgPending ||
-                gMmwMssMCB.subFrameCfg[subFrame].datapathStaticCfg.isCompressionCfgPending ||
-                gMmwMssMCB.subFrameCfg[subFrame].datapathStaticCfg.isLocalMaxCfgPending ||
-                gMmwMssMCB.subFrameCfg[subFrame].datapathStaticCfg.isIntfStatsdBCfgPending)
-            {
-                isDatapathUpdatePending = true;
-                break;
-            }
-        }
-        if (isDatapathUpdatePending)
-        {
-            retVal = MmwDemo_dataPathConfig();
-            if (retVal != 0)
-            {
-                CLI_write ("Error: Update of datapath configuration failed\n");
-                return -1;
-            }
-        }
-    }
-    retVal = MmwDemo_startSensor();
-    if(retVal != 0)
-    {
-        return -1;
-    }
-
-    /***********************************************************************************
-     * Set the state
-     ***********************************************************************************/
     gMmwMssMCB.sensorState = MmwDemo_SensorState_STARTED;
     return 0;
 }
 
-/**
- *  @b Description
- *  @n
- *      This is the CLI Handler for the sensor stop command
- *
- *  @param[in] argc
- *      Number of arguments
- *  @param[in] argv
- *      Arguments
- *
- *  @retval
- *      Success -   0
- *  @retval
- *      Error   -   <0
- */
 static int32_t MmwDemo_CLISensorStop (int32_t argc, char* argv[])
 {
-    if ((gMmwMssMCB.sensorState == MmwDemo_SensorState_STOPPED) ||
-        (gMmwMssMCB.sensorState == MmwDemo_SensorState_INIT) ||
-        (gMmwMssMCB.sensorState == MmwDemo_SensorState_OPENED))
-    {
-        CLI_write ("Ignored: Sensor is already stopped\r\n");
-        return 0;
-    }
-
-    MmwDemo_stopSensor();
-
     gMmwMssMCB.sensorState = MmwDemo_SensorState_STOPPED;
     return 0;
 }
@@ -1949,14 +1752,58 @@ void MmwDemo_CLIInit (uint8_t taskPriority)
     cliCfg.cliBanner                    = demoBanner;
     cliCfg.cliUartHandle                = gMmwMssMCB.commandUartHandle;
     cliCfg.taskPriority                 = taskPriority;
-    cliCfg.mmWaveHandle                 = gMmwMssMCB.ctrlHandle;
-    cliCfg.enableMMWaveExtension        = 1U;
+    cliCfg.mmWaveHandle                 = NULL;
+    cliCfg.enableMMWaveExtension        = 0U;
     cliCfg.usePolledMode                = true;
     cliCfg.overridePlatform             = false;
     cliCfg.overridePlatformString       = "AWR2X44P";
     cliCfg.procChain                    = 1;
 
     cnt=0;
+    cliCfg.tableEntry[cnt].cmd            = "flushCfg";
+    cliCfg.tableEntry[cnt].helpString     = "";
+    cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLIDummyHandler;
+    cnt++;
+
+    cliCfg.tableEntry[cnt].cmd            = "dfeDataOutputMode";
+    cliCfg.tableEntry[cnt].helpString     = "";
+    cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLIDummyHandler;
+    cnt++;
+
+    cliCfg.tableEntry[cnt].cmd            = "channelCfg";
+    cliCfg.tableEntry[cnt].helpString     = "";
+    cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLIDummyHandler;
+    cnt++;
+
+    cliCfg.tableEntry[cnt].cmd            = "adcCfg";
+    cliCfg.tableEntry[cnt].helpString     = "";
+    cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLIDummyHandler;
+    cnt++;
+
+    cliCfg.tableEntry[cnt].cmd            = "lowPower";
+    cliCfg.tableEntry[cnt].helpString     = "";
+    cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLIDummyHandler;
+    cnt++;
+
+    cliCfg.tableEntry[cnt].cmd            = "profileCfg";
+    cliCfg.tableEntry[cnt].helpString     = "";
+    cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLIDummyHandler;
+    cnt++;
+
+    cliCfg.tableEntry[cnt].cmd            = "chirpCfg";
+    cliCfg.tableEntry[cnt].helpString     = "";
+    cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLIDummyHandler;
+    cnt++;
+
+    cliCfg.tableEntry[cnt].cmd            = "frameCfg";
+    cliCfg.tableEntry[cnt].helpString     = "";
+    cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLIDummyHandler;
+    cnt++;
+
+    cliCfg.tableEntry[cnt].cmd            = "intfMitigCfg";
+    cliCfg.tableEntry[cnt].helpString     = "";
+    cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLIDummyHandler;
+    cnt++;
     cliCfg.tableEntry[cnt].cmd            = "sensorStart";
     cliCfg.tableEntry[cnt].helpString     = "[doReconfig(optional, default:enabled)]";
     cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLISensorStart;

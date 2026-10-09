@@ -716,7 +716,8 @@
 #define MMWDEMO_MMWAVE_CTRL_TASK_PRIORITY 9
 #define MMWDEMO_MMWAVE_ENET_TASK_PRIORITY 1
 #else
-#define MMWDEMO_UART_EXPORT_TASK_PRIORITY 3
+#define MMWDEMO_CLI_TASK_PRIORITY         3
+#define MMWDEMO_UART_EXPORT_TASK_PRIORITY 4
 #define MMWDEMO_MMWAVE_CTRL_TASK_PRIORITY 5
 #endif
 
@@ -792,7 +793,7 @@ SemaphoreP_Object gCalibSaveSemHandle;
  *************************** Extern Definitions ***************************
  **************************************************************************/
 
-// extern void MmwDemo_CLIInit(uint8_t taskPriority);
+extern void MmwDemo_CLIInit(uint8_t taskPriority);
 
 #ifdef MMWDEMO_DDM
 extern uint8_t                MmwDemo_RFParserPhaseShiftOrder[SYS_COMMON_NUM_TX_ANTENNAS];
@@ -2431,6 +2432,11 @@ void MmwDemo_initTask(void *args)
     /* tracker configuration*/
     MmwDemo_trackerConfig();
 #endif
+
+    /*****************************************************************************
+     * Initialize the CLI Module:
+     *****************************************************************************/
+    MmwDemo_CLIInit(MMWDEMO_CLI_TASK_PRIORITY);
 
     /* Never return for this task. */
     SemaphoreP_pend(&gMmw_MCB.demoInitTaskCompleteSemHandle, SystemP_WAIT_FOREVER);

@@ -84,7 +84,7 @@
                                     <listOptionValue value="APP_RESOURCE_FILE='&lt;'ti/demo/awr2x44P/mmw_ddm/mmw_resDDM.h'&gt;'"/>
                                     <listOptionValue value="MMWAVE_SDK_DEVICE=awr2x44P"/>
                                     <listOptionValue value="SUBSYS_MSS"/>
-                                    <listOptionValue value="MMWAVELINK_ON_MSS"/>
+                                    
                                     <listOptionValue value="_DEBUG_=1"/>
                                 </option>
                                 <option id="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.MCPU.1597617762" superClass="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.MCPU" value="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.MCPU.cortex-r5" valueType="enumerated"/>
@@ -261,7 +261,7 @@
                                     <listOptionValue value="APP_RESOURCE_FILE='&lt;'ti/demo/awr2x44P/mmw_ddm/mmw_resDDM.h'&gt;'"/>
                                     <listOptionValue value="MMWAVE_SDK_DEVICE=awr2x44P"/>
                                     <listOptionValue value="SUBSYS_MSS"/>
-                                    <listOptionValue value="MMWAVELINK_ON_MSS"/>
+                                    
                                 </option>
                                 <option id="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.MCPU.1277074737" superClass="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.MCPU" value="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.MCPU.cortex-r5" valueType="enumerated"/>
                                 <option id="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.MFLOAT_ABI.1177298850" superClass="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.MFLOAT_ABI" value="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.MFLOAT_ABI.hard" valueType="enumerated"/>
@@ -358,3 +358,4 @@
         <project id="awr2x44p_corner_radar_mss.com.ti.ccstudio.buildDefinitions.TMS470.ProjectType.275783127" name="TMS470" projectType="com.ti.ccstudio.buildDefinitions.TMS470.ProjectType"/>
     </storageModule>
 </cproject>
+
