@@ -73,6 +73,7 @@
                                     <listOptionValue value="DRIVERS_RADAR_HWA_V2"/>
                                     <listOptionValue value="APP_RESOURCE_FILE='&lt;'ti/demo/awr2x44P/mmw_ddm/mmw_resDDM.h'&gt;'"/>
                                     <listOptionValue value="SOC_AWR2X44P"/>
+                                    
                                 </option>
                                 <option id="com.ti.ccstudio.buildDefinitions.C6000_8.3.compilerID.SILICON_VERSION.1431705943" superClass="com.ti.ccstudio.buildDefinitions.C6000_8.3.compilerID.SILICON_VERSION" value="6600" valueType="string"/>
                                 <option id="com.ti.ccstudio.buildDefinitions.C6000_8.3.compilerID.ABI.1358857789" superClass="com.ti.ccstudio.buildDefinitions.C6000_8.3.compilerID.ABI" value="com.ti.ccstudio.buildDefinitions.C6000_8.3.compilerID.ABI.eabi" valueType="enumerated"/>
@@ -237,6 +238,7 @@
                                     <listOptionValue value="DRIVERS_RADAR_HWA_V2"/>
                                     <listOptionValue value="APP_RESOURCE_FILE='&lt;'ti/demo/awr2x44P/mmw_ddm/mmw_resDDM.h'&gt;'"/>
                                     <listOptionValue value="SOC_AWR2X44P"/>
+                                    
                                 </option>
                                 <option id="com.ti.ccstudio.buildDefinitions.C6000_8.3.compilerID.SILICON_VERSION.1644417989" superClass="com.ti.ccstudio.buildDefinitions.C6000_8.3.compilerID.SILICON_VERSION" value="6600" valueType="string"/>
                                 <option id="com.ti.ccstudio.buildDefinitions.C6000_8.3.compilerID.ABI.1977469798" superClass="com.ti.ccstudio.buildDefinitions.C6000_8.3.compilerID.ABI" value="com.ti.ccstudio.buildDefinitions.C6000_8.3.compilerID.ABI.eabi" valueType="enumerated"/>
@@ -334,3 +336,4 @@
         <project id="awr2x44p_corner_radar_dss.com.ti.ccstudio.buildDefinitions.C6000.ProjectType.2024783153" name="C6000" projectType="com.ti.ccstudio.buildDefinitions.C6000.ProjectType"/>
     </storageModule>
 </cproject>
+

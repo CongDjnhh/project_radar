@@ -190,7 +190,7 @@ int32_t MmwDemo_DPM_ioctl_blocking(
 }
 
 
-#if 1 // def (!defined(MMWAVELINK_ON_MSS) && defined(SUBSYS_DSS))
+#ifndef MMWAVELINK_ON_MSS
 int32_t MmwDemo_Send_Cfg_data_MSS()
 {
     mmwDemo_cfgToMss cfgToMss = { 0 };
@@ -250,8 +250,23 @@ void MmwDemo_DPC_ObjectDetection_reportFxn(void *data, uint16_t dataLen)
         dataCfg                                       = (DPC_ObjectDetection_PreStartCfg *)data;
         DPC_ObjectDetection_ElevEstCfg *ptrElevEstCfg = (DPC_ObjectDetection_ElevEstCfg *)(&dataCfg->elevEstCfg);
         memcpy((void *)&gElevEstCfg, (void *)ptrElevEstCfg, sizeof(DPC_ObjectDetection_ElevEstCfg));
+        if (gElevEstCfg.detObjList != NULL)
+        {
+            gElevEstCfg.detObjList = (DetObjParams *)SOC_phyToVirt((uint32_t)gElevEstCfg.detObjList);
+        }
         SemaphoreP_post(&gMmw_MCB.DPMioctlSemHandle);
     }
+    else if (dataLen == sizeof(DPC_ObjectDetection_ElevEstCfg))
+    {
+        (void)memcpy((void *)&gElevEstCfg, (void *)data, dataLen);
+        if (gElevEstCfg.detObjList != NULL)
+        {
+            gElevEstCfg.detObjList = (DetObjParams *)SOC_phyToVirt((uint32_t)gElevEstCfg.detObjList);
+        }
+        uint32_t ackMsg = MMWDEMO_DPC_ELEVEST_CFG;
+        DPM_send(gMmw_MCB.dataPathObj.objDetDpmHandle, (void *)(&ackMsg), sizeof(uint32_t), CSL_CORE_ID_R5FSS0_0);
+    }
+#ifndef MMWAVELINK_ON_MSS
     else if (dataLen == sizeof(MMWave_CalibrationData))
     {
         gMmw_MCB.cfg.calibrationDataCfg = *((MMWave_CalibrationData *)data);
@@ -261,6 +276,7 @@ void MmwDemo_DPC_ObjectDetection_reportFxn(void *data, uint16_t dataLen)
     {
         SemaphoreP_post(&gCalibSaveAckSemHandle);
     }
+#endif
     else if (msg == MMWDEMO_DPC_RESULT)
     {
         SemaphoreP_post(&gDPCExecSemHandle);
@@ -400,7 +416,10 @@ static void MmwDemo_dssInitTask(void *args)
 #endif
 
     /* Translate the detObjList address (DSS_L2) from M4 core view to DSS core view. */
-    gElevEstCfg.detObjList = (DetObjParams *)SOC_phyToVirt((uint32_t)gElevEstCfg.detObjList);
+    if (gElevEstCfg.detObjList != NULL)
+    {
+        gElevEstCfg.detObjList = (DetObjParams *)SOC_phyToVirt((uint32_t)gElevEstCfg.detObjList);
+    }
 
     while (1)
     {
