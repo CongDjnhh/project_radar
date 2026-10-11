@@ -1378,7 +1378,14 @@ static void MmwDemo_transmitProcessedOutput
     header.magicWord[1] = 0x0304;
     header.magicWord[2] = 0x0506;
     header.magicWord[3] = 0x0708;
-    header.numDetectedObj = result->numObjOut;
+    if ((pGuiMonSel->customObstacles == 1) && (pGuiMonSel->detectedObjects == 0))
+    {
+        header.numDetectedObj = gHSRAM.numCustomObstacles;
+    }
+    else
+    {
+        header.numDetectedObj = result->numObjOut;
+    }
     header.version =    MMWAVE_SDK_VERSION_BUILD |
                         (MMWAVE_SDK_VERSION_BUGFIX << 8) |
                         (MMWAVE_SDK_VERSION_MINOR << 16) |

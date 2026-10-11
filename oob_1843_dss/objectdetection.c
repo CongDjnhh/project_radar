@@ -1191,7 +1191,7 @@ int32_t DPC_ObjectDetection_execute
             gNavCandidateScratch,
             sizeof(gNavCandidateScratch),
             gHSRAM.customObstacles,
-            512U,
+            MMWDEMO_NAV_MAX_OBSTACLE_BOXES,
             &navOutputPoints);
         navProcessingCycles = Cycleprofiler_getTimeStamp() - navStartCycles;
         gNavTimingProcessCycles[objDetObj->subFrameIndx] =

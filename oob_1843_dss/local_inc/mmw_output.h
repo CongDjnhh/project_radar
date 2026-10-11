@@ -1,4 +1,4 @@
-﻿/**
+/**
  *   @file  mmw_output.h
  *
  *   @brief
@@ -167,16 +167,24 @@ typedef struct MmwDemo_output_message_stats_t
 
 /**
  * @brief
- *  Custom Obstacle point cloud structure requested by user
+ *  Obstacle Bounding Box structure (Wire ABI - 32 bytes)
+ *  Single compact bounding box descriptor for UAV obstacle avoidance.
  */
-typedef struct MmwDemo_CustomObstacle_t {
-    float x;
-    float y;
-    float z;
-    float velocity;
-    int16_t snr;
-    int16_t width;
-} MmwDemo_CustomObstacle;
+typedef struct ObstacleBox_t {
+    float x;        /*!< Toạ độ tâm ngang (m)                  - 4 bytes */
+    float y;        /*!< Khoảng cách tâm phía trước (m)        - 4 bytes */
+    float z;        /*!< Toạ độ tâm độ cao (m)                 - 4 bytes */
+    float width_x;  /*!< Độ rộng ngang (m) từ góc Azimuth     - 4 bytes */
+    float depth_y;  /*!< Chiều sâu vật lý (m) từ dải RangeBins - 4 bytes */
+    float height_z; /*!< Chiều cao vật lý (m) từ Elevation     - 4 bytes */
+    float velocity; /*!< Vận tốc Doppler xuyên tâm (m/s)       - 4 bytes */
+    int16_t snr;    /*!< Mức năng lượng / SNR (0.1 dB)         - 2 bytes */
+    int16_t boxId;  /*!< Mã định danh box                      - 2 bytes */
+} ObstacleBox;
+
+typedef struct ObstacleBox_t MmwDemo_CustomObstacle;
+
+typedef char ObstacleBoxSizeCheck[(sizeof(ObstacleBox) == 32U) ? 1 : -1];
 
 /**
  * @brief
@@ -229,7 +237,7 @@ typedef struct MmwDemo_HSRAM_t
 
     /*! @brief   Custom obstacles payload */
     uint16_t                       numCustomObstacles;
-    MmwDemo_CustomObstacle         customObstacles[512U];
+    MmwDemo_CustomObstacle         customObstacles[256U];
 
     /*! @brief   Payload data of result */
     uint8_t                        payload[MMWDEMO_HSRAM_PAYLOAD_SIZE];

@@ -518,6 +518,11 @@ static int32_t MmwDemo_CLIGuiMonSel (int32_t argc, char* argv[])
     {
         customObstacles = atoi(argv[9]);
     }
+    else
+    {
+        /* If 10th argument is omitted, default customObstacles to detectedObjects */
+        customObstacles = (atoi(argv[2]) != 0) ? 1 : 0;
+    }
     if ((atoi(argv[2]) < 0) || (atoi(argv[2]) > 2) ||
         (atoi(argv[3]) < 0) || (atoi(argv[3]) > 1) ||
         (atoi(argv[4]) < 0) || (atoi(argv[4]) > 1) ||

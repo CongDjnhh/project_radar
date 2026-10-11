@@ -55,291 +55,317 @@
 #pragma DATA_ALIGN(gNavHistoryMap, 8)
 static far uint8_t gNavHistoryMap[NAV_HIST_MAP_SIZE];  /* 4,096 bytes */
 
-/* gNavCellSelected is still needed by emitPrioritized for sector balancing.
- * It is scratch (re-zeroed every frame) so L1D placement is correct. */
-#pragma DATA_SECTION(gNavCellSelected, ".navScratch")
-#pragma DATA_ALIGN(gNavCellSelected, 8)
-static uint8_t gNavCellSelected[MMWDEMO_NAV_SELECTION_BYTES];
+#define MMWDEMO_NAV_CLUSTER_MAX_BOXES   (64U)
+#define MMWDEMO_NAV_CLUSTER_MAX_SAMPLES (256U)
 
-/* Cycle profiling for emitSurface (includes emitPrioritized + findBestUnselected).
- * Read via CCS watch to assess O(N*M) cost per review point #5. */
+typedef struct MmwDemo_NavClusterAcc_t {
+    uint16_t minRange;
+    uint16_t maxRange;
+    float    minU;
+    float    maxU;
+    float    minV;
+    float    maxV;
+    int16_t  peakDoppler;
+    int16_t  peakSnr;
+    int16_t  peakPower;
+    uint16_t sampleCount;
+} MmwDemo_NavClusterAcc;
+
+#pragma DATA_SECTION(gNavClusterParent, ".navScratch")
+#pragma DATA_ALIGN(gNavClusterParent, 8)
+static int16_t gNavClusterParent[MMWDEMO_NAV_CLUSTER_MAX_SAMPLES];
+
+#pragma DATA_SECTION(gNavRootToBox, ".navScratch")
+#pragma DATA_ALIGN(gNavRootToBox, 8)
+static int16_t gNavRootToBox[MMWDEMO_NAV_CLUSTER_MAX_SAMPLES];
+
+#pragma DATA_SECTION(gNavClusterAcc, ".navScratch")
+#pragma DATA_ALIGN(gNavClusterAcc, 8)
+static MmwDemo_NavClusterAcc gNavClusterAcc[MMWDEMO_NAV_CLUSTER_MAX_BOXES];
+
+/* Cycle profiling for emitSurface. Read via CCS watch to assess execution cost. */
 volatile uint32_t gNavEmitSurfaceCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 volatile uint32_t gNavEmitSurfaceMaxCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 
-static uint8_t MmwDemo_NavPointGen_isSelected(
-    const uint8_t *selection,
-    uint16_t index)
+static int16_t MmwDemo_NavCluster_find(int16_t *parent, int16_t i)
 {
-    return (uint8_t)((selection[index >> 3U] >> (index & 7U)) & 1U);
+    int16_t root = i;
+    while (root != parent[root])
+    {
+        root = parent[root];
+    }
+    while (i != root)
+    {
+        int16_t next = parent[i];
+        parent[i] = root;
+        i = next;
+    }
+    return root;
 }
 
-static void MmwDemo_NavPointGen_setSelected(
-    uint8_t *selection,
-    uint16_t index)
-{
-    selection[index >> 3U] |= (uint8_t)(1U << (index & 7U));
-}
-
-static uint16_t MmwDemo_NavPointGen_abs16(int16_t value)
-{
-    int32_t expanded = value;
-    if (expanded < 0)
-    {
-        expanded = -expanded;
-    }
-    return (uint16_t)expanded;
-}
-
-static uint16_t MmwDemo_NavPointGen_cellIndex(
-    const MmwDemo_DenseElevation_OutputSample *sample)
-{
-    int16_t az = (int16_t)sample->azimuthIdx +
-                 (int16_t)(MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS / 2U);
-    int32_t sourceV = sample->sourceVQ15;
-    int32_t scaled;
-    int16_t el;
-
-    /* Group by the continuous source direction cosine, not by the legacy
-     * 16-bin display index. Sixty-four sectors preserve the useful precision
-     * inside narrow elevation FOVs while sourceVQ15 remains authoritative. */
-    if (sourceV >= 0)
-    {
-        scaled = (sourceV *
-                  (int32_t)(MMWDEMO_NAV_NUM_ELEVATION_SECTORS / 2U) +
-                  16383) / 32767;
-    }
-    else
-    {
-        scaled = -(((-sourceV) *
-                    (int32_t)(MMWDEMO_NAV_NUM_ELEVATION_SECTORS / 2U) +
-                    16383) / 32767);
-    }
-    el = (int16_t)(scaled +
-         (int32_t)(MMWDEMO_NAV_NUM_ELEVATION_SECTORS / 2U));
-
-    if (az < 0)
-    {
-        az = 0;
-    }
-    else if (az >= (int16_t)MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS)
-    {
-        az = (int16_t)MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS - 1;
-    }
-    if (el < 0)
-    {
-        el = 0;
-    }
-    else if (el >= (int16_t)MMWDEMO_NAV_NUM_ELEVATION_SECTORS)
-    {
-        el = (int16_t)MMWDEMO_NAV_NUM_ELEVATION_SECTORS - 1;
-    }
-
-    return (uint16_t)((uint16_t)az *
-                      MMWDEMO_NAV_NUM_ELEVATION_SECTORS +
-                      (uint16_t)el);
-}
-
-static uint8_t MmwDemo_NavPointGen_sector(
-    const MmwDemo_DenseElevation_OutputSample *sample)
-{
-    int16_t az = (int16_t)sample->azimuthIdx +
-                 (int16_t)(MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS / 2U);
-    uint16_t binsPerSector =
-        MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS /
-        MMWDEMO_NAV_NUM_AZIMUTH_SECTORS;
-
-    if (az < 0)
-    {
-        az = 0;
-    }
-    else if (az >= (int16_t)MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS)
-    {
-        az = (int16_t)MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS - 1;
-    }
-    return (uint8_t)((uint16_t)az / binsPerSector);
-}
-
-static void MmwDemo_NavPointGen_copyPoint(
-    MmwDemo_CustomObstacle *dstObstacle,
-    const MmwDemo_DenseElevation_OutputSample *src,
-    const MmwDemo_NavPointGen_StaticCfg *staticCfg)
-{
-    float dist = (float)src->rangeIdx * staticCfg->rangeStepMeters + staticCfg->rangeBiasMeters;
-    if (dist < 0.0f)
-    {
-        dist = 0.0f;
-    }
-
-    float u = (float)src->azimuthUQ15 / 32767.0f;
-    if (u > 1.0f) u = 1.0f;
-    if (u < -1.0f) u = -1.0f;
-
-    float v = (float)src->sourceVQ15 / 32767.0f;
-    if (v > 1.0f) v = 1.0f;
-    if (v < -1.0f) v = -1.0f;
-
-    float x = dist * u;
-    float z = dist * v;
-    float ySq = (dist * dist) - (x * x) - (z * z);
-    float y = (ySq > 0.0f) ? sqrtf(ySq) : 0.0f;
-
-    if (dstObstacle != NULL)
-    {
-        dstObstacle->x = x;
-        dstObstacle->y = y;
-        dstObstacle->z = z;
-        dstObstacle->velocity = (float)src->dopplerIdx * staticCfg->dopplerStepMps;
-
-        float width_u = (float)src->azimuthWidthUQ15 / 32767.0f;
-        float width = dist * width_u;
-        if (width < 0.05f)
-        {
-            width = 0.05f;
-        }
-
-        if (src->powerDb10 != (int16_t)-32768)
-        {
-            dstObstacle->snr = src->powerDb10;
-        }
-        else
-        {
-            dstObstacle->snr = (int16_t)src->snrDb10;
-        }
-        /* Preserve physical obstacle width in mm */
-        dstObstacle->width = (int16_t)(width * 1000.0f);
-    }
-}
-
-static uint8_t MmwDemo_NavPointGen_isHigherPriority(
-    const MmwDemo_DenseElevation_OutputSample *candidate,
-    const MmwDemo_DenseElevation_OutputSample *current)
-{
-    if (current == NULL)
-    {
-        return 1U;
-    }
-    if (candidate->rangeIdx != current->rangeIdx)
-    {
-        return (candidate->rangeIdx < current->rangeIdx) ? 1U : 0U;
-    }
-    if (candidate->snrDb10 != current->snrDb10)
-    {
-        return (candidate->snrDb10 > current->snrDb10) ? 1U : 0U;
-    }
-    return (MmwDemo_NavPointGen_abs16(candidate->dopplerIdx) >
-            MmwDemo_NavPointGen_abs16(current->dopplerIdx)) ? 1U : 0U;
-}
-
-static int16_t MmwDemo_NavPointGen_findBestUnselected(
-    const MmwDemo_DenseElevation_OutputSample *samples,
-    uint16_t sampleCount,
-    int16_t requiredSector)
-{
-    uint16_t sampleIndex;
-    int16_t bestIdx = -1;
-    const MmwDemo_DenseElevation_OutputSample *best = NULL;
-
-    /* After temporal filtering every sample in the array is genuine.
-     * We only skip samples whose angle cell was already emitted (isSelected)
-     * to avoid duplicates in the final output. */
-    for (sampleIndex = 0U; sampleIndex < sampleCount; sampleIndex++)
-    {
-        uint16_t cell = MmwDemo_NavPointGen_cellIndex(&samples[sampleIndex]);
-        if ((MmwDemo_NavPointGen_isSelected(gNavCellSelected, cell) != 0U) ||
-            ((requiredSector >= 0) &&
-             ((int16_t)MmwDemo_NavPointGen_sector(&samples[sampleIndex]) !=
-              requiredSector)))
-        {
-            continue;
-        }
-        if (MmwDemo_NavPointGen_isHigherPriority(
-                &samples[sampleIndex], best) != 0U)
-        {
-            best = &samples[sampleIndex];
-            bestIdx = (int16_t)sampleIndex;
-        }
-    }
-    return bestIdx;
-}
-
-static uint16_t MmwDemo_NavPointGen_emitPrioritized(
+static uint16_t MmwDemo_NavPointGen_emitObstacleBoxes(
     const MmwDemo_DenseElevation_OutputSample *samples,
     uint16_t sampleCount,
     uint16_t maxOutput,
-    MmwDemo_CustomObstacle *outObstacles,
+    ObstacleBox *outObstacles,
     const MmwDemo_NavPointGen_StaticCfg *staticCfg)
 {
-    uint16_t count = 0U;
-    uint8_t sector;
+    uint16_t N = (sampleCount > MMWDEMO_NAV_CLUSTER_MAX_SAMPLES) ?
+                 MMWDEMO_NAV_CLUSTER_MAX_SAMPLES : sampleCount;
+    uint16_t i, j, b;
+    uint16_t numBoxes = 0U;
+    uint16_t outCount = 0U;
+    uint16_t limit;
 
-    memset(gNavCellSelected, 0, sizeof(gNavCellSelected));
-
-    /* Enforce angular coverage first. Within every sector, retain the nearest
-     * hazards and break equal-range ties by SNR instead of array index. */
-    for (sector = 0U;
-         (sector < MMWDEMO_NAV_NUM_AZIMUTH_SECTORS) &&
-         (count < maxOutput);
-         sector++)
+    if ((N == 0U) || (maxOutput == 0U) || (outObstacles == NULL))
     {
-        uint16_t quota = maxOutput / MMWDEMO_NAV_NUM_AZIMUTH_SECTORS;
-        uint16_t emittedInSector = 0U;
-        if (sector < (maxOutput % MMWDEMO_NAV_NUM_AZIMUTH_SECTORS))
-        {
-            quota++;
-        }
+        return 0U;
+    }
 
-        while ((emittedInSector < quota) && (count < maxOutput))
+    /* Step 1: Initialize Union-Find sets */
+    for (i = 0U; i < N; i++)
+    {
+        gNavClusterParent[i] = (int16_t)i;
+        gNavRootToBox[i] = -1;
+    }
+
+    /* Step 2: Spatial and kinematic connectivity clustering */
+    for (i = 0U; i < N; i++)
+    {
+        int32_t r_i = (int32_t)samples[i].rangeIdx;
+        int32_t d_i = (int32_t)samples[i].dopplerIdx;
+        float u_i = (float)samples[i].azimuthUQ15 / 32767.0f;
+        float hw_u_i = 0.5f * ((float)samples[i].azimuthWidthUQ15 / 32767.0f);
+        float u_min_i = u_i - hw_u_i;
+        float u_max_i = u_i + hw_u_i;
+
+        float v_i = (float)samples[i].sourceVQ15 / 32767.0f;
+        float hw_v_i = 0.5f * ((float)samples[i].elevationWidthUQ15 / 32767.0f);
+        float v_min_i = v_i - hw_v_i;
+        float v_max_i = v_i + hw_v_i;
+
+        for (j = i + 1U; j < N; j++)
         {
-            int16_t bestIdx;
-            bestIdx = MmwDemo_NavPointGen_findBestUnselected(
-                samples, sampleCount, (int16_t)sector);
-            if (bestIdx < 0)
+            int32_t r_diff = (int32_t)samples[j].rangeIdx - r_i;
+            if (r_diff < 0) { r_diff = -r_diff; }
+            if (r_diff > 2)
             {
-                break;
+                continue; /* Range gap too large */
             }
-            MmwDemo_NavPointGen_copyPoint(
-                &outObstacles[count],
-                &samples[bestIdx], staticCfg);
-            MmwDemo_NavPointGen_setSelected(gNavCellSelected,
-                MmwDemo_NavPointGen_cellIndex(&samples[bestIdx]));
-            count++;
-            emittedInSector++;
+
+            int32_t d_diff = (int32_t)samples[j].dopplerIdx - d_i;
+            if (d_diff < 0) { d_diff = -d_diff; }
+            if (d_diff > 3)
+            {
+                continue; /* Doppler velocity difference too large */
+            }
+
+            float u_j = (float)samples[j].azimuthUQ15 / 32767.0f;
+            float hw_u_j = 0.5f * ((float)samples[j].azimuthWidthUQ15 / 32767.0f);
+            float u_min_j = u_j - hw_u_j;
+            float u_max_j = u_j + hw_u_j;
+
+            /* Check azimuth overlap / adjacency within ~2 bins (0.06 in u-space) */
+            if ((u_min_i > (u_max_j + 0.06f)) || (u_min_j > (u_max_i + 0.06f)))
+            {
+                continue;
+            }
+
+            float v_j = (float)samples[j].sourceVQ15 / 32767.0f;
+            float hw_v_j = 0.5f * ((float)samples[j].elevationWidthUQ15 / 32767.0f);
+            float v_min_j = v_j - hw_v_j;
+            float v_max_j = v_j + hw_v_j;
+
+            /* Check elevation overlap / adjacency within tolerance (0.15 in v-space) */
+            if ((v_min_i > (v_max_j + 0.15f)) || (v_min_j > (v_max_i + 0.15f)))
+            {
+                continue;
+            }
+
+            /* Connected: merge sets */
+            {
+                int16_t root_i = MmwDemo_NavCluster_find(gNavClusterParent, (int16_t)i);
+                int16_t root_j = MmwDemo_NavCluster_find(gNavClusterParent, (int16_t)j);
+                if (root_i != root_j)
+                {
+                    gNavClusterParent[root_i] = root_j;
+                }
+            }
         }
     }
 
-    /* Reuse quota left by sparse sectors, still ordered globally by safety
-     * priority rather than signed angle/index. */
-    while (count < maxOutput)
+    /* Step 3: Aggregate clusters into bounding box descriptors */
+    for (i = 0U; i < N; i++)
     {
-        int16_t bestIdx;
-        bestIdx = MmwDemo_NavPointGen_findBestUnselected(
-            samples, sampleCount, -1);
-        if (bestIdx < 0)
+        int16_t root = MmwDemo_NavCluster_find(gNavClusterParent, (int16_t)i);
+        int16_t boxIdx = gNavRootToBox[root];
+
+        float u = (float)samples[i].azimuthUQ15 / 32767.0f;
+        float hw_u = 0.5f * ((float)samples[i].azimuthWidthUQ15 / 32767.0f);
+        float u_min = u - hw_u;
+        float u_max = u + hw_u;
+
+        float v = (float)samples[i].sourceVQ15 / 32767.0f;
+        float hw_v = 0.5f * ((float)samples[i].elevationWidthUQ15 / 32767.0f);
+        float v_min = v - hw_v;
+        float v_max = v + hw_v;
+
+        if (boxIdx < 0)
         {
-            break;
+            if (numBoxes >= MMWDEMO_NAV_CLUSTER_MAX_BOXES)
+            {
+                continue;
+            }
+            boxIdx = (int16_t)numBoxes;
+            gNavRootToBox[root] = boxIdx;
+            numBoxes++;
+
+            gNavClusterAcc[boxIdx].minRange = samples[i].rangeIdx;
+            gNavClusterAcc[boxIdx].maxRange = samples[i].rangeIdx;
+            gNavClusterAcc[boxIdx].minU = u_min;
+            gNavClusterAcc[boxIdx].maxU = u_max;
+            gNavClusterAcc[boxIdx].minV = v_min;
+            gNavClusterAcc[boxIdx].maxV = v_max;
+            gNavClusterAcc[boxIdx].peakDoppler = samples[i].dopplerIdx;
+            gNavClusterAcc[boxIdx].peakSnr = (int16_t)samples[i].snrDb10;
+            gNavClusterAcc[boxIdx].peakPower = samples[i].powerDb10;
+            gNavClusterAcc[boxIdx].sampleCount = 1U;
         }
-        MmwDemo_NavPointGen_copyPoint(
-            &outObstacles[count],
-            &samples[bestIdx], staticCfg);
-        MmwDemo_NavPointGen_setSelected(gNavCellSelected,
-            MmwDemo_NavPointGen_cellIndex(&samples[bestIdx]));
-        count++;
+        else
+        {
+            if (samples[i].rangeIdx < gNavClusterAcc[boxIdx].minRange)
+            {
+                gNavClusterAcc[boxIdx].minRange = samples[i].rangeIdx;
+            }
+            if (samples[i].rangeIdx > gNavClusterAcc[boxIdx].maxRange)
+            {
+                gNavClusterAcc[boxIdx].maxRange = samples[i].rangeIdx;
+            }
+            if (u_min < gNavClusterAcc[boxIdx].minU)
+            {
+                gNavClusterAcc[boxIdx].minU = u_min;
+            }
+            if (u_max > gNavClusterAcc[boxIdx].maxU)
+            {
+                gNavClusterAcc[boxIdx].maxU = u_max;
+            }
+            if (v_min < gNavClusterAcc[boxIdx].minV)
+            {
+                gNavClusterAcc[boxIdx].minV = v_min;
+            }
+            if (v_max > gNavClusterAcc[boxIdx].maxV)
+            {
+                gNavClusterAcc[boxIdx].maxV = v_max;
+            }
+            if ((int16_t)samples[i].snrDb10 > gNavClusterAcc[boxIdx].peakSnr)
+            {
+                gNavClusterAcc[boxIdx].peakSnr = (int16_t)samples[i].snrDb10;
+                gNavClusterAcc[boxIdx].peakDoppler = samples[i].dopplerIdx;
+            }
+            if (samples[i].powerDb10 > gNavClusterAcc[boxIdx].peakPower)
+            {
+                gNavClusterAcc[boxIdx].peakPower = samples[i].powerDb10;
+            }
+            gNavClusterAcc[boxIdx].sampleCount++;
+        }
     }
-    return count;
+
+    /* Step 4: Compute physical 3D box coordinates, dimensions and SNR */
+    limit = (numBoxes < maxOutput) ? numBoxes : maxOutput;
+    for (b = 0U; b < limit; b++)
+    {
+        float rangeSpan = (float)(gNavClusterAcc[b].maxRange - gNavClusterAcc[b].minRange + 1U);
+        float depth_y = rangeSpan * staticCfg->rangeStepMeters;
+        if (depth_y < staticCfg->rangeStepMeters)
+        {
+            depth_y = staticCfg->rangeStepMeters;
+        }
+
+        float rCenter = 0.5f * (float)(gNavClusterAcc[b].minRange + gNavClusterAcc[b].maxRange);
+        float dist = rCenter * staticCfg->rangeStepMeters + staticCfg->rangeBiasMeters;
+        if (dist < 0.0f)
+        {
+            dist = 0.0f;
+        }
+
+        float minU = gNavClusterAcc[b].minU;
+        float maxU = gNavClusterAcc[b].maxU;
+        if (minU < -1.0f) { minU = -1.0f; }
+        if (maxU >  1.0f) { maxU =  1.0f; }
+        if (minU > maxU)  { float tmp = minU; minU = maxU; maxU = tmp; }
+        float uCenter = 0.5f * (minU + maxU);
+        float width_u = maxU - minU;
+        float width_x = dist * width_u;
+        if (width_x < 0.10f)
+        {
+            width_x = 0.10f;
+        }
+
+        float minV = gNavClusterAcc[b].minV;
+        float maxV = gNavClusterAcc[b].maxV;
+        if (minV < -1.0f) { minV = -1.0f; }
+        if (maxV >  1.0f) { maxV =  1.0f; }
+        if (minV > maxV)  { float tmp = minV; minV = maxV; maxV = tmp; }
+        float vCenter = 0.5f * (minV + maxV);
+        float height_v = maxV - minV;
+        float height_z = dist * height_v;
+        if (height_z < 0.10f)
+        {
+            height_z = 0.10f;
+        }
+
+        float x = dist * uCenter;
+        float z = dist * vCenter;
+        float ySq = (dist * dist) - (x * x) - (z * z);
+        float y = (ySq > 0.0f) ? sqrtf(ySq) : 0.0f;
+
+        outObstacles[b].x = x;
+        outObstacles[b].y = y;
+        outObstacles[b].z = z;
+        outObstacles[b].width_x = width_x;
+        outObstacles[b].depth_y = depth_y;
+        outObstacles[b].height_z = height_z;
+        outObstacles[b].velocity = (float)gNavClusterAcc[b].peakDoppler * staticCfg->dopplerStepMps;
+        outObstacles[b].snr = (gNavClusterAcc[b].peakPower != (int16_t)-32768) ?
+                              gNavClusterAcc[b].peakPower : gNavClusterAcc[b].peakSnr;
+        outObstacles[b].boxId = (int16_t)(b + 1U);
+    }
+    outCount = limit;
+
+    /* Step 5: Sort obstacles by forward distance (y): closest hazards first */
+    for (i = 1U; i < outCount; i++)
+    {
+        ObstacleBox key = outObstacles[i];
+        int16_t k = (int16_t)i - 1;
+        while ((k >= 0) && (outObstacles[k].y > key.y))
+        {
+            outObstacles[k + 1] = outObstacles[k];
+            k--;
+        }
+        outObstacles[k + 1] = key;
+    }
+
+    /* Assign canonical sequential box IDs after sorting */
+    for (i = 0U; i < outCount; i++)
+    {
+        outObstacles[i].boxId = (int16_t)(i + 1U);
+    }
+
+    return outCount;
 }
 
 static uint16_t MmwDemo_NavPointGen_emitSurface(
     const MmwDemo_DenseElevation_OutputSample *samples,
     uint16_t sampleCount,
     uint16_t maxOutput,
-    MmwDemo_CustomObstacle *outObstacles,
+    ObstacleBox *outObstacles,
     const MmwDemo_NavPointGen_StaticCfg *staticCfg,
     uint16_t *availableCount)
 {
     /* After temporal filtering, every sample in the array is a confirmed
      * surface.  availableCount simply reports how many survived the filter. */
     *availableCount = sampleCount;
-    return MmwDemo_NavPointGen_emitPrioritized(
+    return MmwDemo_NavPointGen_emitObstacleBoxes(
         samples, sampleCount, maxOutput, outObstacles, staticCfg);
 }
 
@@ -587,5 +613,4 @@ int32_t MmwDemo_NavPointGen_process(
 void MmwDemo_NavPointGen_reset(void)
 {
     memset(gNavHistoryMap, 0, sizeof(gNavHistoryMap));
-    memset(gNavCellSelected, 0, sizeof(gNavCellSelected));
 }

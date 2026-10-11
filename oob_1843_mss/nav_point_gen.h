@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file nav_point_gen.h
  *
  * @brief Frame-synchronous navigation point generation and wire ABI.
@@ -16,7 +16,8 @@
 extern "C" {
 #endif
 
-#define MMWDEMO_NAV_MAX_SURFACE_POINTS       (512U)
+#define MMWDEMO_NAV_MAX_SURFACE_POINTS       (256U)
+#define MMWDEMO_NAV_MAX_OBSTACLE_BOXES       (256U)
 #define MMWDEMO_NAV_NUM_AZIMUTH_SECTORS      (8U)
 #define MMWDEMO_NAV_NUM_ELEVATION_SECTORS    (64U)
 
