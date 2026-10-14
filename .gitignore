@@ -1,37 +1,72 @@
-# VS Code
-.vscode/
-
-# Python
-__pycache__/
-*.pyc
-*.pyo
-.env
-venv/
-*.egg-info/
-
-# Build artifacts
+# ==========================================================
+# 1. Thư mục Build của Code Composer Studio (CCS)
+# ==========================================================
 Debug/
 Release/
+**/Debug/
+**/Release/
+src/makefile.libs
+
+# ==========================================================
+# 2. File thực thi & Nhị phân của TI mmWave Radar (AWR1843 / AWR2x44P)
+# ==========================================================
+*.appimage
+*.bin
 *.out
 *.map
+*.xml
+# Các file thực thi của lõi DSP (C66x/C674x), ARM R4F/R5F và Cortex-M4
+*.xe674
+*.xe66
+*.xer4f
+*.xer5f
+*.xem4
+*.rprc
+*.tiimage
+
+# ==========================================================
+# 3. File biên dịch trung gian C/C++ & TI Compiler
+# ==========================================================
 *.obj
+*.o
 *.d
-*.ae674
-*.aer4f
+*.pp
+*.opt
+*.lib
+*.a
+*.sdo
+*.mk
+*. subdir_vars.mk
+*. subdir_rules.mk
 
-# clangd/ISK generated
-isk/
-.clangd/
+# ==========================================================
+# 4. File sinh tự động từ TI SysConfig (Chỉ giữ lại file gốc *.syscfg)
+# ==========================================================
+syscfg/
+**/ti_drivers_config.*
+**/ti_board_config.*
+**/ti_dpl_config.*
+**/ti_pinmux_config.*
+**/ti_power_clock_config.*
 
-# SYSBIOS generated
-**/src/SYSBIOS
-configPkg/
-makefile.**
-*.exclude
-
-# CCS settings
-.settings/
+# ==========================================================
+# 5. Cấu hình cá nhân trên CCStudio Theia / VS Code / Clangd
+# ==========================================================
 .theia/
+.vscode/
+.settings/
+.metadata/
+.clangd/
+.cache/
+compile_commands.json
+*.launch
 
-# compile commands
-**/compile_commands.json
+# ==========================================================
+# 6. File rác của Hệ điều hành
+# ==========================================================
+.DS_Store
+Thumbs.db
+Desktop.ini
+*~
+*.bak
+*.tmp

@@ -65,6 +65,7 @@
 
 /* Demo Include Files */
 #include "../common/mmw_config.h"
+#include "../common/mmw_common.h"
 #include "mmw_mss.h"
 #include "../../utils/mmwdemo_adcconfig.h"
 #include "../../utils/mmwdemo_rfparser.h"
@@ -164,13 +165,17 @@ static int32_t MmwDemo_CLIDummyHandler (int32_t argc, char* argv[])
 
 static int32_t MmwDemo_CLISensorStart (int32_t argc, char* argv[])
 {
+    uint32_t cmd = MMWDEMO_DSS_START_SENSOR;
     gMmwMssMCB.sensorState = MmwDemo_SensorState_STARTED;
+    DPM_send(gMmw_MCB.objDetDpmHandle, (void *)&cmd, sizeof(uint32_t), CSL_CORE_ID_C66SS0);
     return 0;
 }
 
 static int32_t MmwDemo_CLISensorStop (int32_t argc, char* argv[])
 {
+    uint32_t cmd = MMWDEMO_DSS_STOP_SENSOR;
     gMmwMssMCB.sensorState = MmwDemo_SensorState_STOPPED;
+    DPM_send(gMmw_MCB.objDetDpmHandle, (void *)&cmd, sizeof(uint32_t), CSL_CORE_ID_C66SS0);
     return 0;
 }
 
@@ -271,6 +276,8 @@ static int32_t MmwDemo_CLIGuiMonSel (int32_t argc, char* argv[])
 
     MmwDemo_CfgUpdate((void *)&guiMonSel, MMWDEMO_GUIMONSEL_OFFSET,
         sizeof(MmwDemo_GuiMonSel), subFrameNum);
+
+    gMmw_MCB.cfgFromDss.guiMonSel = guiMonSel;
 
     return 0;
 }
@@ -604,6 +611,7 @@ static int32_t MmwDemo_CLIRangeProcCfg (int32_t argc, char* argv[])
  */
 static int32_t MmwDemo_CLIDDMPhaseShiftOrder (int32_t argc, char* argv[])
 {
+#ifdef MMWAVELINK_ON_MSS
     uint8_t i = 0;
 
     /* Sanity Check: Minimum argument check */
@@ -617,7 +625,7 @@ static int32_t MmwDemo_CLIDDMPhaseShiftOrder (int32_t argc, char* argv[])
     {
         gMmwMssMCB.ddmPhaseShiftOrder[i] = (uint8_t)atoi(argv[i+1]);
     }
-
+#endif
     return 0;
 }
 
@@ -639,6 +647,7 @@ static int32_t MmwDemo_CLIDDMPhaseShiftOrder (int32_t argc, char* argv[])
  */
 static int32_t MmwDemo_CLIAntGeometryCfg (int32_t argc, char* argv[])
 {
+#ifdef MMWAVELINK_ON_MSS
     /*! @brief Antenna Geometry   */
     uint32_t i=0, azimElemIdx=0, elevElemIdx = 0;
     uint64_t zeroInsrtMaskAzim = 0, zeroInsrtMaskElev = 0;
@@ -732,6 +741,7 @@ static int32_t MmwDemo_CLIAntGeometryCfg (int32_t argc, char* argv[])
                                 atof(argv[MAX_NUM_VIRT_ANT * 2 + 2]);
 
     gMmwMssMCB.objDetCommonCfg.isAntennaGeometryCfgPending = 1;
+#endif
 
     return 0;
 }
@@ -753,7 +763,7 @@ static int32_t MmwDemo_CLIAntGeometryCfg (int32_t argc, char* argv[])
  */
 static int32_t MmwDemo_CLIAntennaCalibParams (int32_t argc, char* argv[])
 {
-
+#ifdef MMWAVELINK_ON_MSS
     /*! @brief      Antenna Calbration parameters in Im/Re format */
     float antennaCalibParams[SYS_COMMON_NUM_RX_CHANNEL * SYS_COMMON_NUM_TX_ANTENNAS * 2];
     int32_t argInd, i, j=0, idx;
@@ -794,6 +804,7 @@ static int32_t MmwDemo_CLIAntennaCalibParams (int32_t argc, char* argv[])
     }
 
     gMmwMssMCB.objDetCommonCfg.isAntennaCalibParamCfgPending = 1;
+#endif
 
     return 0;
 }
@@ -871,6 +882,7 @@ static int32_t MmwDemo_CLIADCBufCfg (int32_t argc, char* argv[])
  */
 static int32_t MmwDemo_CLIMeasureRangeBiasAndRxChanPhaseCfg (int32_t argc, char* argv[])
 {
+#ifdef MMWAVELINK_ON_MSS
     DPC_ObjectDetection_MeasureRxChannelBiasCfg   cfg;
 
     /* Sanity Check: Minimum argument check */
@@ -893,6 +905,7 @@ static int32_t MmwDemo_CLIMeasureRangeBiasAndRxChanPhaseCfg (int32_t argc, char*
            &cfg, sizeof(cfg));
 
     gMmwMssMCB.objDetCommonCfg.isMeasureRxChannelBiasCfgPending = 1;
+#endif
 
     return 0;
 }

@@ -18,7 +18,8 @@
 
 #define DENSE_PI                         (3.14159265358979323846f)
 #define DENSE_Q15_SCALE                  (32768.0f)
-#define DENSE_Q19_SHIFT                  (19U)
+/* Must equal DPC_OBJDET_QFORMAT_DOPPLER_FFT (17); name kept for history. */
+#define DENSE_Q19_SHIFT                  (17U)
 #define DENSE_MIN_POWER                  (1.0f)
 #define DENSE_MAX_AZIMUTH_PEAKS          (2U)
 #define DENSE_AZIMUTH_GUARD_BINS         (2U)
@@ -1182,6 +1183,59 @@ int32_t MmwDemo_DenseElevation_process(
                 rngIdx, &candidate, cfg, staticCfg,
                 output, outputCapacity, &outputCount,
                 sectorCount, &outputLimited);
+        }
+
+        /* Fallback: if TI CFAR produced 0 samples (e.g. stationary target where Doppler gating
+         * rejected all peaks), scan detMatrix directly across minRange..maxRange to guarantee
+         * UAV obstacle perception never starves. */
+        if ((outputCount == 0U) && (staticCfg->detMatrix.data != NULL))
+        {
+            const uint16_t *detMatrix = (const uint16_t *)staticCfg->detMatrix.data;
+            uint16_t range;
+            uint16_t numDoppler = staticCfg->numDopplerBins;
+            uint16_t fallbackRangesDone = 0U;
+
+            for (range = minRange; (range <= maxRange) && (fallbackRangesDone < 24U); range++)
+            {
+                const uint16_t *detRow = &detMatrix[(uint32_t)range * numDoppler];
+                uint32_t sumQ8 = 0U;
+                uint16_t d;
+                uint16_t maxVal = 0U;
+                uint16_t maxDop = 0U;
+                uint16_t avgNoise;
+
+                for (d = 0U; d < numDoppler; d++)
+                {
+                    uint16_t val = detRow[d];
+                    sumQ8 += (uint32_t)val;
+                    if (val > maxVal)
+                    {
+                        maxVal = val;
+                        maxDop = d;
+                    }
+                }
+                avgNoise = (uint16_t)(sumQ8 / numDoppler);
+
+                /* Minimum SNR threshold in Q8: 6 dB = 256, 7 dB ~ 300 */
+                if (maxVal > (avgNoise + 300U))
+                {
+                    MmwDemo_DenseDopplerCandidate candidate;
+                    candidate.index = maxDop;
+                    candidate.snrDb10 = (uint16_t)(((uint32_t)(maxVal - avgNoise) * 60U) / 256U);
+
+                    if (range < sizeof(gDenseRangeFftDone) && gDenseRangeFftDone[range] == 0U)
+                    {
+                        MmwDemo_DenseElevation_dopplerFftForRange(range, staticCfg);
+                        gDenseRangeFftDone[range] = 1U;
+                    }
+
+                    MmwDemo_DenseElevation_processDoppler(
+                        range, &candidate, cfg, staticCfg,
+                        output, outputCapacity, &outputCount,
+                        sectorCount, &outputLimited);
+                    fallbackRangesDone++;
+                }
+            }
         }
     }
 

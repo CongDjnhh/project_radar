@@ -1002,10 +1002,10 @@ static void MmwDemo_transmitProcessedOutput(
 #endif
 
     /* mmwavelink is running on DSS */
-    uint16_t numDopFFTSubBins = gMmw_MCB.subFrameCfg[result->subFrameIdx].numDopplerBins / (mathUtils_countSetBits(gMmw_MCB.cfg.openCfg.chCfg.txChannelEn) + gMmw_MCB.numEmptySubBands);
+    uint16_t numDopFFTSubBins = gMmw_MCB.cfgFromDss.numDopFFTSubBins[result->subFrameIdx];
 
     /* Get Gui Monitor configuration */
-    pGuiMonSel = &gMmw_MCB.subFrameCfg[result->subFrameIdx].guiMonSel;
+    pGuiMonSel = &gMmw_MCB.cfgFromDss.guiMonSel;
 
     UART_Transaction_init(&trans);
 
@@ -1068,21 +1068,21 @@ static void MmwDemo_transmitProcessedOutput(
     if (pGuiMonSel->logMagRange)
     {
         tl[tlvIdx].type   = MMWDEMO_OUTPUT_MSG_RANGE_PROFILE;
-        tl[tlvIdx].length = sizeof(uint16_t) * gMmw_MCB.subFrameCfg[result->subFrameIdx].numRangeBins;
+        tl[tlvIdx].length = sizeof(uint16_t) * gMmw_MCB.cfgFromDss.numRangeBins[result->subFrameIdx];
         packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
         tlvIdx++;
     }
     if (pGuiMonSel->noiseProfile)
     {
         tl[tlvIdx].type   = MMWDEMO_OUTPUT_MSG_NOISE_PROFILE;
-        tl[tlvIdx].length = sizeof(uint16_t) * gMmw_MCB.subFrameCfg[result->subFrameIdx].numRangeBins;
+        tl[tlvIdx].length = sizeof(uint16_t) * gMmw_MCB.cfgFromDss.numRangeBins[result->subFrameIdx];
         packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
         tlvIdx++;
     }
     if (pGuiMonSel->rangeDopplerHeatMap)
     {
         tl[tlvIdx].type   = MMWDEMO_OUTPUT_MSG_RANGE_DOPPLER_HEAT_MAP;
-        tl[tlvIdx].length = gMmw_MCB.subFrameCfg[result->subFrameIdx].numRangeBins * numDopFFTSubBins * sizeof(uint16_t);
+        tl[tlvIdx].length = gMmw_MCB.cfgFromDss.numRangeBins[result->subFrameIdx] * numDopFFTSubBins * sizeof(uint16_t);
         packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
         tlvIdx++;
     }
@@ -1247,7 +1247,7 @@ static void MmwDemo_transmitProcessedOutput(
         UART_write(uartHandle, &trans);
 #endif
 
-        for (index = 0; index < gMmw_MCB.subFrameCfg[result->subFrameIdx].numRangeBins; index++)
+        for (index = 0; index < gMmw_MCB.cfgFromDss.numRangeBins[result->subFrameIdx]; index++)
         {
 #ifdef CAN_STREAM
             mcan_transfer(msgIdentifier, (uint8_t *)&detMatrix[index * numDopFFTSubBins], sizeof(uint16_t), MCAN_DATA_SIZE_2BYTES);
@@ -1264,7 +1264,7 @@ static void MmwDemo_transmitProcessedOutput(
     /* Send noise profile */
     if (pGuiMonSel->noiseProfile)
     {
-        uint32_t maxDopIdx = gMmw_MCB.subFrameCfg[result->subFrameIdx].numRangeBins / 2 - 1;
+        uint32_t maxDopIdx = gMmw_MCB.cfgFromDss.numRangeBins[result->subFrameIdx] / 2 - 1;
 #ifdef CAN_STREAM
         msgIdentifier = Get_CanMessageIdentifier((MmwDemo_output_message_type)tl[tlvIdx].type);
         mcan_transfer(msgIdentifier, (uint8_t *)&tl[tlvIdx], sizeof(MmwDemo_output_message_tl), MCAN_DATA_SIZE_8BYTES);
@@ -1275,13 +1275,13 @@ static void MmwDemo_transmitProcessedOutput(
         UART_write(uartHandle, &trans);
 #endif
 
-        for (index = 0; index < gMmw_MCB.subFrameCfg[result->subFrameIdx].numRangeBins; index++)
+        for (index = 0; index < gMmw_MCB.cfgFromDss.numRangeBins[result->subFrameIdx]; index++)
         {
 #ifdef CAN_STREAM
-            mcan_transfer(msgIdentifier, (uint8_t *)&detMatrix[index * gMmw_MCB.subFrameCfg[result->subFrameIdx].numDopplerBins / (mathUtils_countSetBits(gMmw_MCB.cfg.openCfg.chCfg.txChannelEn) + gMmw_MCB.numEmptySubBands) + maxDopIdx], sizeof(uint16_t), MCAN_DATA_SIZE_2BYTES);
+            mcan_transfer(msgIdentifier, (uint8_t *)&detMatrix[index * gMmw_MCB.cfgFromDss.numDopplerBins[result->subFrameIdx] + maxDopIdx], sizeof(uint16_t), MCAN_DATA_SIZE_2BYTES);
 #else
             UART_Transaction_init(&trans);
-            trans.buf   = (uint8_t *)&detMatrix[index * gMmw_MCB.subFrameCfg[result->subFrameIdx].numDopplerBins / (mathUtils_countSetBits(gMmw_MCB.cfg.openCfg.chCfg.txChannelEn) + gMmw_MCB.numEmptySubBands) + maxDopIdx];
+            trans.buf   = (uint8_t *)&detMatrix[index * gMmw_MCB.cfgFromDss.numDopplerBins[result->subFrameIdx] + maxDopIdx];
             trans.count = sizeof(uint16_t);
             UART_write(uartHandle, &trans);
 #endif
@@ -1587,7 +1587,7 @@ void MmwDemo_DPC_ObjectDetection_reportFxn(void *data, uint16_t dataLen)
     else if (/* gMssDPCState == MMWDEMO_WAIT_FRM_DSS_CFG && */ dataLen == sizeof(mmwDemo_cfgToMss))
     {
         gMssDPCState        = MMWDEMO_DPC_RESULT;
-        /* cfgFromDss ignored since MMWAVELINK_ON_MSS */
+        gMmw_MCB.cfgFromDss = *((mmwDemo_cfgToMss *)data);
     }
     else if (dataLen == sizeof(MMWave_CalibrationData))
     {
@@ -1773,7 +1773,7 @@ void MmwDemo_handleObjectDetResult(void)
     /* Translate the address: */
     dpcResults = (gMmw_MCB.result);
 
-    numSubFrames      = gMmw_MCB.objDetCommonCfg.preStartCommonCfg.numSubFrames;
+    numSubFrames      = gMmw_MCB.cfgFromDss.numSubFrames;
     currSubFrameIdx   = dpcResults->subFrameIdx;
     prevSubFrameIdx   = MmwDemo_getPrevSubFrameIndx(currSubFrameIdx, numSubFrames);
     currSubFrameStats = &gMmw_MCB.subFrameStats[currSubFrameIdx];
@@ -1785,7 +1785,7 @@ void MmwDemo_handleObjectDetResult(void)
     startTime = CycleCounterP_getCount32();
 
     /* streaming Range Bias out while mmWaveLink running on DSS, is not supported */
-    if (gMmw_MCB.objDetCommonCfg.preStartCommonCfg.measureRxChannelBiasCfg.enabled == 1)
+    if (gMmw_MCB.cfgFromDss.measureRxChBiasCfgEn == 1)
     {
         if (dpcResults->compRxChanBiasMeasurement != NULL)
         {

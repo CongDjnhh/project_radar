@@ -1378,7 +1378,7 @@ static void MmwDemo_transmitProcessedOutput
     header.magicWord[1] = 0x0304;
     header.magicWord[2] = 0x0506;
     header.magicWord[3] = 0x0708;
-    if ((pGuiMonSel->customObstacles == 1) && (pGuiMonSel->detectedObjects == 0))
+    if ((pGuiMonSel->customObstacles == 1) && (result->numObjOut == 0U))
     {
         header.numDetectedObj = gHSRAM.numCustomObstacles;
     }

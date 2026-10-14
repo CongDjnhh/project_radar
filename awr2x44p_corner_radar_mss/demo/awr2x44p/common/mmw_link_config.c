@@ -38,7 +38,7 @@
  *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef MMWAVELINK_ON_MSS
+#if !defined(SUBSYS_MSS) || defined(MMWAVELINK_ON_MSS)
 
 /**************************************************************************
  *************************** Include Files ********************************

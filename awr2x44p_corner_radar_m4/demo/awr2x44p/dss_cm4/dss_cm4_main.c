@@ -200,9 +200,9 @@ void MmwDemo_DPC_ObjectDetection(void)
                 /* Update the sensor state */
                 gDPCState = MMWDEMO_DPC_CFG;
 
-                /* Send the acknowledgement */
+                /* Send the acknowledgement to MSS */
                 msg    = MMWDEMO_DPC_COMMONCFG;
-                retVal = DPM_send(gMmwDssCM4MCB.dataPathObj.objDetDpmHandle, (void *)(&msg), sizeof(uint32_t), CSL_CORE_ID_C66SS0);
+                retVal = DPM_send(gMmwDssCM4MCB.dataPathObj.objDetDpmHandle, (void *)(&msg), sizeof(uint32_t), CSL_CORE_ID_R5FSS0_0);
                 DebugP_assert(0U == retVal);
                 break;
             }
@@ -232,9 +232,9 @@ void MmwDemo_DPC_ObjectDetection(void)
                 /* Update the sensor state */
                 gDPCState = MMWDEMO_DPC_EXECUTE;
 
-                /* Send the acknowledgement */
+                /* Send the acknowledgement to MSS */
                 msg    = MMWDEMO_DPC_CFG;
-                retVal = DPM_send(gMmwDssCM4MCB.dataPathObj.objDetDpmHandle, (void *)(gMsgBuf), sizeof(DPC_ObjectDetection_PreStartCfg), CSL_CORE_ID_C66SS0);
+                retVal = DPM_send(gMmwDssCM4MCB.dataPathObj.objDetDpmHandle, (void *)(&msg), sizeof(uint32_t), CSL_CORE_ID_R5FSS0_0);
                 DebugP_assert(0U == retVal);
                 break;
             }

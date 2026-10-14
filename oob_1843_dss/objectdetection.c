@@ -56,7 +56,7 @@
  * on top; navigation output is always exported through gHSRAM custom
  * obstacles (TLV 20). */
 #ifndef MMWDEMO_ENABLE_LEGACY_CFAR_AOA
-#define MMWDEMO_ENABLE_LEGACY_CFAR_AOA (1)
+#define MMWDEMO_ENABLE_LEGACY_CFAR_AOA (0)
 #endif
 
 /* mmWave SDK Include Files: */
@@ -72,6 +72,7 @@
 #include "dense_elevation.h"
 #include "nav_point_gen.h"
 #include "local_inc/mmw_output.h"
+#include "two_stage_caso_cfar.h"
 
 #pragma DATA_SECTION(gNavCandidateScratch, ".l3ram");
 #pragma DATA_ALIGN(gNavCandidateScratch, 8);
@@ -87,6 +88,8 @@ far uint8_t gNavCandidateScratch[MMWDEMO_NAV_CANDIDATE_SCRATCH_SIZE];
 volatile int32_t gNavLastProcessError = 0;
 volatile uint32_t gNavProcessErrorCount = 0U;
 volatile uint32_t gNavLastOutputSize = 0U;
+volatile uint32_t gNavDbgDenseSamples = 0U;
+volatile uint32_t gNavDbgFilteredSamples = 0U;
 volatile uint32_t gNavTimingPreCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 volatile uint32_t gNavTimingMaxPreCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 volatile uint32_t gNavTimingProcessCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
@@ -102,19 +105,19 @@ volatile uint32_t gNavTimingMaxResultExportedCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFR
 static uint32_t gNavTrackingPeriodUsec[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 /* Last coherent MSS publications. A generation transition must not turn a
  * valid navigation stream off for one frame. */
-static uint8_t gNavSurfaceEnabledSubFrameMask;
+static uint8_t gNavSurfaceEnabledSubFrameMask = 0xFF;
 
 
 MmwDemo_NavPointGen_Cfg gNavPointCfg = {
     .sourceCfg = {
-        .minElevationDeg = -10.0f,
-        .maxElevationDeg = 10.0f,
-        .minAzimuthDeg = -60.0f,
-        .maxAzimuthDeg = 60.0f,
+        .minElevationDeg = -90.0f,
+        .maxElevationDeg = 90.0f,
+        .minAzimuthDeg = -90.0f,
+        .maxAzimuthDeg = 90.0f,
         .minRangeBin = 0U,
         .maxRangeBin = 32767U
     },
-    .minMovingSpeedMps = 0.15f,
+    .minMovingSpeedMps = 0.0f,
     .maxSurfacePoints = 384U,
     .uartMaxSurfacePoints = 384U
 };
@@ -1057,24 +1060,28 @@ int32_t DPC_ObjectDetection_execute
             &objDetObj->compRxChanCfgMeasureOut);
     }
 
-    /* The CFAR range-Doppler detection list feeds the navigation source
-     * estimator, so CFAR runs in every build. */
-    if (subFrmObj->isAoAHWAparamSetOverlappedWithCFAR == true)
-    {
-        retVal = DPU_CFARCAProcHWA_config(subFrmObj->dpuCFARCAObj, &subFrmObj->dpuCfg.cfarCfg);
-        if (retVal != 0)
-        {
-            goto exit;
-        }
-    }
-
-    retVal = DPU_CFARCAProcHWA_process(subFrmObj->dpuCFARCAObj, &outCfarcaProc);
+    /* Native C674x Two-Stage CASO-CFAR Peak Detector (Bypassing TI DPU CFAR HWA)
+     * Scans detMatrix (256x32) directly on C674x DSP:
+     * Stage 1: Range Domain CASO-CFAR across full chirp span (0.15m - 8.64m)
+     * Stage 2: Doppler Domain CASO-CFAR per valid range cell without starving static reflectors. */
+    retVal = MmwDemo_TwoStageCasoCfar_process(
+        &subFrmObj->dpuCfg.dopplerCfg.hwRes.detMatrix,
+        subFrmObj->staticCfg.numRangeBins,
+        subFrmObj->staticCfg.numDopplerBins,
+        subFrmObj->staticCfg.rangeStep,
+        0.15f,
+        8.64f,
+        (subFrmObj->dynCfg.cfarCfgRange.thresholdScale > 0U) ? &subFrmObj->dynCfg.cfarCfgRange : NULL,
+        (subFrmObj->dynCfg.cfarCfgDoppler.thresholdScale > 0U) ? &subFrmObj->dynCfg.cfarCfgDoppler : NULL,
+        subFrmObj->dpuCfg.cfarCfg.res.cfarRngDopSnrList,
+        subFrmObj->dpuCfg.cfarCfg.res.cfarRngDopSnrListSize,
+        &outCfarcaProc.numCfarDetectedPoints);
     if (retVal != 0)
     {
         goto exit;
     }
 
-    DebugP_log1("ObjDet DPC: number of detected objects after CFAR = %d\n",
+    DebugP_log1("ObjDet DPC: number of detected objects after Two-Stage CASO-CFAR = %d\n",
                 outCfarcaProc.numCfarDetectedPoints);
 
 #if MMWDEMO_ENABLE_LEGACY_CFAR_AOA
@@ -1247,8 +1254,16 @@ int32_t DPC_ObjectDetection_execute
         result->compRxChanBiasMeasurement = NULL;
     }
 
-    /* For rangeProcHwa, interChirpProcessingMargin is not available */
-    objDetObj->stats.interChirpProcessingMargin = 0;
+    /* Pack diagnostic metrics into interChirpProcessingMargin:
+     * Byte 3: -gNavLastProcessError (0 = OK, else error code)
+     * Byte 2: numCfarDetectedPoints (CFAR peaks)
+     * Byte 1: gNavDbgDenseSamples (dense elevation output samples)
+     * Byte 0: gNavDbgFilteredSamples (samples after historyFilter) */
+    objDetObj->stats.interChirpProcessingMargin =
+        ((uint32_t)((uint8_t)(-gNavLastProcessError)) << 24) |
+        ((uint32_t)(outCfarcaProc.numCfarDetectedPoints & 0xFF) << 16) |
+        ((uint32_t)(gNavDbgDenseSamples & 0xFF) << 8) |
+        ((uint32_t)(gNavDbgFilteredSamples & 0xFF));
 
     objDetObj->stats.interFrameEndTimeStamp = Cycleprofiler_getTimeStamp();
     result->stats = &objDetObj->stats;

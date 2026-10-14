@@ -406,7 +406,7 @@ static void MmwDemo_DPC_ObjectDetection_processInterFrameBeginCallBackFxn(uint8_
     outputMsgStats->interFrameProcessingTime =
             (currDpcStats->interFrameEndTimeStamp - currDpcStats->interFrameStartTimeStamp)/DSP_CLOCK_MHZ; /* In micro seconds */
 
-    outputMsgStats->interChirpProcessingMargin = currDpcStats->interChirpProcessingMargin/DSP_CLOCK_MHZ;
+    outputMsgStats->interChirpProcessingMargin = currDpcStats->interChirpProcessingMargin;
 
     /* Calculate interFrame processing Margin for previous frame, but saved to current frame */
     outputMsgStats->interFrameProcessingMargin =

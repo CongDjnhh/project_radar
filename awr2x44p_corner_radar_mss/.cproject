@@ -137,8 +137,8 @@
                                     <listOptionValue value="libc.a"/>
                                     <listOptionValue value="libtestlogger_awr2x44P.aer5f"/>
                                     <listOptionValue value="mmwavelink_r5f.lib"/>
-                                    <listOptionValue value="libcli_awr2x44P.aer5f"/>
                                     <listOptionValue value="libmmwave_awr2x44P.aer5f"/>
+                                    <listOptionValue value="libcli_awr2x44P.aer5f"/>
                                     <listOptionValue value="libmathutils.aer5f"/>
                                     <listOptionValue value="libhsiheader_awr2x44P.aer5f"/>
                                     <listOptionValue value="libgtrack3D_awr2x44p.aer5f"/>
@@ -313,8 +313,8 @@
                                     <listOptionValue value="libc.a"/>
                                     <listOptionValue value="libtestlogger_awr2x44P.aer5f"/>
                                     <listOptionValue value="mmwavelink_r5f.lib"/>
-                                    <listOptionValue value="libcli_awr2x44P.aer5f"/>
                                     <listOptionValue value="libmmwave_awr2x44P.aer5f"/>
+                                    <listOptionValue value="libcli_awr2x44P.aer5f"/>
                                     <listOptionValue value="libmathutils.aer5f"/>
                                     <listOptionValue value="libhsiheader_awr2x44P.aer5f"/>
                                     <listOptionValue value="libgtrack3D_awr2x44p.aer5f"/>

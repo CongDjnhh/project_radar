@@ -449,8 +449,8 @@ static void MmwDemo_CLIInitNavDefaults(
     volatile MmwDemo_NavCliCfg *sharedCfg)
 {
     memset((void *)sharedCfg, 0, sizeof(MmwDemo_NavCliCfg));
-    sharedCfg->minElevationDeg = -40.0f;
-    sharedCfg->maxElevationDeg = 40.0f;
+    sharedCfg->minElevationDeg = -90.0f;
+    sharedCfg->maxElevationDeg = 90.0f;
     sharedCfg->minAzimuthDeg = -90.0f;
     sharedCfg->maxAzimuthDeg = 90.0f;
     sharedCfg->minMovingSpeedMps = 0.00f;

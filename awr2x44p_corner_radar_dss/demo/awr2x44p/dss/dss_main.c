@@ -146,6 +146,12 @@ SemaphoreP_Object gCalibRestoreSemHandle;
 /*! @brief   Semaphore Object to handle Calibration Save Acknowledgement */
 SemaphoreP_Object gCalibSaveAckSemHandle;
 
+/*! @brief   Semaphore Object to wait for Sensor Start from MSS CLI */
+SemaphoreP_Object gStartSensorSemHandle;
+static bool       gIsSensorStarted = false;
+
+extern int32_t MmwaveLink_sensorStop(void);
+
 /**************************************************************************
  ******************* Millimeter Wave Demo Functions Prototype *******************
  **************************************************************************/
@@ -281,6 +287,23 @@ void MmwDemo_DPC_ObjectDetection_reportFxn(void *data, uint16_t dataLen)
     {
         SemaphoreP_post(&gDPCExecSemHandle);
     }
+    else if (msg == MMWDEMO_DSS_START_SENSOR)
+    {
+        DebugP_log("Debug: DSS received MMWDEMO_DSS_START_SENSOR\n");
+        if (!gIsSensorStarted)
+        {
+            SemaphoreP_post(&gStartSensorSemHandle);
+        }
+        else
+        {
+            MmwDemo_sensorStart();
+        }
+    }
+    else if (msg == MMWDEMO_DSS_STOP_SENSOR)
+    {
+        DebugP_log("Debug: DSS received MMWDEMO_DSS_STOP_SENSOR\n");
+        MmwaveLink_sensorStop();
+    }
     else
     {
     }
@@ -411,8 +434,15 @@ static void MmwDemo_dssInitTask(void *args)
         MmwaveLink_monitoring(RL_AR_DEVICETYPE_294X);
     }
 
+    /* Wait for sensorStart CLI command from MSS */
+    SemaphoreP_constructBinary(&gStartSensorSemHandle, 0);
+    DebugP_log("Debug: DSS waiting for sensorStart command from MSS CLI ...\n");
+    SemaphoreP_pend(&gStartSensorSemHandle, SystemP_WAIT_FOREVER);
+    DebugP_log("Debug: DSS received sensorStart, starting sensor now!\n");
+
     /* trigger the frame */
     MmwDemo_startSensor();
+    gIsSensorStarted = true;
 #endif
 
     /* Translate the detObjList address (DSS_L2) from M4 core view to DSS core view. */
