@@ -70,6 +70,10 @@ typedef struct MmwDemo_NavClusterAcc_t {
     float    maxU;
     float    minV;
     float    maxV;
+    float    sumWeight;
+    float    weightedRange;
+    float    weightedU;
+    float    weightedV;
     int16_t  peakDoppler;
     int16_t  peakSnr;
     int16_t  peakPower;
@@ -175,26 +179,8 @@ static uint16_t MmwDemo_NavPointGen_updatePersistence(
         }
     }
 
-    /* Fail-open: add all new/unmatched current boxes immediately */
-    for (c = 0U; c < numCurr; c++)
-    {
-        if (matchedCurr[c] == 0U)
-        {
-            for (p = 0U; p < MMWDEMO_NAV_PERSIST_MAX_OBSTACLES; p++)
-            {
-                if (gNavPersistList[p].valid == 0U)
-                {
-                    gNavPersistList[p].box = currBoxes[c];
-                    gNavPersistList[p].ttl = MMWDEMO_NAV_PERSIST_DEFAULT_TTL;
-                    gNavPersistList[p].valid = 1U;
-                    matchedPersist[p] = 1U;
-                    break;
-                }
-            }
-        }
-    }
-
-    /* Age out unmatched persistent obstacles (intermittent dropout handling) */
+    /* Age out unmatched persistent obstacles (intermittent dropout handling)
+     * Executed before new tracks are added to prevent accidental eviction. */
     for (p = 0U; p < MMWDEMO_NAV_PERSIST_MAX_OBSTACLES; p++)
     {
         if (gNavPersistList[p].valid == 0U)
@@ -215,12 +201,47 @@ static uint16_t MmwDemo_NavPointGen_updatePersistence(
             }
             else
             {
-                /* Persist with damped motion extrapolation (velocity damping prevents overshoot under acceleration) */
-                gNavPersistList[p].box.y += gNavPersistList[p].box.velocity * staticCfg->framePeriodSec;
+                /* 2D radial motion extrapolation along line of sight */
+                float radDistSq = (gNavPersistList[p].box.x * gNavPersistList[p].box.x) +
+                                  (gNavPersistList[p].box.y * gNavPersistList[p].box.y);
+                if (radDistSq > 0.01f)
+                {
+                    float invDist = 1.0f / sqrtf(radDistSq);
+                    float dirX = gNavPersistList[p].box.x * invDist;
+                    float dirY = gNavPersistList[p].box.y * invDist;
+                    float deltaR = gNavPersistList[p].box.velocity * staticCfg->framePeriodSec;
+
+                    gNavPersistList[p].box.x += deltaR * dirX;
+                    gNavPersistList[p].box.y += deltaR * dirY;
+                }
+                else
+                {
+                    gNavPersistList[p].box.y += gNavPersistList[p].box.velocity * staticCfg->framePeriodSec;
+                }
                 gNavPersistList[p].box.velocity *= 0.85f;
+
                 if ((gNavPersistList[p].box.y < 0.15f) || (gNavPersistList[p].box.y > 8.64f))
                 {
                     gNavPersistList[p].valid = 0U;
+                }
+            }
+        }
+    }
+
+    /* Fail-open: add all new/unmatched current boxes immediately into vacant slots */
+    for (c = 0U; c < numCurr; c++)
+    {
+        if (matchedCurr[c] == 0U)
+        {
+            for (p = 0U; p < MMWDEMO_NAV_PERSIST_MAX_OBSTACLES; p++)
+            {
+                if (gNavPersistList[p].valid == 0U)
+                {
+                    gNavPersistList[p].box = currBoxes[c];
+                    gNavPersistList[p].ttl = MMWDEMO_NAV_PERSIST_DEFAULT_TTL;
+                    gNavPersistList[p].valid = 1U;
+                    matchedPersist[p] = 1U;
+                    break;
                 }
             }
         }
@@ -373,6 +394,12 @@ static uint16_t MmwDemo_NavPointGen_emitObstacleBoxes(
             float v_min = v - hw_v;
             float v_max = v + hw_v;
 
+            float sampleWeight = (float)samples[i].snrDb10;
+            if (sampleWeight < 1.0f)
+            {
+                sampleWeight = 1.0f;
+            }
+
             if (boxIdx < 0)
             {
                 if (numBoxes >= MMWDEMO_NAV_CLUSTER_MAX_BOXES)
@@ -389,6 +416,10 @@ static uint16_t MmwDemo_NavPointGen_emitObstacleBoxes(
                 gNavClusterAcc[boxIdx].maxU = u_max;
                 gNavClusterAcc[boxIdx].minV = v_min;
                 gNavClusterAcc[boxIdx].maxV = v_max;
+                gNavClusterAcc[boxIdx].sumWeight = sampleWeight;
+                gNavClusterAcc[boxIdx].weightedRange = (float)samples[i].rangeIdx * sampleWeight;
+                gNavClusterAcc[boxIdx].weightedU = u * sampleWeight;
+                gNavClusterAcc[boxIdx].weightedV = v * sampleWeight;
                 gNavClusterAcc[boxIdx].peakDoppler = samples[i].dopplerIdx;
                 gNavClusterAcc[boxIdx].peakSnr = (int16_t)samples[i].snrDb10;
                 gNavClusterAcc[boxIdx].peakPower = samples[i].powerDb10;
@@ -419,6 +450,11 @@ static uint16_t MmwDemo_NavPointGen_emitObstacleBoxes(
                 {
                     gNavClusterAcc[boxIdx].maxV = v_max;
                 }
+                gNavClusterAcc[boxIdx].sumWeight += sampleWeight;
+                gNavClusterAcc[boxIdx].weightedRange += (float)samples[i].rangeIdx * sampleWeight;
+                gNavClusterAcc[boxIdx].weightedU += u * sampleWeight;
+                gNavClusterAcc[boxIdx].weightedV += v * sampleWeight;
+
                 if ((int16_t)samples[i].snrDb10 > gNavClusterAcc[boxIdx].peakSnr)
                 {
                     gNavClusterAcc[boxIdx].peakSnr = (int16_t)samples[i].snrDb10;
@@ -452,7 +488,20 @@ static uint16_t MmwDemo_NavPointGen_emitObstacleBoxes(
                 depth_y = 2.50f;
             }
 
-            rCenter = 0.5f * (float)(gNavClusterAcc[b].minRange + gNavClusterAcc[b].maxRange);
+            /* SNR-weighted centroid for stable center tracking without boundary jitter */
+            if (gNavClusterAcc[b].sumWeight > 0.0f)
+            {
+                rCenter = gNavClusterAcc[b].weightedRange / gNavClusterAcc[b].sumWeight;
+                uCenter = gNavClusterAcc[b].weightedU / gNavClusterAcc[b].sumWeight;
+                vCenter = gNavClusterAcc[b].weightedV / gNavClusterAcc[b].sumWeight;
+            }
+            else
+            {
+                rCenter = 0.5f * (float)(gNavClusterAcc[b].minRange + gNavClusterAcc[b].maxRange);
+                uCenter = 0.5f * (gNavClusterAcc[b].minU + gNavClusterAcc[b].maxU);
+                vCenter = 0.5f * (gNavClusterAcc[b].minV + gNavClusterAcc[b].maxV);
+            }
+
             dist = rCenter * staticCfg->rangeStepMeters + staticCfg->rangeBiasMeters;
             if (dist < 0.0f)
             {
@@ -464,7 +513,6 @@ static uint16_t MmwDemo_NavPointGen_emitObstacleBoxes(
             if (minU < -1.0f) { minU = -1.0f; }
             if (maxU >  1.0f) { maxU =  1.0f; }
             if (minU > maxU)  { float tmp = minU; minU = maxU; maxU = tmp; }
-            uCenter = 0.5f * (minU + maxU);
             width_u = maxU - minU;
             width_x = dist * width_u;
             if (width_x < 0.10f)
@@ -481,7 +529,6 @@ static uint16_t MmwDemo_NavPointGen_emitObstacleBoxes(
             if (minV < -1.0f) { minV = -1.0f; }
             if (maxV >  1.0f) { maxV =  1.0f; }
             if (minV > maxV)  { float tmp = minV; minV = maxV; maxV = tmp; }
-            vCenter = 0.5f * (minV + maxV);
             height_v = maxV - minV;
             height_z = dist * height_v;
             if (height_z < 0.10f)

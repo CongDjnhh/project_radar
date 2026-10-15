@@ -924,6 +924,8 @@ int32_t DPC_ObjectDetection_execute
     uint8_t txA;
     uint8_t txB;
     uint8_t timingIdx;
+    float fovMinRange;
+    float fovMaxRange;
 
     objDetObj = (ObjDetObj *) handle;
     DebugP_assert (objDetObj != NULL);
@@ -1060,17 +1062,31 @@ int32_t DPC_ObjectDetection_execute
             &objDetObj->compRxChanCfgMeasureOut);
     }
 
+    /* Dynamic FOV routing from CLI (cfarFovCfg and aoaFovCfg) */
+    fovMinRange = (subFrmObj->dynCfg.fovRange.min > 0.0f) ? subFrmObj->dynCfg.fovRange.min : 0.15f;
+    fovMaxRange = (subFrmObj->dynCfg.fovRange.max > fovMinRange) ? subFrmObj->dynCfg.fovRange.max : 8.64f;
+
+    /* If CLI aoaFovCfg is present, apply to navigation source config */
+    if ((subFrmObj->dynCfg.fovAoaCfg.minAzimuthDeg != subFrmObj->dynCfg.fovAoaCfg.maxAzimuthDeg) &&
+        (subFrmObj->dynCfg.fovAoaCfg.maxAzimuthDeg > subFrmObj->dynCfg.fovAoaCfg.minAzimuthDeg))
+    {
+        gNavPointCfg.sourceCfg.minAzimuthDeg = (int16_t)subFrmObj->dynCfg.fovAoaCfg.minAzimuthDeg;
+        gNavPointCfg.sourceCfg.maxAzimuthDeg = (int16_t)subFrmObj->dynCfg.fovAoaCfg.maxAzimuthDeg;
+        gNavPointCfg.sourceCfg.minElevationDeg = (int16_t)subFrmObj->dynCfg.fovAoaCfg.minElevationDeg;
+        gNavPointCfg.sourceCfg.maxElevationDeg = (int16_t)subFrmObj->dynCfg.fovAoaCfg.maxElevationDeg;
+    }
+
     /* Native C674x Two-Stage CASO-CFAR Peak Detector (Bypassing TI DPU CFAR HWA)
      * Scans detMatrix (256x32) directly on C674x DSP:
-     * Stage 1: Range Domain CASO-CFAR across full chirp span (0.15m - 8.64m)
+     * Stage 1: Range Domain CASO-CFAR across CLI configured range span
      * Stage 2: Doppler Domain CASO-CFAR per valid range cell without starving static reflectors. */
     retVal = MmwDemo_TwoStageCasoCfar_process(
         &subFrmObj->dpuCfg.dopplerCfg.hwRes.detMatrix,
         subFrmObj->staticCfg.numRangeBins,
         subFrmObj->staticCfg.numDopplerBins,
         subFrmObj->staticCfg.rangeStep,
-        0.15f,
-        8.64f,
+        fovMinRange,
+        fovMaxRange,
         (subFrmObj->dynCfg.cfarCfgRange.thresholdScale > 0U) ? &subFrmObj->dynCfg.cfarCfgRange : NULL,
         (subFrmObj->dynCfg.cfarCfgDoppler.thresholdScale > 0U) ? &subFrmObj->dynCfg.cfarCfgDoppler : NULL,
         subFrmObj->dpuCfg.cfarCfg.res.cfarRngDopSnrList,

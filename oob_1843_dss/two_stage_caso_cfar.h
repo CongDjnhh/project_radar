@@ -123,11 +123,11 @@ static inline int32_t MmwDemo_TwoStageCasoCfar_process(
     rangeGuardLen = (cfarCfgRange && cfarCfgRange->guardLen > 0U) ? cfarCfgRange->guardLen : MMWDEMO_CASO_RANGE_GUARD_LEN_DEF;
     if (cfarCfgRange && cfarCfgRange->thresholdScale > 0U)
     {
-        /* thresholdScale is encoded in 0.01 dB steps: threshold_dB = scale / 100.0f
-         * Q8 LSBs = (threshold_dB * 256) / 6.0206f = (scale * 256) / 602 */
-        rangeThresholdQ8 = (uint16_t)(((uint32_t)cfarCfgRange->thresholdScale * 256U) / 602U);
-        if (rangeThresholdQ8 < 200U) { rangeThresholdQ8 = 200U; } /* min ~4.7 dB */
-        if (rangeThresholdQ8 > 600U) { rangeThresholdQ8 = 600U; } /* max ~14.1 dB */
+        /* MSS MmwDemo_convertCfarToLinear converts CLI dB (in 0.1 dB steps) to linear scale Q8 (e.g. 8 dB -> 256).
+         * For 12 virtual antennas (3TX x 4RX), detMatrix log-magnitude scale is:
+         * 1 LSB = 6.0 dB / (256 * 12 / 16) = 6.0 / 192 dB.
+         * Using direct linear thresholdScale without re-dividing or clamping: */
+        rangeThresholdQ8 = (uint16_t)cfarCfgRange->thresholdScale;
     }
     else
     {
@@ -139,9 +139,7 @@ static inline int32_t MmwDemo_TwoStageCasoCfar_process(
     doppGuardLen = (cfarCfgDoppler && cfarCfgDoppler->guardLen > 0U) ? cfarCfgDoppler->guardLen : MMWDEMO_CASO_DOPP_GUARD_LEN_DEF;
     if (cfarCfgDoppler && cfarCfgDoppler->thresholdScale > 0U)
     {
-        doppThresholdQ8 = (uint16_t)(((uint32_t)cfarCfgDoppler->thresholdScale * 256U) / 602U);
-        if (doppThresholdQ8 < 180U) { doppThresholdQ8 = 180U; } /* min ~4.2 dB */
-        if (doppThresholdQ8 > 500U) { doppThresholdQ8 = 500U; } /* max ~11.8 dB */
+        doppThresholdQ8 = (uint16_t)cfarCfgDoppler->thresholdScale;
     }
     else
     {
@@ -170,13 +168,22 @@ static inline int32_t MmwDemo_TwoStageCasoCfar_process(
         }
         gCasoRangeProfile[r] = maxVal;
         gCasoRangePeakDop[r] = maxDop;
-        gCasoRangeNoise[r]   = (uint16_t)(sumVal / numDopplerBins);
+        /* Exclude peak (CUT) from average noise floor to prevent noise overestimation */
+        if (numDopplerBins > 1U)
+        {
+            gCasoRangeNoise[r] = (uint16_t)((sumVal - (uint32_t)maxVal) / (numDopplerBins - 1U));
+        }
+        else
+        {
+            gCasoRangeNoise[r] = maxVal;
+        }
         gCasoRangeDetected[r] = 0U;
     }
 
     /* ------------------------------------------------------------------------
      * Step 2: Stage 1 (Range Domain CASO-CFAR)
-     * Scan across all 256 range bins to detect physical obstacle reflection ranges.
+     * Scan across all range bins to detect physical obstacle reflection ranges.
+     * Preserves shoulder bins to maintain accurate obstacle physical depth (depth_y).
      * ------------------------------------------------------------------------ */
     for (r = rStart; r <= rEnd; r++)
     {
@@ -187,17 +194,7 @@ static inline int32_t MmwDemo_TwoStageCasoCfar_process(
         uint32_t sumR = 0U, countR = 0U;
         uint16_t avgL, avgR, casoNoise;
 
-        /* Range Domain Local Peak Check (strict local maximum) */
-        if ((cutVal < gCasoRangeProfile[r - 1U]) || (cutVal < gCasoRangeProfile[r + 1U]))
-        {
-            continue;
-        }
-        if ((cutVal == gCasoRangeProfile[r - 1U]) && (cutVal == gCasoRangeProfile[r + 1U]))
-        {
-            continue;
-        }
-
-        /* Left reference window */
+        /* Left reference window (guard cells excluded) */
         leftStart = (int32_t)r - (int32_t)rangeGuardLen - (int32_t)rangeWinLen;
         leftEnd   = (int32_t)r - (int32_t)rangeGuardLen - 1;
         if (leftStart < 0) { leftStart = 0; }
@@ -210,7 +207,7 @@ static inline int32_t MmwDemo_TwoStageCasoCfar_process(
             }
         }
 
-        /* Right reference window */
+        /* Right reference window (guard cells excluded) */
         rightStart = (int32_t)r + (int32_t)rangeGuardLen + 1;
         rightEnd   = (int32_t)r + (int32_t)rangeGuardLen + (int32_t)rangeWinLen;
         if (rightEnd >= (int32_t)numRangeBins) { rightEnd = (int32_t)numRangeBins - 1; }
@@ -243,7 +240,7 @@ static inline int32_t MmwDemo_TwoStageCasoCfar_process(
             casoNoise = gCasoRangeNoise[r];
         }
 
-        uint16_t minFloorOffset = (rangeThresholdQ8 < 256U) ? (rangeThresholdQ8 / 2U) : 200U;
+        uint16_t minFloorOffset = (rangeThresholdQ8 < 256U) ? (rangeThresholdQ8 / 2U) : 180U;
 
         /* Range detection condition:
          * 1. Exceeds local CASO noise by range threshold
@@ -329,26 +326,42 @@ static inline int32_t MmwDemo_TwoStageCasoCfar_process(
         }
 
         /* --------------------------------------------------------------------
-         * Fail-Safe for Static / Dominant Peak Reflectors:
-         * If Stage 1 confirmed an obstacle range, but no circular Doppler peak
-         * passed the Doppler threshold (e.g. 0-Doppler static target), we take
-         * the peak Doppler bin (which is d = 0 for static obstacles) so that
-         * static reflectors are NEVER starved.
+         * Static Target Retention:
+         * Always verify the zero-Doppler bin (d = 0) independently.
+         * If the range bin was detected in Stage 1 and has significant energy
+         * at d = 0, ensure the static reflection is retained even if a moving
+         * target (d != 0) was also detected on the same range cell.
          * -------------------------------------------------------------------- */
-        if ((dopPeaksFound == 0U) && (candidateCount < poolLimit))
+        if (candidateCount < poolLimit)
         {
-            uint16_t peakDop = gCasoRangePeakDop[r];
-            uint16_t peakVal = gCasoRangeProfile[r];
-            uint16_t noiseFloor = gCasoRangeNoise[r];
-            uint16_t diff = (peakVal > noiseFloor) ? (peakVal - noiseFloor) : 0U;
-            uint16_t snr = (uint16_t)(((uint32_t)diff * 60U) / 256U);
-            int16_t noise = (int16_t)(((uint32_t)noiseFloor * 60U) / 256U);
+            uint8_t zeroDopAdded = 0U;
+            uint32_t c;
+            for (c = 0U; c < candidateCount; c++)
+            {
+                if ((outCfarList[c].rangeIdx == r) && (outCfarList[c].dopplerIdx == 0U))
+                {
+                    zeroDopAdded = 1U;
+                    break;
+                }
+            }
 
-            outCfarList[candidateCount].rangeIdx   = r;
-            outCfarList[candidateCount].dopplerIdx = peakDop;
-            outCfarList[candidateCount].snr        = (int16_t)snr;
-            outCfarList[candidateCount].noise      = noise;
-            candidateCount++;
+            if (zeroDopAdded == 0U)
+            {
+                uint16_t zeroVal = detRow[0];
+                uint16_t noiseFloor = gCasoRangeNoise[r];
+                if ((dopPeaksFound == 0U) || (zeroVal >= (noiseFloor + doppThresholdQ8)))
+                {
+                    uint16_t diff = (zeroVal > noiseFloor) ? (zeroVal - noiseFloor) : 0U;
+                    uint16_t snr = (uint16_t)(((uint32_t)diff * 60U) / 256U);
+                    int16_t noise = (int16_t)(((uint32_t)noiseFloor * 60U) / 256U);
+
+                    outCfarList[candidateCount].rangeIdx   = r;
+                    outCfarList[candidateCount].dopplerIdx = 0U;
+                    outCfarList[candidateCount].snr        = (int16_t)snr;
+                    outCfarList[candidateCount].noise      = noise;
+                    candidateCount++;
+                }
+            }
         }
     }
 

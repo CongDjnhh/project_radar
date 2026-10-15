@@ -86,6 +86,9 @@ typedef struct MmwDemo_GuiMonSel_t
     /*! @brief   Send the raw DPIF radar cube over the data UART */
     uint8_t        radarCube;
 
+    /*! @brief   Send customObstacles */
+    uint8_t        customObstacles;
+
 } MmwDemo_GuiMonSel;
 
 /**

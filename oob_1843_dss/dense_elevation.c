@@ -676,6 +676,7 @@ static void MmwDemo_DenseElevation_insertOutput(
     }
 }
 
+#pragma CODE_SECTION(MmwDemo_DenseElevation_processDoppler, ".l1psram");
 static void MmwDemo_DenseElevation_processDoppler(
     uint16_t rangeIdx,
     const MmwDemo_DenseDopplerCandidate *candidate,
@@ -753,7 +754,9 @@ static void MmwDemo_DenseElevation_processDoppler(
         }
 
         /* Continuous elevation estimation from cross-row phase */
-        if (elevationPower >= DENSE_MIN_POWER)
+        if ((elevationPower >= DENSE_MIN_POWER) &&
+            (referencePower > 0.0f) &&
+            ((elevationPower / referencePower) >= DENSE_MIN_ELEVATION_ROW_RATIO))
         {
             crossReal =
                 rowSum[gDenseReferenceRow].real * rowSum[gDenseElevationRow].real +
@@ -783,7 +786,7 @@ static void MmwDemo_DenseElevation_processDoppler(
         }
         else
         {
-            /* If elevation row signal is weak, fallback to boresight horizontal */
+            /* If elevation row signal is weak or secondary row ratio is below threshold, fallback to boresight horizontal */
             v = 0.0f;
         }
 
