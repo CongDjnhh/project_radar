@@ -125,10 +125,48 @@ static uint16_t MmwDemo_NavPointGen_updatePersistence(
     uint16_t p, c;
     uint8_t matchedCurr[MMWDEMO_NAV_CLUSTER_MAX_BOXES];
     uint8_t matchedPersist[MMWDEMO_NAV_PERSIST_MAX_OBSTACLES];
+    float predictedX[MMWDEMO_NAV_PERSIST_MAX_OBSTACLES];
+    float predictedY[MMWDEMO_NAV_PERSIST_MAX_OBSTACLES];
+    float movementX[MMWDEMO_NAV_PERSIST_MAX_OBSTACLES];
+    float movementY[MMWDEMO_NAV_PERSIST_MAX_OBSTACLES];
     uint16_t outCount = 0U;
 
     memset(matchedCurr, 0, sizeof(matchedCurr));
     memset(matchedPersist, 0, sizeof(matchedPersist));
+
+    /* Predict each track once so association compares detections against the
+     * position the obstacle is expected to occupy in this frame. */
+    for (p = 0U; p < MMWDEMO_NAV_PERSIST_MAX_OBSTACLES; p++)
+    {
+        predictedX[p] = gNavPersistList[p].box.x;
+        predictedY[p] = gNavPersistList[p].box.y;
+        movementX[p] = 0.0f;
+        movementY[p] = 0.0f;
+
+        if (gNavPersistList[p].valid != 0U)
+        {
+            float radDistSq =
+                (gNavPersistList[p].box.x * gNavPersistList[p].box.x) +
+                (gNavPersistList[p].box.y * gNavPersistList[p].box.y);
+            float deltaR =
+                gNavPersistList[p].box.velocity * staticCfg->framePeriodSec;
+
+            if (radDistSq > 0.01f)
+            {
+                float invDist = 1.0f / sqrtf(radDistSq);
+                movementX[p] =
+                    deltaR * gNavPersistList[p].box.x * invDist;
+                movementY[p] =
+                    deltaR * gNavPersistList[p].box.y * invDist;
+            }
+            else
+            {
+                movementY[p] = deltaR;
+            }
+            predictedX[p] += movementX[p];
+            predictedY[p] += movementY[p];
+        }
+    }
 
     /* Match current detections against active persistent obstacles */
     for (c = 0U; c < numCurr; c++)
@@ -138,7 +176,7 @@ static uint16_t MmwDemo_NavPointGen_updatePersistence(
 
         for (p = 0U; p < MMWDEMO_NAV_PERSIST_MAX_OBSTACLES; p++)
         {
-            float dy, dx, dz, totalDist, maxDy;
+            float dy, dx, dz, totalDist, maxDy, maxDx;
 
             if (gNavPersistList[p].valid == 0U)
             {
@@ -149,16 +187,18 @@ static uint16_t MmwDemo_NavPointGen_updatePersistence(
                 continue; /* 1-to-1 association: avoid multiple current boxes stealing the same track */
             }
 
-            dy = currBoxes[c].y - gNavPersistList[p].box.y;
-            dx = currBoxes[c].x - gNavPersistList[p].box.x;
+            dy = currBoxes[c].y - predictedY[p];
+            dx = currBoxes[c].x - predictedX[p];
             dz = currBoxes[c].z - gNavPersistList[p].box.z;
             if (dy < 0.0f) { dy = -dy; }
             if (dx < 0.0f) { dx = -dx; }
             if (dz < 0.0f) { dz = -dz; }
 
-            /* Motion-compensated matching gate (tightened base gate prevents merging closely spaced obstacles) */
-            maxDy = 0.35f + fabsf(gNavPersistList[p].box.velocity) * staticCfg->framePeriodSec;
-            if ((dy <= maxDy) && (dx <= 0.45f) && (dz <= 0.60f))
+            /* Allow for lateral/radial prediction error without letting fast
+             * motion alone create an unbounded association gate. */
+            maxDy = 0.35f + (0.5f * fabsf(movementY[p]));
+            maxDx = 0.45f + (0.5f * fabsf(movementX[p]));
+            if ((dy <= maxDy) && (dx <= maxDx) && (dz <= 0.60f))
             {
                 totalDist = dy + dx + dz;
                 if (totalDist < bestDist)

@@ -2292,17 +2292,17 @@ static int32_t MmwDemo_dataPathConfig (void)
                 staticCfg->txAntOrder[idx] = RFparserOutParams.txAntOrder[idx];
             }
 
-            /* Convert CFAR threshold value */
-            subFrameCfg->objDetDynCfg.dynCfg.cfarCfgRange.thresholdScale = 
-                MmwDemo_convertCfarToLinear(subFrameCfg->objDetDynCfg.dynCfg.cfarCfgRange.thresholdScale, 
-                                            staticCfg->numVirtualAntennas);
-
-            subFrameCfg->objDetDynCfg.dynCfg.cfarCfgDoppler.thresholdScale = 
-                MmwDemo_convertCfarToLinear(subFrameCfg->objDetDynCfg.dynCfg.cfarCfgDoppler.thresholdScale, 
-                                            staticCfg->numVirtualAntennas);
-                                        
-            /* Fill dynamic configuration for the sub-frame */
-            objDetPreStartCfg.dynCfg = subFrameCfg->objDetDynCfg.dynCfg;           
+            /* Keep CLI thresholds encoded in dB in subFrameCfg; the DPC copy
+             * receives the converted linear values. */
+            objDetPreStartCfg.dynCfg = subFrameCfg->objDetDynCfg.dynCfg;
+            objDetPreStartCfg.dynCfg.cfarCfgRange.thresholdScale =
+                MmwDemo_convertCfarToLinear(
+                    subFrameCfg->objDetDynCfg.dynCfg.cfarCfgRange.thresholdScale,
+                    staticCfg->numVirtualAntennas);
+            objDetPreStartCfg.dynCfg.cfarCfgDoppler.thresholdScale =
+                MmwDemo_convertCfarToLinear(
+                    subFrameCfg->objDetDynCfg.dynCfg.cfarCfgDoppler.thresholdScale,
+                    staticCfg->numVirtualAntennas);
 
             DebugP_log1("App: Issuing Pre-start Config IOCTL (subFrameIndx = %d)\n", subFrameIndx);
 
@@ -2824,12 +2824,11 @@ static int32_t MmwDemo_processPendingDynamicCfgCommands(uint8_t subFrameIndx)
         DPC_ObjectDetection_CfarCfg cfg;
 
         cfg.subFrameNum = subFrameIndx;
-        /* Update with correct threshold value based on number of virtual antennas */
-        subFrameCfg->dynCfg.cfarCfgDoppler.thresholdScale = 
-            MmwDemo_convertCfarToLinear(subFrameCfg->dynCfg.cfarCfgDoppler.thresholdScale, 
-                                        numVirtualAntennas);
-
         cfg.cfg = subFrameCfg->dynCfg.cfarCfgDoppler;
+        cfg.cfg.thresholdScale =
+            MmwDemo_convertCfarToLinear(
+                subFrameCfg->dynCfg.cfarCfgDoppler.thresholdScale,
+                numVirtualAntennas);
         
         retVal = DPM_ioctl (gMmwMssMCB.objDetDpmHandle,
                              DPC_OBJDET_IOCTL__DYNAMIC_CFAR_DOPPLER_CFG,
@@ -2846,12 +2845,11 @@ static int32_t MmwDemo_processPendingDynamicCfgCommands(uint8_t subFrameIndx)
         DPC_ObjectDetection_CfarCfg cfg;
 
         cfg.subFrameNum = subFrameIndx;
-        /* Update with correct threshold value based on number of virtual antennas */
-        subFrameCfg->dynCfg.cfarCfgRange.thresholdScale = 
-            MmwDemo_convertCfarToLinear(subFrameCfg->dynCfg.cfarCfgRange.thresholdScale, 
-                                        numVirtualAntennas);
-        
         cfg.cfg = subFrameCfg->dynCfg.cfarCfgRange;
+        cfg.cfg.thresholdScale =
+            MmwDemo_convertCfarToLinear(
+                subFrameCfg->dynCfg.cfarCfgRange.thresholdScale,
+                numVirtualAntennas);
         
         retVal = DPM_ioctl (gMmwMssMCB.objDetDpmHandle,
                              DPC_OBJDET_IOCTL__DYNAMIC_CFAR_RANGE_CFG,
@@ -3281,8 +3279,11 @@ static void MmwDemo_handleObjectDetResult
                                     dpcResults,
                                     &currSubFrameStats->outputStats);
     lastNavSurfacePayloadSize[currSubFrameIdx] =
-        (dpcResults->numObjOut > 0U) ?
-        ((uint32_t)dpcResults->numObjOut * (sizeof(DPIF_PointCloudCartesian) + sizeof(DPIF_PointCloudSideInfo)) + (uint32_t)sizeof(MmwDemo_output_message_tl) * 2U) : 0U;
+        ((gMmwMssMCB.subFrameCfg[currSubFrameIdx].guiMonSel.customObstacles == 1U) &&
+         (gHSRAM.numCustomObstacles > 0U)) ?
+        ((uint32_t)gHSRAM.numCustomObstacles *
+             sizeof(MmwDemo_CustomObstacle) +
+         (uint32_t)sizeof(MmwDemo_output_message_tl)) : 0U;
 
     /* Wait until s/w session is complete. We expect the LVDS transmission of
      * s/w session to be completed by now because the UART transmission above is slower.
@@ -4526,5 +4527,4 @@ int main (void)
     BIOS_start();
     return 0;
 }
-
 

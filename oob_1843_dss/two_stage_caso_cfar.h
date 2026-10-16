@@ -22,16 +22,15 @@ extern "C" {
 #define MMWDEMO_CASO_MAX_RANGE_BINS       (256U)
 #define MMWDEMO_CASO_MAX_DOPPLER_BINS     (32U)
 #define MMWDEMO_CASO_MAX_CANDIDATES       (48U)
-#define MMWDEMO_CASO_MAX_POOL_CANDIDATES  (128U)
 
 #define MMWDEMO_CASO_RANGE_WIN_LEN_DEF    (8U)
 #define MMWDEMO_CASO_RANGE_GUARD_LEN_DEF  (4U)
 #define MMWDEMO_CASO_DOPP_WIN_LEN_DEF     (4U)
 #define MMWDEMO_CASO_DOPP_GUARD_LEN_DEF   (2U)
 
-/* Default thresholds in Q8 LSBs (256 LSBs ~ 6.02 dB) */
-#define MMWDEMO_CASO_RANGE_THRESHOLD_Q8_DEF (341U)  /* ~8.0 dB */
-#define MMWDEMO_CASO_DOPP_THRESHOLD_Q8_DEF  (256U)  /* ~6.0 dB */
+/* For 12 virtual antennas, 192 detection-matrix LSBs are approximately 6 dB. */
+#define MMWDEMO_CASO_RANGE_THRESHOLD_Q8_DEF (256U)  /* ~8.0 dB */
+#define MMWDEMO_CASO_DOPP_THRESHOLD_Q8_DEF  (192U)  /* ~6.0 dB */
 
 #pragma DATA_SECTION(gCasoRangeProfile, ".l3ram")
 #pragma DATA_ALIGN(gCasoRangeProfile, 8)
@@ -48,6 +47,71 @@ static far uint16_t gCasoRangeNoise[MMWDEMO_CASO_MAX_RANGE_BINS];
 #pragma DATA_SECTION(gCasoRangeDetected, ".l3ram")
 #pragma DATA_ALIGN(gCasoRangeDetected, 8)
 static far uint8_t gCasoRangeDetected[MMWDEMO_CASO_MAX_RANGE_BINS];
+
+static inline void MmwDemo_TwoStageCasoCfar_insertCandidate(
+    DPIF_CFARDetList *candidateList,
+    uint32_t *candidateCount,
+    uint32_t candidateLimit,
+    const DPIF_CFARDetList *candidate)
+{
+    uint32_t index;
+
+    if (candidateLimit == 0U)
+    {
+        return;
+    }
+
+    if (*candidateCount < candidateLimit)
+    {
+        index = (*candidateCount)++;
+        candidateList[index] = *candidate;
+        while (index > 0U)
+        {
+            uint32_t parent = (index - 1U) / 2U;
+            DPIF_CFARDetList tmp;
+
+            if (candidateList[parent].snr <= candidateList[index].snr)
+            {
+                break;
+            }
+            tmp = candidateList[parent];
+            candidateList[parent] = candidateList[index];
+            candidateList[index] = tmp;
+            index = parent;
+        }
+    }
+    else if (candidate->snr > candidateList[0].snr)
+    {
+        candidateList[0] = *candidate;
+        index = 0U;
+        while (1)
+        {
+            uint32_t left = (2U * index) + 1U;
+            uint32_t right = left + 1U;
+            uint32_t smallest = index;
+            DPIF_CFARDetList tmp;
+
+            if ((left < *candidateCount) &&
+                (candidateList[left].snr < candidateList[smallest].snr))
+            {
+                smallest = left;
+            }
+            if ((right < *candidateCount) &&
+                (candidateList[right].snr < candidateList[smallest].snr))
+            {
+                smallest = right;
+            }
+            if (smallest == index)
+            {
+                break;
+            }
+            tmp = candidateList[index];
+            candidateList[index] = candidateList[smallest];
+            candidateList[smallest] = tmp;
+            index = smallest;
+        }
+    }
+}
 
 /**
  * @brief Native Two-Stage CASO-CFAR detector executing on C674x DSP.
@@ -97,7 +161,8 @@ static inline int32_t MmwDemo_TwoStageCasoCfar_process(
     }
 
     detMat = (const uint16_t *)detMatrix->data;
-    poolLimit = (maxOutCfar < MMWDEMO_CASO_MAX_POOL_CANDIDATES) ? maxOutCfar : MMWDEMO_CASO_MAX_POOL_CANDIDATES;
+    poolLimit = (maxOutCfar < MMWDEMO_CASO_MAX_CANDIDATES) ?
+                maxOutCfar : MMWDEMO_CASO_MAX_CANDIDATES;
 
     /* Clamp range search bounds: 0.15 m - 8.64 m, spanning all physical bins.
      * Note: rEnd is clamped to numRangeBins - 2U so local peak check cutVal < gCasoRangeProfile[r + 1U]
@@ -188,6 +253,10 @@ static inline int32_t MmwDemo_TwoStageCasoCfar_process(
     for (r = rStart; r <= rEnd; r++)
     {
         uint16_t cutVal = gCasoRangeProfile[r];
+        uint16_t leftPeakVal = gCasoRangeProfile[r - 1U];
+        uint16_t rightPeakVal = gCasoRangeProfile[r + 1U];
+        uint8_t isLocalPeak;
+        uint8_t isShoulder;
         int32_t leftStart, leftEnd, rightStart, rightEnd;
         int32_t k;
         uint32_t sumL = 0U, countL = 0U;
@@ -240,12 +309,37 @@ static inline int32_t MmwDemo_TwoStageCasoCfar_process(
             casoNoise = gCasoRangeNoise[r];
         }
 
+        /* Keep range peaks and their immediate -3 dB shoulders, but not every
+         * above-threshold bin across a broad reflection. The asymmetric
+         * comparison selects one representative from a flat-topped peak. */
+        isLocalPeak = ((cutVal > leftPeakVal) &&
+                       (cutVal >= rightPeakVal)) ? 1U : 0U;
+        isShoulder = 0U;
+        if ((isLocalPeak == 0U) &&
+            (r >= 2U) &&
+            (leftPeakVal >= cutVal) &&
+            (leftPeakVal > gCasoRangeProfile[r - 2U]) &&
+            ((uint32_t)(leftPeakVal - cutVal) <= 96U))
+        {
+            isShoulder = 1U;
+        }
+        if ((isLocalPeak == 0U) &&
+            (rightPeakVal >= cutVal) &&
+            (r + 2U < numRangeBins) &&
+            (rightPeakVal > gCasoRangeProfile[r + 2U]) &&
+            ((uint32_t)(rightPeakVal - cutVal) <= 96U))
+        {
+            isShoulder = 1U;
+        }
+
         uint16_t minFloorOffset = (rangeThresholdQ8 < 256U) ? (rangeThresholdQ8 / 2U) : 180U;
 
         /* Range detection condition:
          * 1. Exceeds local CASO noise by range threshold
-         * 2. Exceeds Doppler noise floor by at least minFloorOffset */
-        if ((cutVal >= (casoNoise + rangeThresholdQ8)) &&
+         * 2. Exceeds Doppler noise floor by at least minFloorOffset
+         * 3. Is a local peak or an immediate shoulder of one */
+        if (((isLocalPeak != 0U) || (isShoulder != 0U)) &&
+            (cutVal >= (casoNoise + rangeThresholdQ8)) &&
             (cutVal >= (gCasoRangeNoise[r] + minFloorOffset)))
         {
             gCasoRangeDetected[r] = 1U;
@@ -256,7 +350,7 @@ static inline int32_t MmwDemo_TwoStageCasoCfar_process(
      * Step 3: Stage 2 (Doppler Domain CASO-CFAR per Valid Range Cell)
      * For each detected range, resolve velocity peaks without starving static reflectors.
      * ------------------------------------------------------------------------ */
-    for (r = rStart; (r <= rEnd) && (candidateCount < poolLimit); r++)
+    for (r = rStart; (r <= rEnd) && (poolLimit > 0U); r++)
     {
         const uint16_t *detRow;
         uint16_t dopPeaksFound = 0U;
@@ -308,20 +402,17 @@ static inline int32_t MmwDemo_TwoStageCasoCfar_process(
             if (val >= (casoDoppNoise + doppThresholdQ8))
             {
                 /* Valid velocity peak found */
-                uint16_t snr = (uint16_t)(((uint32_t)(val - casoDoppNoise) * 60U) / 256U);
-                int16_t noise = (int16_t)(((uint32_t)casoDoppNoise * 60U) / 256U);
+                uint16_t snr = (uint16_t)(((uint32_t)(val - casoDoppNoise) * 60U) / 192U);
+                int16_t noise = (int16_t)(((uint32_t)casoDoppNoise * 60U) / 192U);
+                DPIF_CFARDetList candidate;
 
-                outCfarList[candidateCount].rangeIdx   = r;
-                outCfarList[candidateCount].dopplerIdx = d;
-                outCfarList[candidateCount].snr        = (int16_t)snr;
-                outCfarList[candidateCount].noise      = noise;
-                candidateCount++;
+                candidate.rangeIdx   = r;
+                candidate.dopplerIdx = d;
+                candidate.snr        = (int16_t)snr;
+                candidate.noise      = noise;
+                MmwDemo_TwoStageCasoCfar_insertCandidate(
+                    outCfarList, &candidateCount, poolLimit, &candidate);
                 dopPeaksFound++;
-
-                if (candidateCount >= poolLimit)
-                {
-                    break;
-                }
             }
         }
 
@@ -332,7 +423,7 @@ static inline int32_t MmwDemo_TwoStageCasoCfar_process(
          * at d = 0, ensure the static reflection is retained even if a moving
          * target (d != 0) was also detected on the same range cell.
          * -------------------------------------------------------------------- */
-        if (candidateCount < poolLimit)
+        if (poolLimit > 0U)
         {
             uint8_t zeroDopAdded = 0U;
             uint32_t c;
@@ -352,14 +443,16 @@ static inline int32_t MmwDemo_TwoStageCasoCfar_process(
                 if ((dopPeaksFound == 0U) || (zeroVal >= (noiseFloor + doppThresholdQ8)))
                 {
                     uint16_t diff = (zeroVal > noiseFloor) ? (zeroVal - noiseFloor) : 0U;
-                    uint16_t snr = (uint16_t)(((uint32_t)diff * 60U) / 256U);
-                    int16_t noise = (int16_t)(((uint32_t)noiseFloor * 60U) / 256U);
+                    uint16_t snr = (uint16_t)(((uint32_t)diff * 60U) / 192U);
+                    int16_t noise = (int16_t)(((uint32_t)noiseFloor * 60U) / 192U);
+                    DPIF_CFARDetList candidate;
 
-                    outCfarList[candidateCount].rangeIdx   = r;
-                    outCfarList[candidateCount].dopplerIdx = 0U;
-                    outCfarList[candidateCount].snr        = (int16_t)snr;
-                    outCfarList[candidateCount].noise      = noise;
-                    candidateCount++;
+                    candidate.rangeIdx   = r;
+                    candidate.dopplerIdx = 0U;
+                    candidate.snr        = (int16_t)snr;
+                    candidate.noise      = noise;
+                    MmwDemo_TwoStageCasoCfar_insertCandidate(
+                        outCfarList, &candidateCount, poolLimit, &candidate);
                 }
             }
         }
@@ -389,12 +482,6 @@ static inline int32_t MmwDemo_TwoStageCasoCfar_process(
                 outCfarList[maxIdx] = tmp;
             }
         }
-    }
-
-    /* Cap candidate count to maintain DSP execution time < 4 ms */
-    if (candidateCount > MMWDEMO_CASO_MAX_CANDIDATES)
-    {
-        candidateCount = MMWDEMO_CASO_MAX_CANDIDATES;
     }
 
     *numCfarDetectedPoints = candidateCount;

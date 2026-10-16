@@ -913,6 +913,7 @@ int32_t DPC_ObjectDetection_execute
     uint32_t navProcessingCycles = 0U;
     MmwDemo_DenseElevation_StaticCfg denseStaticCfg;
     DPU_AoAProc_compRxChannelBiasCfg denseCompRxCfg;
+    MmwDemo_NavPointGen_Cfg navCfg;
     MmwDemo_NavPointGen_StaticCfg navStaticCfg;
     MmwDemo_NavCliCfg navSharedCfg;
     volatile const MmwDemo_NavCliCfg *navShared;
@@ -1065,6 +1066,46 @@ int32_t DPC_ObjectDetection_execute
     /* Dynamic FOV routing from CLI (cfarFovCfg and aoaFovCfg) */
     fovMinRange = (subFrmObj->dynCfg.fovRange.min > 0.0f) ? subFrmObj->dynCfg.fovRange.min : 0.15f;
     fovMaxRange = (subFrmObj->dynCfg.fovRange.max > fovMinRange) ? subFrmObj->dynCfg.fovRange.max : 8.64f;
+    navCfg = gNavPointCfg;
+    if ((subFrmObj->staticCfg.rangeStep > 0.0f) &&
+        (subFrmObj->staticCfg.numRangeBins > 0U))
+    {
+        float minRangeBin = fovMinRange / subFrmObj->staticCfg.rangeStep;
+        float maxRangeBin =
+            (fovMaxRange / subFrmObj->staticCfg.rangeStep) + 0.5f;
+
+        if (minRangeBin >= (float)subFrmObj->staticCfg.numRangeBins)
+        {
+            navEnabled = 0U;
+        }
+        else
+        {
+            uint16_t cfarMinRangeBin = (uint16_t)minRangeBin;
+            uint16_t cfarMaxRangeBin;
+
+            if (maxRangeBin >= (float)subFrmObj->staticCfg.numRangeBins)
+            {
+                cfarMaxRangeBin = subFrmObj->staticCfg.numRangeBins - 1U;
+            }
+            else
+            {
+                cfarMaxRangeBin = (uint16_t)maxRangeBin;
+            }
+
+            if (navCfg.sourceCfg.minRangeBin < cfarMinRangeBin)
+            {
+                navCfg.sourceCfg.minRangeBin = cfarMinRangeBin;
+            }
+            if (navCfg.sourceCfg.maxRangeBin > cfarMaxRangeBin)
+            {
+                navCfg.sourceCfg.maxRangeBin = cfarMaxRangeBin;
+            }
+            if (navCfg.sourceCfg.minRangeBin > navCfg.sourceCfg.maxRangeBin)
+            {
+                navEnabled = 0U;
+            }
+        }
+    }
 
     /* If CLI aoaFovCfg is present, apply to navigation source config */
     if ((subFrmObj->dynCfg.fovAoaCfg.minAzimuthDeg != subFrmObj->dynCfg.fovAoaCfg.maxAzimuthDeg) &&
@@ -1075,6 +1116,14 @@ int32_t DPC_ObjectDetection_execute
         gNavPointCfg.sourceCfg.minElevationDeg = (int16_t)subFrmObj->dynCfg.fovAoaCfg.minElevationDeg;
         gNavPointCfg.sourceCfg.maxElevationDeg = (int16_t)subFrmObj->dynCfg.fovAoaCfg.maxElevationDeg;
     }
+    navCfg.sourceCfg.minAzimuthDeg =
+        gNavPointCfg.sourceCfg.minAzimuthDeg;
+    navCfg.sourceCfg.maxAzimuthDeg =
+        gNavPointCfg.sourceCfg.maxAzimuthDeg;
+    navCfg.sourceCfg.minElevationDeg =
+        gNavPointCfg.sourceCfg.minElevationDeg;
+    navCfg.sourceCfg.maxElevationDeg =
+        gNavPointCfg.sourceCfg.maxElevationDeg;
 
     /* Native C674x Two-Stage CASO-CFAR Peak Detector (Bypassing TI DPU CFAR HWA)
      * Scans detMatrix (256x32) directly on C674x DSP:
@@ -1209,7 +1258,7 @@ int32_t DPC_ObjectDetection_execute
 
         navStartCycles = Cycleprofiler_getTimeStamp();
         retVal = MmwDemo_NavPointGen_process(
-            &gNavPointCfg,
+            &navCfg,
             &navStaticCfg,
             gNavCandidateScratch,
             sizeof(gNavCandidateScratch),

@@ -89,6 +89,10 @@ static far int16_t gDenseAzSourceVQ15[MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS];
 #pragma DATA_ALIGN(gDenseAzValid, 8);
 static far uint8_t gDenseAzValid[MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS];
 
+#pragma DATA_SECTION(gDenseAzElevValid, ".l3ram");
+#pragma DATA_ALIGN(gDenseAzElevValid, 8);
+static far uint8_t gDenseAzElevValid[MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS];
+
 #pragma DATA_SECTION(gDenseOutputPriority, ".l3ram");
 #pragma DATA_ALIGN(gDenseOutputPriority, 8);
 static far uint32_t
@@ -696,6 +700,14 @@ static void MmwDemo_DenseElevation_processDoppler(
     float maxAzSin = sinf(cfg->maxAzimuthDeg * DENSE_PI / 180.0f);
     float minElevSin = sinf(cfg->minElevationDeg * DENSE_PI / 180.0f);
     float maxElevSin = sinf(cfg->maxElevationDeg * DENSE_PI / 180.0f);
+    float referenceAntNorm =
+        (gDenseRowAntCount[gDenseReferenceRow] > 0U) ?
+        (1.0f / ((float)gDenseRowAntCount[gDenseReferenceRow] *
+                 (float)gDenseRowAntCount[gDenseReferenceRow])) : 1.0f;
+    float elevationAntNorm =
+        (gDenseRowAntCount[gDenseElevationRow] > 0U) ?
+        (1.0f / ((float)gDenseRowAntCount[gDenseElevationRow] *
+                 (float)gDenseRowAntCount[gDenseElevationRow])) : 1.0f;
     uint32_t ant;
     uint32_t a;
     uint32_t row;
@@ -705,6 +717,7 @@ static void MmwDemo_DenseElevation_processDoppler(
 
     memset(gDenseAzPower, 0, sizeof(gDenseAzPower));
     memset(gDenseAzValid, 0, sizeof(gDenseAzValid));
+    memset(gDenseAzElevValid, 0, sizeof(gDenseAzElevValid));
     MmwDemo_DenseElevation_prepareSignal(candidate->index, staticCfg, signal);
 
     for (a = 0U; a < MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS; a++)
@@ -753,10 +766,13 @@ static void MmwDemo_DenseElevation_processDoppler(
             continue;
         }
 
-        /* Continuous elevation estimation from cross-row phase */
+        /* Normalize coherent row power by the number of elements before
+         * comparing rows with different antenna counts. */
         if ((elevationPower >= DENSE_MIN_POWER) &&
             (referencePower > 0.0f) &&
-            ((elevationPower / referencePower) >= DENSE_MIN_ELEVATION_ROW_RATIO))
+            ((elevationPower * elevationAntNorm) >=
+             (referencePower * referenceAntNorm *
+              DENSE_MIN_ELEVATION_ROW_RATIO)))
         {
             crossReal =
                 rowSum[gDenseReferenceRow].real * rowSum[gDenseElevationRow].real +
@@ -767,9 +783,10 @@ static void MmwDemo_DenseElevation_processDoppler(
             phase = atan2sp(crossImag, crossReal);
             v = phase / (DENSE_PI * (float)gDenseVerticalBaseline);
 
-            /* Clamp elevation within configured elevation FOV */
-            if (v < minElevSin) { v = minElevSin; }
-            if (v > maxElevSin) { v = maxElevSin; }
+            if ((v < minElevSin) || (v > maxElevSin))
+            {
+                continue;
+            }
 
             /* Ensure u^2 + v^2 <= 1.0f by clamping v if necessary */
             float maxV2 = 1.0f - (u * u);
@@ -783,10 +800,20 @@ static void MmwDemo_DenseElevation_processDoppler(
             {
                 v = 0.0f;
             }
+            if ((v < minElevSin) || (v > maxElevSin))
+            {
+                continue;
+            }
+            gDenseAzElevValid[a] = 1U;
         }
         else
         {
-            /* If elevation row signal is weak or secondary row ratio is below threshold, fallback to boresight horizontal */
+            /* Keep a boresight estimate only when zero elevation is in the
+             * configured FOV; do not let it affect measured height bounds. */
+            if ((0.0f < minElevSin) || (0.0f > maxElevSin))
+            {
+                continue;
+            }
             v = 0.0f;
         }
 
@@ -940,11 +967,9 @@ static void MmwDemo_DenseElevation_processDoppler(
             sumPower += pi;
             sumAz += (float)signedI * pi;
 
-            /* Accumulate weighted elevation estimate from every valid bin in
-             * the region. Bins without a valid elevation phase (gDenseAzValid
-             * cleared by the FOV or power quality filter) are excluded from
-             * the elevation statistics but still contribute to azimuth CoM. */
-            if (gDenseAzValid[i] != 0U)
+            /* Elevation-invalid bins may still contribute to azimuth CoM,
+             * but must not stretch the vertical extent toward boresight. */
+            if (gDenseAzElevValid[i] != 0U)
             {
                 float vi = (float)gDenseAzSourceVQ15[i] / 32767.0f;
                 sumVPower += vi * pi;
