@@ -7,7 +7,7 @@ TI single-chip 76–81 GHz FMCW radar sensor featuring an ARM Cortex-R4F (MSS), 
 The ARM Cortex-R4F core running TI-RTOS / SYS-BIOS, responsible for device initialization, RF BSS control via mmWaveLink, CLI command parsing on UART0 (`115200` baud), and assembling processed radar frame outputs into TLV packets on Data UART (`921600` baud).
 
 ## DSS (DSP Subsystem - TMS320C674x DSP)
-The fixed and floating-point C674x DSP running at 600 MHz, responsible for 2D Doppler FFT, CFAR detection, 3D Angle of Arrival (AoA) estimation, Dense Elevation analysis, and NavPoint candidate generation.
+The fixed and floating-point C674x DSP running at 600 MHz, responsible for 2D Doppler FFT, native two-stage CASO-CFAR, 3D Angle of Arrival (AoA) estimation, Dense Elevation analysis, and NavPoint candidate generation.
 
 ## DPC / DPU (Data Path Chain / Data Path Unit)
 The modular TI mmWave signal processing software architecture (`dpc/objectdetection`), where individual processing stages (RangeProc, DopplerProc, CFAR, AoA) are encapsulated as reusable units.
@@ -42,8 +42,7 @@ CLI command configuring parameters for the NavPoint algorithm (elevation limits,
 Spatial geometric representation of a detected obstacle cluster defined by 3D center position $(x, y, z)$, dimensions $(\text{width}_x, \text{depth}_y, \text{height}_z)$, radial velocity, and peak SNR.
 
 ## Two-Stage Detection Engine
-Detection pipeline where Stage 1 runs hardware CASO-CFAR (Cell Averaging Smallest Of) on HWA to eliminate target masking, and Stage 2 runs software spatial clustering on C674x DSP to delineate contiguous range-azimuth energy into bounding boxes.
+Detection pipeline where the C674x DSP applies range-domain CASO-CFAR across the detection matrix, then Doppler-domain CASO-CFAR for each accepted range (including zero-Doppler static returns), before Dense Elevation and NavPoint form obstacle boxes.
 
 ## Single Compact Bounding Box TLV
 High-rate stream exporting solely bounding box descriptors and SNR over UART without transmitting raw point cloud lists, minimizing UART payload bytes and maximizing frame rate for downstream Raspberry Pi obstacle avoidance.
-
