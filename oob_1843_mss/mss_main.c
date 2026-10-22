@@ -628,7 +628,7 @@
 #include "local_inc/mmw_output.h"
 #include "local_inc/mmw_res.h"
 #include "local_inc/mmw_mss.h"
-#include "nav_point_gen.h"
+#include "surface_gen.h"
 #include <ti/board/antenna_geometry.h>
 #include <ti/demo/utils/mmwdemo_flash.h>
 

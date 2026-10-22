@@ -1,11 +1,11 @@
 /**
- * @file nav_point_gen.h
+ * @file surface_gen.h
  *
- * @brief Frame-synchronous navigation point generation and wire ABI.
+ * @brief Frame-synchronous surface point generation and wire ABI.
  */
 
-#ifndef MMWDEMO_NAV_POINT_GEN_H
-#define MMWDEMO_NAV_POINT_GEN_H
+#ifndef SURFACE_GEN_H
+#define SURFACE_GEN_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -25,38 +25,45 @@ extern "C" {
 #define MMWDEMO_NAV_ECANDIDATE_PAYLOAD       (-103)
 
 /** Configuration is fully runtime supplied. Range bounds use [min,max]. */
-typedef struct MmwDemo_NavPointGen_Cfg_t
+typedef struct MmwDemo_SurfaceGen_Cfg_t
 {
     MmwDemo_DenseElevation_Cfg sourceCfg;
     float    minMovingSpeedMps;
     uint16_t maxSurfacePoints;
     uint16_t uartMaxSurfacePoints;
-} MmwDemo_NavPointGen_Cfg;
+} MmwDemo_SurfaceGen_Cfg;
 
-typedef struct MmwDemo_NavPointGen_StaticCfg_t
+typedef struct MmwDemo_SurfaceGen_StaticCfg_t
 {
     MmwDemo_DenseElevation_StaticCfg sourceStaticCfg;
     float rangeStepMeters;
     float dopplerStepMps;
     float framePeriodSec;
     float rangeBiasMeters;
-} MmwDemo_NavPointGen_StaticCfg;
+} MmwDemo_SurfaceGen_StaticCfg;
+
+/* Backwards-compatibility aliases */
+typedef MmwDemo_SurfaceGen_Cfg MmwDemo_NavPointGen_Cfg;
+typedef MmwDemo_SurfaceGen_StaticCfg MmwDemo_NavPointGen_StaticCfg;
 
 #include <ti/datapath/dpif/dpif_pointcloud.h>
 
-int32_t MmwDemo_NavPointGen_process(
-    const MmwDemo_NavPointGen_Cfg *cfg,
-    const MmwDemo_NavPointGen_StaticCfg *staticCfg,
+int32_t MmwDemo_SurfaceGen_process(
+    const MmwDemo_SurfaceGen_Cfg *cfg,
+    const MmwDemo_SurfaceGen_StaticCfg *staticCfg,
     uint8_t *candidateBuffer,
     uint32_t candidateBufferSize,
     MmwDemo_CustomObstacle *outObstacles,
     uint16_t maxOutputPoints,
     uint32_t *numPointsOut);
 
-void MmwDemo_NavPointGen_reset(void);
+void MmwDemo_SurfaceGen_reset(void);
+
+#define MmwDemo_NavPointGen_process MmwDemo_SurfaceGen_process
+#define MmwDemo_NavPointGen_reset   MmwDemo_SurfaceGen_reset
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* MMWDEMO_NAV_POINT_GEN_H */
+#endif /* SURFACE_GEN_H */

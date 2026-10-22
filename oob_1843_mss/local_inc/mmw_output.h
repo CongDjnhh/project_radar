@@ -188,6 +188,23 @@ typedef char ObstacleBoxSizeCheck[(sizeof(ObstacleBox) == 32U) ? 1 : -1];
 
 /**
  * @brief
+ *  Post-clustering obstacle target classification codes encoded in the high byte
+ *  of ObstacleBox.boxId: ((uint16_t)classType << 8) | (rawBoxId & 0x00FFU).
+ */
+#define MMWDEMO_OBSTACLE_CLASS_UNKNOWN      (0U)
+#define MMWDEMO_OBSTACLE_CLASS_DRONE        (1U)
+#define MMWDEMO_OBSTACLE_CLASS_PEDESTRIAN   (2U)
+#define MMWDEMO_OBSTACLE_CLASS_VEHICLE      (3U)
+
+#define MMWDEMO_PACK_OBSTACLE_BOX_ID(classType, rawId) \
+    ((int16_t)((((uint16_t)(classType) & 0x00FFU) << 8U) | ((uint16_t)(rawId) & 0x00FFU)))
+#define MMWDEMO_UNPACK_OBSTACLE_CLASS(boxId) \
+    ((uint8_t)(((uint16_t)(boxId) >> 8U) & 0x00FFU))
+#define MMWDEMO_UNPACK_OBSTACLE_TRACK_ID(boxId) \
+    ((uint8_t)((uint16_t)(boxId) & 0x00FFU))
+
+/**
+ * @brief
  *  Size of HSRAM Payload data array.
  */
 #define MMWDEMO_HSRAM_PAYLOAD_SIZE (1024)

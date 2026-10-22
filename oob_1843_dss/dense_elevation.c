@@ -28,6 +28,9 @@
  * than 16 dB below the reference row. This is a phase-quality check, not an
  * elevation-angle or occupancy threshold. */
 #define DENSE_MIN_ELEVATION_ROW_RATIO    (0.025118864f)
+/* Maximum number of occupied range bins permitted to regenerate Doppler FFT per frame.
+ * Hard-limits C674x DSP cycle consumption to guarantee zero frame-overruns under heavy clutter. */
+#define MMWDEMO_DENSE_ELEV_MAX_DOPPLER_FFT_RANGES (16U)
 
 /* DSP_fft16x16 is provided by dsplib.ae64P, already linked by the demo. */
 extern void DSP_fft16x16(const short * restrict ptrW,
@@ -680,7 +683,6 @@ static void MmwDemo_DenseElevation_insertOutput(
     }
 }
 
-#pragma CODE_SECTION(MmwDemo_DenseElevation_processDoppler, ".l1psram");
 static void MmwDemo_DenseElevation_processDoppler(
     uint16_t rangeIdx,
     const MmwDemo_DenseDopplerCandidate *candidate,
@@ -1183,6 +1185,7 @@ int32_t MmwDemo_DenseElevation_process(
     
     {
         uint32_t p;
+        uint16_t rangesFftCount = 0U;
         memset(gDenseRangeFftDone, 0, sizeof(gDenseRangeFftDone));
         
         for (p = 0U; p < staticCfg->numCfarPeaks; p++)
@@ -1198,11 +1201,28 @@ int32_t MmwDemo_DenseElevation_process(
             }
 
             /* Complex Doppler symbols are regenerated only for occupied ranges.
-             * One FFT per antenna supplies every selected Doppler candidate. */
-            if (rngIdx < sizeof(gDenseRangeFftDone) && gDenseRangeFftDone[rngIdx] == 0U)
+             * One FFT per antenna supplies every selected Doppler candidate.
+             * Hard-limited to MMWDEMO_DENSE_ELEV_MAX_DOPPLER_FFT_RANGES (16) to protect frame timing budget. */
+            if (rngIdx < sizeof(gDenseRangeFftDone))
             {
-                MmwDemo_DenseElevation_dopplerFftForRange(rngIdx, staticCfg);
-                gDenseRangeFftDone[rngIdx] = 1U;
+                if (gDenseRangeFftDone[rngIdx] == 0U)
+                {
+                    if (rangesFftCount < MMWDEMO_DENSE_ELEV_MAX_DOPPLER_FFT_RANGES)
+                    {
+                        MmwDemo_DenseElevation_dopplerFftForRange(rngIdx, staticCfg);
+                        gDenseRangeFftDone[rngIdx] = 1U;
+                        rangesFftCount++;
+                    }
+                    else
+                    {
+                        /* Frame budget reached; skip regeneration for additional range bins */
+                        continue;
+                    }
+                }
+            }
+            else
+            {
+                continue;
             }
 
             candidate.index = dopIdx;
@@ -1211,59 +1231,6 @@ int32_t MmwDemo_DenseElevation_process(
                 rngIdx, &candidate, cfg, staticCfg,
                 output, outputCapacity, &outputCount,
                 sectorCount, &outputLimited);
-        }
-
-        /* Fallback: if TI CFAR produced 0 samples (e.g. stationary target where Doppler gating
-         * rejected all peaks), scan detMatrix directly across minRange..maxRange to guarantee
-         * UAV obstacle perception never starves. */
-        if ((outputCount == 0U) && (staticCfg->detMatrix.data != NULL))
-        {
-            const uint16_t *detMatrix = (const uint16_t *)staticCfg->detMatrix.data;
-            uint16_t range;
-            uint16_t numDoppler = staticCfg->numDopplerBins;
-            uint16_t fallbackRangesDone = 0U;
-
-            for (range = minRange; (range <= maxRange) && (fallbackRangesDone < 24U); range++)
-            {
-                const uint16_t *detRow = &detMatrix[(uint32_t)range * numDoppler];
-                uint32_t sumQ8 = 0U;
-                uint16_t d;
-                uint16_t maxVal = 0U;
-                uint16_t maxDop = 0U;
-                uint16_t avgNoise;
-
-                for (d = 0U; d < numDoppler; d++)
-                {
-                    uint16_t val = detRow[d];
-                    sumQ8 += (uint32_t)val;
-                    if (val > maxVal)
-                    {
-                        maxVal = val;
-                        maxDop = d;
-                    }
-                }
-                avgNoise = (uint16_t)(sumQ8 / numDoppler);
-
-                /* Minimum SNR threshold in Q8: 6 dB = 256, 7 dB ~ 300 */
-                if (maxVal > (avgNoise + 300U))
-                {
-                    MmwDemo_DenseDopplerCandidate candidate;
-                    candidate.index = maxDop;
-                    candidate.snrDb10 = (uint16_t)(((uint32_t)(maxVal - avgNoise) * 60U) / 256U);
-
-                    if (range < sizeof(gDenseRangeFftDone) && gDenseRangeFftDone[range] == 0U)
-                    {
-                        MmwDemo_DenseElevation_dopplerFftForRange(range, staticCfg);
-                        gDenseRangeFftDone[range] = 1U;
-                    }
-
-                    MmwDemo_DenseElevation_processDoppler(
-                        range, &candidate, cfg, staticCfg,
-                        output, outputCapacity, &outputCount,
-                        sectorCount, &outputLimited);
-                    fallbackRangesDone++;
-                }
-            }
         }
     }
 

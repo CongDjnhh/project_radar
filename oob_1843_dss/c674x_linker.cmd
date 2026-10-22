@@ -91,20 +91,20 @@ SECTIONS
        and allowed to overflow into Z and cannot be split from Y to Z. Some sections
        like bss are not allowed to be split so > notation is used for them */
 
-    .fardata:  {} >> L2SRAM_UMAP0 | L2SRAM_UMAP1 | L3SRAM
-    .const:    {} >> L2SRAM_UMAP0 | L2SRAM_UMAP1 | L3SRAM
-    .switch:   {} >> L2SRAM_UMAP0 | L2SRAM_UMAP1 | L3SRAM
-    .cio:      {} >> L2SRAM_UMAP0 | L2SRAM_UMAP1 | L3SRAM
-    .data:     {} >> L2SRAM_UMAP0 | L2SRAM_UMAP1 | L3SRAM
+    .fardata:  {} >> L2SRAM_UMAP0 | L2SRAM_UMAP1
+    .const:    {} >> L2SRAM_UMAP0 | L2SRAM_UMAP1
+    .switch:   {} >> L2SRAM_UMAP0 | L2SRAM_UMAP1
+    .cio:      {} >> L2SRAM_UMAP0 | L2SRAM_UMAP1
+    .data:     {} >> L2SRAM_UMAP0 | L2SRAM_UMAP1
 
-    .rodata:   {} > L2SRAM_UMAP0 | L2SRAM_UMAP1 | L3SRAM
+    .rodata:   {} > L2SRAM_UMAP0 | L2SRAM_UMAP1
     GROUP {
         .bss:      {}
         .neardata: {}
-    } > L2SRAM_UMAP0 | L2SRAM_UMAP1 | L3SRAM
-    .stack:    {} > L2SRAM_UMAP0 | L2SRAM_UMAP1 | L3SRAM
-    .cinit:    {} > L2SRAM_UMAP0 | L2SRAM_UMAP1 | L3SRAM
-    .far:      {} > L2SRAM_UMAP0 | L2SRAM_UMAP1 | L3SRAM
+    } > L2SRAM_UMAP0 | L2SRAM_UMAP1
+    .stack:    {} > L2SRAM_UMAP0 | L2SRAM_UMAP1
+    .cinit:    {} > L2SRAM_UMAP0 | L2SRAM_UMAP1
+    .far:      {} > L2SRAM_UMAP0 | L2SRAM_UMAP1
 
-    .text: {} >> L2SRAM_UMAP1 | L2SRAM_UMAP0 | L3SRAM
+    .text: {} >> L2SRAM_UMAP1 | L2SRAM_UMAP0
 }

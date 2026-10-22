@@ -101,12 +101,8 @@ uint8_t gMmwL3[SOC_L3RAM_SIZE - MMWDEMO_DENSE_L3_RESERVE_SIZE];
 #endif
 #pragma DATA_SECTION(gMmwL3, ".l3ram");
 
- /*! L2 RAM buffer for object detection DPC */
-#define MMWDEMO_OBJDET_L1RAM_SIZE (16U * 1024U)
-#define MMWDEMO_OBJDET_L2RAM_SIZE (60U * 1024U)
-uint8_t gDPC_ObjDetL1Heap[MMWDEMO_OBJDET_L1RAM_SIZE];
-#pragma DATA_ALIGN(gDPC_ObjDetL1Heap, 4096U);
-#pragma DATA_SECTION(gDPC_ObjDetL1Heap, ".dpc_l1Heap");
+ /*! L2 RAM buffer for object detection DPC (actual peak usage is ~17.4 KB) */
+#define MMWDEMO_OBJDET_L2RAM_SIZE (36U * 1024U)
 uint8_t gDPC_ObjDetL2Heap[MMWDEMO_OBJDET_L2RAM_SIZE];
 #ifndef SOC_XWR68XX
 /* EDMA 4K silicon bug related : Align heap to 4K address boundary so that

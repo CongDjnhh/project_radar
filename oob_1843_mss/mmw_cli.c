@@ -70,7 +70,7 @@
 #include <ti/utils/hsiheader/hsiheader.h>
 
 #include <ti/utils/mathutils/mathutils.h>
-#include "nav_point_gen.h"
+#include "surface_gen.h"
 
 #ifndef MMWDEMO_ENABLE_LEGACY_CFAR_AOA
 #define MMWDEMO_ENABLE_LEGACY_CFAR_AOA (1)

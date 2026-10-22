@@ -1,5 +1,5 @@
 /**
- * @file nav_point_gen.c
+ * @file surface_gen.c
  *
  * @brief Per-frame surface point generation and nearest-surface reduction.
  *
@@ -13,7 +13,7 @@
 
 #include <ti/utils/cycleprofiler/cycle_profiler.h>
 
-#include "nav_point_gen.h"
+#include "surface_gen.h"
 
 extern volatile uint32_t gNavDbgDenseSamples;
 extern volatile uint32_t gNavDbgFilteredSamples;
@@ -95,6 +95,30 @@ static MmwDemo_NavClusterAcc gNavClusterAcc[MMWDEMO_NAV_CLUSTER_MAX_BOXES];
 #pragma DATA_ALIGN(gNavRawBoxes, 8)
 static ObstacleBox gNavRawBoxes[MMWDEMO_NAV_CLUSTER_MAX_BOXES];
 
+#pragma DATA_SECTION(gNavMatchedCurr, ".navScratch")
+#pragma DATA_ALIGN(gNavMatchedCurr, 4)
+static uint8_t gNavMatchedCurr[MMWDEMO_NAV_CLUSTER_MAX_BOXES];
+
+#pragma DATA_SECTION(gNavMatchedPersist, ".navScratch")
+#pragma DATA_ALIGN(gNavMatchedPersist, 4)
+static uint8_t gNavMatchedPersist[MMWDEMO_NAV_PERSIST_MAX_OBSTACLES];
+
+#pragma DATA_SECTION(gNavPredictedX, ".navScratch")
+#pragma DATA_ALIGN(gNavPredictedX, 8)
+static float gNavPredictedX[MMWDEMO_NAV_PERSIST_MAX_OBSTACLES];
+
+#pragma DATA_SECTION(gNavPredictedY, ".navScratch")
+#pragma DATA_ALIGN(gNavPredictedY, 8)
+static float gNavPredictedY[MMWDEMO_NAV_PERSIST_MAX_OBSTACLES];
+
+#pragma DATA_SECTION(gNavMovementX, ".navScratch")
+#pragma DATA_ALIGN(gNavMovementX, 8)
+static float gNavMovementX[MMWDEMO_NAV_PERSIST_MAX_OBSTACLES];
+
+#pragma DATA_SECTION(gNavMovementY, ".navScratch")
+#pragma DATA_ALIGN(gNavMovementY, 8)
+static float gNavMovementY[MMWDEMO_NAV_PERSIST_MAX_OBSTACLES];
+
 /* Cycle profiling for emitSurface. Read via CCS watch to assess execution cost. */
 volatile uint32_t gNavEmitSurfaceCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 volatile uint32_t gNavEmitSurfaceMaxCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
@@ -115,24 +139,24 @@ static int16_t MmwDemo_NavCluster_find(int16_t *parent, int16_t i)
     return root;
 }
 
-static uint16_t MmwDemo_NavPointGen_updatePersistence(
+static uint16_t MmwDemo_SurfaceGen_updatePersistence(
     const ObstacleBox *currBoxes,
     uint16_t numCurr,
     ObstacleBox *outBoxes,
     uint16_t maxOutput,
-    const MmwDemo_NavPointGen_StaticCfg *staticCfg)
+    const MmwDemo_SurfaceGen_StaticCfg *staticCfg)
 {
     uint16_t p, c;
-    uint8_t matchedCurr[MMWDEMO_NAV_CLUSTER_MAX_BOXES];
-    uint8_t matchedPersist[MMWDEMO_NAV_PERSIST_MAX_OBSTACLES];
-    float predictedX[MMWDEMO_NAV_PERSIST_MAX_OBSTACLES];
-    float predictedY[MMWDEMO_NAV_PERSIST_MAX_OBSTACLES];
-    float movementX[MMWDEMO_NAV_PERSIST_MAX_OBSTACLES];
-    float movementY[MMWDEMO_NAV_PERSIST_MAX_OBSTACLES];
+    uint8_t *matchedCurr = gNavMatchedCurr;
+    uint8_t *matchedPersist = gNavMatchedPersist;
+    float *predictedX = gNavPredictedX;
+    float *predictedY = gNavPredictedY;
+    float *movementX = gNavMovementX;
+    float *movementY = gNavMovementY;
     uint16_t outCount = 0U;
 
-    memset(matchedCurr, 0, sizeof(matchedCurr));
-    memset(matchedPersist, 0, sizeof(matchedPersist));
+    memset(matchedCurr, 0, sizeof(gNavMatchedCurr));
+    memset(matchedPersist, 0, sizeof(gNavMatchedPersist));
 
     /* Predict each track once so association compares detections against the
      * position the obstacle is expected to occupy in this frame. */
@@ -314,24 +338,51 @@ static uint16_t MmwDemo_NavPointGen_updatePersistence(
         }
     }
 
-    /* Assign canonical sequential box IDs after sorting */
+    /* Assign canonical sequential box IDs after sorting and classify obstacle targets */
     {
         uint16_t i;
         for (i = 0U; i < outCount; i++)
         {
-            outBoxes[i].boxId = (int16_t)(i + 1U);
+            ObstacleBox *obs = &outBoxes[i];
+            uint8_t classType = MMWDEMO_OBSTACLE_CLASS_UNKNOWN;
+            uint8_t rawId = (uint8_t)((i < 255U) ? (i + 1U) : 255U);
+
+            /* Rule 1: Drone (Compact 3D footprint, airborne elevation) */
+            if ((obs->width_x <= 1.0f) && (obs->depth_y <= 1.0f) &&
+                (obs->height_z <= 0.6f) && (obs->z >= 0.4f))
+            {
+                classType = MMWDEMO_OBSTACLE_CLASS_DRONE;
+            }
+            /* Rule 2: Pedestrian (Narrow horizontal footprint, tall vertical extent, ground-linked) */
+            else if ((obs->width_x <= 0.9f) && (obs->depth_y <= 0.9f) &&
+                     (obs->height_z >= 1.0f) && (obs->z <= 0.5f))
+            {
+                classType = MMWDEMO_OBSTACLE_CLASS_PEDESTRIAN;
+            }
+            /* Rule 3: Vehicle (Large horizontal extent and high radar cross-section / SNR) */
+            else if (((obs->width_x >= 1.1f) || (obs->depth_y >= 1.5f)) &&
+                     (obs->snr >= 200))
+            {
+                classType = MMWDEMO_OBSTACLE_CLASS_VEHICLE;
+            }
+            else
+            {
+                classType = MMWDEMO_OBSTACLE_CLASS_UNKNOWN;
+            }
+
+            obs->boxId = MMWDEMO_PACK_OBSTACLE_BOX_ID(classType, rawId);
         }
     }
 
     return outCount;
 }
 
-static uint16_t MmwDemo_NavPointGen_emitObstacleBoxes(
+static uint16_t MmwDemo_SurfaceGen_emitObstacleBoxes(
     const MmwDemo_DenseElevation_OutputSample *samples,
     uint16_t sampleCount,
     uint16_t maxOutput,
     ObstacleBox *outObstacles,
-    const MmwDemo_NavPointGen_StaticCfg *staticCfg)
+    const MmwDemo_SurfaceGen_StaticCfg *staticCfg)
 {
     uint16_t N = (sampleCount > MMWDEMO_NAV_CLUSTER_MAX_SAMPLES) ?
                  MMWDEMO_NAV_CLUSTER_MAX_SAMPLES : sampleCount;
@@ -609,25 +660,25 @@ static uint16_t MmwDemo_NavPointGen_emitObstacleBoxes(
     }
 
     /* Update multi-frame persistence: fail-open for new obstacles, preserve confirmed ones */
-    return MmwDemo_NavPointGen_updatePersistence(gNavRawBoxes, limit, outObstacles, maxOutput, staticCfg);
+    return MmwDemo_SurfaceGen_updatePersistence(gNavRawBoxes, limit, outObstacles, maxOutput, staticCfg);
 }
 
-static uint16_t MmwDemo_NavPointGen_emitSurface(
+static uint16_t MmwDemo_SurfaceGen_emitSurface(
     const MmwDemo_DenseElevation_OutputSample *samples,
     uint16_t sampleCount,
     uint16_t maxOutput,
     ObstacleBox *outObstacles,
-    const MmwDemo_NavPointGen_StaticCfg *staticCfg,
+    const MmwDemo_SurfaceGen_StaticCfg *staticCfg,
     uint16_t *availableCount)
 {
     *availableCount = sampleCount;
-    return MmwDemo_NavPointGen_emitObstacleBoxes(
+    return MmwDemo_SurfaceGen_emitObstacleBoxes(
         samples, sampleCount, maxOutput, outObstacles, staticCfg);
 }
 
-int32_t MmwDemo_NavPointGen_process(
-    const MmwDemo_NavPointGen_Cfg *cfg,
-    const MmwDemo_NavPointGen_StaticCfg *staticCfg,
+int32_t MmwDemo_SurfaceGen_process(
+    const MmwDemo_SurfaceGen_Cfg *cfg,
+    const MmwDemo_SurfaceGen_StaticCfg *staticCfg,
     uint8_t *candidateBuffer,
     uint32_t candidateBufferSize,
     MmwDemo_CustomObstacle *outObstacles,
@@ -714,7 +765,7 @@ int32_t MmwDemo_NavPointGen_process(
     gNavDbgDenseSamples = (uint32_t)candidateHeader->numSamples;
 
     emitSurfaceStartCycles = Cycleprofiler_getTimeStamp();
-    *numPointsOut = (uint32_t)MmwDemo_NavPointGen_emitSurface(
+    *numPointsOut = (uint32_t)MmwDemo_SurfaceGen_emitSurface(
         samples, candidateHeader->numSamples, maxSurface,
         outObstacles, staticCfg,
         &surfaceAvailable);
@@ -735,7 +786,7 @@ int32_t MmwDemo_NavPointGen_process(
     return 0;
 }
 
-void MmwDemo_NavPointGen_reset(void)
+void MmwDemo_SurfaceGen_reset(void)
 {
     memset(gNavPersistList, 0, sizeof(gNavPersistList));
 }

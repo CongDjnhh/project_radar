@@ -70,9 +70,8 @@
 #include <ti/control/dpm/dpm.h>
 #include <ti/board/antenna_geometry.h>
 #include "dense_elevation.h"
-#include "nav_point_gen.h"
+#include "surface_gen.h"
 #include "local_inc/mmw_output.h"
-#include "two_stage_caso_cfar.h"
 
 #pragma DATA_SECTION(gNavCandidateScratch, ".l3ram");
 #pragma DATA_ALIGN(gNavCandidateScratch, 8);
@@ -108,7 +107,7 @@ static uint32_t gNavTrackingPeriodUsec[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 static uint8_t gNavSurfaceEnabledSubFrameMask = 0xFF;
 
 
-MmwDemo_NavPointGen_Cfg gNavPointCfg = {
+MmwDemo_SurfaceGen_Cfg gNavPointCfg = {
     .sourceCfg = {
         .minElevationDeg = -90.0f,
         .maxElevationDeg = 90.0f,
@@ -913,8 +912,8 @@ int32_t DPC_ObjectDetection_execute
     uint32_t navProcessingCycles = 0U;
     MmwDemo_DenseElevation_StaticCfg denseStaticCfg;
     DPU_AoAProc_compRxChannelBiasCfg denseCompRxCfg;
-    MmwDemo_NavPointGen_Cfg navCfg;
-    MmwDemo_NavPointGen_StaticCfg navStaticCfg;
+    MmwDemo_SurfaceGen_Cfg navCfg;
+    MmwDemo_SurfaceGen_StaticCfg navStaticCfg;
     MmwDemo_NavCliCfg navSharedCfg;
     volatile const MmwDemo_NavCliCfg *navShared;
     uint8_t navCfgSeqBefore;
@@ -1125,28 +1124,22 @@ int32_t DPC_ObjectDetection_execute
     navCfg.sourceCfg.maxElevationDeg =
         gNavPointCfg.sourceCfg.maxElevationDeg;
 
-    /* Native C674x Two-Stage CASO-CFAR Peak Detector (Bypassing TI DPU CFAR HWA)
-     * Scans detMatrix (256x32) directly on C674x DSP:
-     * Stage 1: Range Domain CASO-CFAR across CLI configured range span
-     * Stage 2: Doppler Domain CASO-CFAR per valid range cell without starving static reflectors. */
-    retVal = MmwDemo_TwoStageCasoCfar_process(
-        &subFrmObj->dpuCfg.dopplerCfg.hwRes.detMatrix,
-        subFrmObj->staticCfg.numRangeBins,
-        subFrmObj->staticCfg.numDopplerBins,
-        subFrmObj->staticCfg.rangeStep,
-        fovMinRange,
-        fovMaxRange,
-        (subFrmObj->dynCfg.cfarCfgRange.thresholdScale > 0U) ? &subFrmObj->dynCfg.cfarCfgRange : NULL,
-        (subFrmObj->dynCfg.cfarCfgDoppler.thresholdScale > 0U) ? &subFrmObj->dynCfg.cfarCfgDoppler : NULL,
-        subFrmObj->dpuCfg.cfarCfg.res.cfarRngDopSnrList,
-        subFrmObj->dpuCfg.cfarCfg.res.cfarRngDopSnrListSize,
-        &outCfarcaProc.numCfarDetectedPoints);
+    if (subFrmObj->isAoAHWAparamSetOverlappedWithCFAR == true)
+    {
+        retVal = DPU_CFARCAProcHWA_config(subFrmObj->dpuCFARCAObj, &subFrmObj->dpuCfg.cfarCfg);
+        if (retVal != 0)
+        {
+            goto exit;
+        }
+    }
+
+    retVal = DPU_CFARCAProcHWA_process(subFrmObj->dpuCFARCAObj, &outCfarcaProc);
     if (retVal != 0)
     {
         goto exit;
     }
 
-    DebugP_log1("ObjDet DPC: number of detected objects after Two-Stage CASO-CFAR = %d\n",
+    DebugP_log1("ObjDet DPC: number of detected objects after HWA CFAR = %d\n",
                 outCfarcaProc.numCfarDetectedPoints);
 
 #if MMWDEMO_ENABLE_LEGACY_CFAR_AOA
@@ -1257,7 +1250,7 @@ int32_t DPC_ObjectDetection_execute
         }
 
         navStartCycles = Cycleprofiler_getTimeStamp();
-        retVal = MmwDemo_NavPointGen_process(
+        retVal = MmwDemo_SurfaceGen_process(
             &navCfg,
             &navStaticCfg,
             gNavCandidateScratch,
@@ -1463,7 +1456,7 @@ static int32_t DPC_ObjectDetection_start (DPM_DPCHandle handle)
     gNavSurfaceEnabledSubFrameMask = (pNavInitCfg->enabledSurfaceMask != 0U) ? pNavInitCfg->enabledSurfaceMask : 0xFF;
 
     MmwDemo_DenseElevation_reset();
-    MmwDemo_NavPointGen_reset();
+    MmwDemo_SurfaceGen_reset();
 
     /* Start marks consumption of all pre-start configs, reset the flag to check
      * if pre-starts were issued only after common config was issued for the next
