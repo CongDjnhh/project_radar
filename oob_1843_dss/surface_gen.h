@@ -16,8 +16,8 @@
 extern "C" {
 #endif
 
-#define MMWDEMO_NAV_MAX_SURFACE_POINTS       (256U)
-#define MMWDEMO_NAV_MAX_OBSTACLE_BOXES       (256U)
+#define MMWDEMO_NAV_MAX_SURFACE_POINTS       (MMWDEMO_SURFACE_MAX_BOXES)
+#define MMWDEMO_NAV_MAX_OBSTACLE_BOXES       (MMWDEMO_SURFACE_MAX_BOXES)
 #define MMWDEMO_NAV_NUM_AZIMUTH_SECTORS      (8U)
 #define MMWDEMO_NAV_NUM_ELEVATION_SECTORS    (64U)
 
@@ -40,6 +40,11 @@ typedef struct MmwDemo_SurfaceGen_StaticCfg_t
     float dopplerStepMps;
     float framePeriodSec;
     float rangeBiasMeters;
+    float minRangeMeters;
+    float maxRangeMeters;
+    uint32_t elapsedUsec;
+    uint8_t motionMode;
+    MmwDemo_SurfaceStatus *status;
 } MmwDemo_SurfaceGen_StaticCfg;
 
 /* Backwards-compatibility aliases */
@@ -58,6 +63,14 @@ int32_t MmwDemo_SurfaceGen_process(
     uint32_t *numPointsOut);
 
 void MmwDemo_SurfaceGen_reset(void);
+void MmwDemo_SurfaceGen_resetSubFrame(uint16_t subFrame);
+
+/* Pure post-processing entry point, also used by target fixtures.
+ * Input samples remain unchanged; frame-local index scratch lives in L3. */
+int32_t MmwDemo_SurfaceGen_cluster(
+    const MmwDemo_DenseElevation_OutputSample *samples, uint16_t sampleCount,
+    const MmwDemo_SurfaceGen_StaticCfg *staticCfg,
+    ObstacleBox *outBoxes, uint16_t capacity, uint32_t *count);
 
 #define MmwDemo_NavPointGen_process MmwDemo_SurfaceGen_process
 #define MmwDemo_NavPointGen_reset   MmwDemo_SurfaceGen_reset

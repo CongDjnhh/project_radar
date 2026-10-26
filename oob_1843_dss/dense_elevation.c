@@ -28,9 +28,6 @@
  * than 16 dB below the reference row. This is a phase-quality check, not an
  * elevation-angle or occupancy threshold. */
 #define DENSE_MIN_ELEVATION_ROW_RATIO    (0.025118864f)
-/* Maximum number of occupied range bins permitted to regenerate Doppler FFT per frame.
- * Hard-limits C674x DSP cycle consumption to guarantee zero frame-overruns under heavy clutter. */
-#define MMWDEMO_DENSE_ELEV_MAX_DOPPLER_FFT_RANGES (16U)
 
 /* DSP_fft16x16 is provided by dsplib.ae64P, already linked by the demo. */
 extern void DSP_fft16x16(const short * restrict ptrW,
@@ -101,8 +98,10 @@ static far uint8_t gDenseAzElevValid[MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS];
 static far uint32_t
     gDenseOutputPriority[MMWDEMO_DENSE_ELEV_MAX_OUTPUT_SAMPLES];
 
-#pragma DATA_SECTION(gDenseRangeFftDone, ".l3ram");
-static far uint8_t gDenseRangeFftDone[1024];
+#pragma DATA_SECTION(gDenseRangeStart, ".l3ram");
+static far uint16_t gDenseRangeStart[MMWDEMO_DENSE_ELEV_MAX_RANGE_BINS + 1U];
+#pragma DATA_SECTION(gDenseCfarOrder, ".l3ram");
+static far uint16_t gDenseCfarOrder[MMWDEMO_DENSE_ELEV_MAX_CFAR_PEAKS];
 
 #pragma DATA_SECTION(gDenseTdmComp, ".l3ram");
 #pragma DATA_ALIGN(gDenseTdmComp, 8);
@@ -268,7 +267,8 @@ static int32_t MmwDemo_DenseElevation_configure(
     {
         return MMWDEMO_DENSE_EANTENNA_CFG;
     }
-    if (cfg->numRangeBins == 0U)
+    if ((cfg->numRangeBins == 0U) ||
+        (cfg->numRangeBins > MMWDEMO_DENSE_ELEV_MAX_RANGE_BINS))
     {
         return MMWDEMO_DENSE_ERANGE_CFG;
     }
@@ -923,7 +923,6 @@ static void MmwDemo_DenseElevation_processDoppler(
         float v_max = -1.0f;
         float u_cm, u_width;
         float v_cm, v_width;
-        uint16_t distance;
         int32_t i;
         MmwDemo_DenseElevation_OutputSample sample;
 
@@ -934,7 +933,8 @@ static void MmwDemo_DenseElevation_processDoppler(
             {
                 nextLeft += MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
             }
-            if ((gDenseAzValid[nextLeft] == 0U) ||
+            if (((left == 32) && (nextLeft == 31)) ||
+                (gDenseAzValid[nextLeft] == 0U) ||
                 (gDenseAzPower[nextLeft] < powerDropThreshold) ||
                 (MmwDemo_DenseElevation_circularDistance((uint16_t)azimuth, (uint16_t)nextLeft, MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS) > 12U))
             {
@@ -950,7 +950,8 @@ static void MmwDemo_DenseElevation_processDoppler(
             {
                 nextRight -= MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
             }
-            if ((gDenseAzValid[nextRight] == 0U) ||
+            if (((right == 31) && (nextRight == 32)) ||
+                (gDenseAzValid[nextRight] == 0U) ||
                 (gDenseAzPower[nextRight] < powerDropThreshold) ||
                 (MmwDemo_DenseElevation_circularDistance((uint16_t)azimuth, (uint16_t)nextRight, MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS) > 12U))
             {
@@ -1005,13 +1006,18 @@ static void MmwDemo_DenseElevation_processDoppler(
         {
             u_cm = 2.0f * (float)signedA / (float)MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
         }
-        distance = MmwDemo_DenseElevation_circularDistance((uint16_t)left, (uint16_t)right,
-                       MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS);
-        if (distance == 0U)
         {
-            distance = 1U;
+            int32_t signedLeft = (left < 32) ? left : left - 64;
+            int32_t signedRight = (right < 32) ? right : right - 64;
+            float lo = fmaxf(-1.0f, (2.0f * (float)signedLeft - 1.0f) / 64.0f);
+            float hi = fminf(1.0f, (2.0f * (float)signedRight + 1.0f) / 64.0f);
+            float halfWidth = fmaxf(u_cm - lo, hi - u_cm);
+            u_width = 2.0f * halfWidth;
+            if (u_width > 2.0f) {
+                u_cm = 0.5f * (lo + hi);
+                u_width = hi - lo;
+            }
         }
-        u_width = 2.0f * (float)distance / (float)MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
 
         /* Elevation weighted centroid and span across the region.
          * v_cm  : sub-bin accurate elevation using all valid bins in region.
@@ -1022,7 +1028,12 @@ static void MmwDemo_DenseElevation_processDoppler(
         if (sumVValid > 0.0f)
         {
             v_cm    = sumVPower / sumVValid;
-            v_width = (v_max >= v_min) ? (v_max - v_min) : 0.0f;
+            v_width = (v_max >= v_min) ?
+                2.0f * fmaxf(v_cm - v_min, v_max - v_cm) : 0.0f;
+            if (v_width > 2.0f) {
+                v_cm = 0.5f * (v_min + v_max);
+                v_width = v_max - v_min;
+            }
         }
         else
         {
@@ -1045,7 +1056,9 @@ static void MmwDemo_DenseElevation_processDoppler(
         sample.reserved0          = 0U;
         sample.dopplerIdx         = (int16_t)signedD;
         sample.azimuthUQ15        = (int16_t)(u_cm * 32767.0f);
-        sample.azimuthWidthUQ15   = (uint16_t)(u_width * 32767.0f);
+        /* Round outward and cover center truncation, preserving support. */
+        sample.azimuthWidthUQ15   = (uint16_t)fminf(65535.0f,
+            ceilf(u_width * 32767.0f + 2.0f));
         sample.snrDb10            = candidate->snrDb10;
         /* sourceVQ15: weighted elevation centroid over the full 6-dB azimuth
          * region, not just the peak bin. Improves accuracy on extended
@@ -1053,7 +1066,8 @@ static void MmwDemo_DenseElevation_processDoppler(
         sample.sourceVQ15         = MmwDemo_DenseElevation_sourceVToQ15(v_cm);
         /* elevationWidthUQ15: span of sin(elevation) across the region.
          * Encodes the physical height extent of the reflecting surface. */
-        sample.elevationWidthUQ15 = (uint16_t)(v_width * 32767.0f);
+        sample.elevationWidthUQ15 = (uint16_t)fminf(65535.0f,
+            ceilf(v_width * 32767.0f + 2.0f));
         sample.reserved1          = 0U;
         {
             float power = gDenseAzPower[azimuth];
@@ -1118,6 +1132,8 @@ int32_t MmwDemo_DenseElevation_process(
                      MMWDEMO_DENSE_FLAG_FRAME_COMPLETE |
                      MMWDEMO_DENSE_FLAG_AZIMUTH_NMS;
     uint8_t outputLimited = 0U;
+    uint16_t processedCfar = 0U;
+    uint16_t processedRanges = 0U;
     uint32_t processingStartCycles;
     uint32_t processingCycles;
     int32_t configureError;
@@ -1147,6 +1163,12 @@ int32_t MmwDemo_DenseElevation_process(
     if (configureError != 0)
     {
         return configureError;
+    }
+    if ((staticCfg->numCfarPeaks > MMWDEMO_DENSE_ELEV_MAX_CFAR_PEAKS) ||
+        ((staticCfg->numCfarPeaks != 0U) &&
+         (staticCfg->cfarRngDopSnrList == NULL)))
+    {
+        return MMWDEMO_DENSE_EINVAL;
     }
 
     outputCapacity = (uint16_t)((outBufferSize - sizeof(*header)) /
@@ -1185,52 +1207,68 @@ int32_t MmwDemo_DenseElevation_process(
     
     {
         uint32_t p;
-        uint16_t rangesFftCount = 0U;
-        memset(gDenseRangeFftDone, 0, sizeof(gDenseRangeFftDone));
-        
+        uint16_t r;
+        memset(gDenseRangeStart, 0, sizeof(gDenseRangeStart));
         for (p = 0U; p < staticCfg->numCfarPeaks; p++)
         {
             uint16_t rngIdx = staticCfg->cfarRngDopSnrList[p].rangeIdx;
             uint16_t dopIdx = staticCfg->cfarRngDopSnrList[p].dopplerIdx;
-            int16_t snr = staticCfg->cfarRngDopSnrList[p].snr;
-            MmwDemo_DenseDopplerCandidate candidate;
-
-            if (rngIdx < minRange || rngIdx > maxRange)
+            if ((rngIdx >= staticCfg->numRangeBins) ||
+                (dopIdx >= staticCfg->numDopplerBins))
             {
-                continue;
+                return MMWDEMO_DENSE_EINVAL;
             }
-
-            /* Complex Doppler symbols are regenerated only for occupied ranges.
-             * One FFT per antenna supplies every selected Doppler candidate.
-             * Hard-limited to MMWDEMO_DENSE_ELEV_MAX_DOPPLER_FFT_RANGES (16) to protect frame timing budget. */
-            if (rngIdx < sizeof(gDenseRangeFftDone))
+            gDenseRangeStart[rngIdx + 1U]++;
+        }
+        for (r = 1U; r <= staticCfg->numRangeBins; r++)
+        {
+            gDenseRangeStart[r] += gDenseRangeStart[r - 1U];
+        }
+        /* Counting sort in place in the prefix table, then restore starts. */
+        for (p = 0U; p < staticCfg->numCfarPeaks; p++)
+        {
+            r = staticCfg->cfarRngDopSnrList[p].rangeIdx;
+            gDenseCfarOrder[gDenseRangeStart[r]++] = (uint16_t)p;
+        }
+        for (r = staticCfg->numRangeBins; r > 0U; r--)
+        {
+            gDenseRangeStart[r] = gDenseRangeStart[r - 1U];
+        }
+        gDenseRangeStart[0] = 0U;
+        for (r = minRange; r <= maxRange; r++)
+        {
+            uint16_t begin = gDenseRangeStart[r];
+            uint16_t end = gDenseRangeStart[r + 1U];
+            uint16_t k;
+            if (begin == end) continue;
+            /* Canonical Doppler order makes output independent of list order. */
+            for (k = begin + 1U; k < end; k++)
             {
-                if (gDenseRangeFftDone[rngIdx] == 0U)
+                uint16_t key = gDenseCfarOrder[k];
+                uint16_t j = k;
+                while ((j > begin) &&
+                       (staticCfg->cfarRngDopSnrList[gDenseCfarOrder[j - 1U]].dopplerIdx >
+                        staticCfg->cfarRngDopSnrList[key].dopplerIdx))
                 {
-                    if (rangesFftCount < MMWDEMO_DENSE_ELEV_MAX_DOPPLER_FFT_RANGES)
-                    {
-                        MmwDemo_DenseElevation_dopplerFftForRange(rngIdx, staticCfg);
-                        gDenseRangeFftDone[rngIdx] = 1U;
-                        rangesFftCount++;
-                    }
-                    else
-                    {
-                        /* Frame budget reached; skip regeneration for additional range bins */
-                        continue;
-                    }
+                    gDenseCfarOrder[j] = gDenseCfarOrder[j - 1U];
+                    j--;
                 }
+                gDenseCfarOrder[j] = key;
             }
-            else
+            MmwDemo_DenseElevation_dopplerFftForRange(r, staticCfg);
+            processedRanges++;
+            for (k = begin; k < end; k++)
             {
-                continue;
+                uint16_t idx = gDenseCfarOrder[k];
+                int16_t snr = staticCfg->cfarRngDopSnrList[idx].snr;
+                MmwDemo_DenseDopplerCandidate candidate;
+                candidate.index = staticCfg->cfarRngDopSnrList[idx].dopplerIdx;
+                candidate.snrDb10 = (snr > 0) ? (uint16_t)snr : 0U;
+                MmwDemo_DenseElevation_processDoppler(
+                    r, &candidate, cfg, staticCfg, output, outputCapacity,
+                    &outputCount, sectorCount, &outputLimited);
+                processedCfar++;
             }
-
-            candidate.index = dopIdx;
-            candidate.snrDb10 = (uint16_t)snr;
-            MmwDemo_DenseElevation_processDoppler(
-                rngIdx, &candidate, cfg, staticCfg,
-                output, outputCapacity, &outputCount,
-                sectorCount, &outputLimited);
         }
     }
 
@@ -1265,6 +1303,8 @@ int32_t MmwDemo_DenseElevation_process(
     header->protocolStatus = 0U;
     header->processingCycles = processingCycles;
     header->radarFrameNumber = staticCfg->frameNumber;
+    header->reservedPad = (uint32_t)processedCfar |
+                         ((uint32_t)processedRanges << 16U);
     *outSize = sizeof(*header) + outputCount * sizeof(*output);
     return 0;
 }

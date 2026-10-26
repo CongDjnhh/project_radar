@@ -1,8 +1,4 @@
 /*
-}
-/*
-/*
-}
  *   @file  objectdetection.c
  *
  *   @brief
@@ -47,6 +43,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 #include <c6x.h>
 
 #define DBG_DPC_OBJDET
@@ -72,6 +69,7 @@
 #include "dense_elevation.h"
 #include "surface_gen.h"
 #include "local_inc/mmw_output.h"
+extern MmwDemo_HSRAM gHSRAM;
 
 #pragma DATA_SECTION(gNavCandidateScratch, ".l3ram");
 #pragma DATA_ALIGN(gNavCandidateScratch, 8);
@@ -99,9 +97,25 @@ volatile uint32_t gNavTimingMaxTailCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 volatile uint32_t gNavTimingResultExportedCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 volatile uint32_t gNavTimingMaxResultExportedCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 
-/* Tracking period per sub-frame, published by MSS over HSRAM. Feeds the
- * Doppler-based motion prediction of the two-frame confirmation filter. */
+/* Subframe recurrence published by MSS; bounds temporal hold lifetime. */
 static uint32_t gNavTrackingPeriodUsec[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
+static uint32_t gSurfaceFramePeriodUs[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
+static uint32_t gSurfaceReserveUs[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
+static uint32_t gSurfaceLastStart[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
+static uint32_t gSurfaceLastFrame[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
+static uint32_t gSurfaceExportFrame[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
+static uint8_t gSurfaceMotionMode[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
+static DPU_CFARCAProc_FovCfg gSurfaceRawFov[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
+static HWA_Handle gSurfaceHwaHandle;
+#ifdef MMWDEMO_SURFACE_SELFTEST
+extern uint32_t MmwDemo_SurfaceGen_selfTest(void);
+uint32_t MmwDemo_SurfaceDetection_selfTest(void);
+volatile uint32_t gSurfaceStartupSelfTestFailures;
+static uint8_t gSurfaceStartupSelfTestRan;
+#endif
+static uint32_t gSurfaceMaxDpcUsec[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
+volatile uint32_t gSurfaceRecommendedPeriodUs[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
+volatile uint32_t gSurfaceAvailableProcessingUs[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 /* Last coherent MSS publications. A generation transition must not turn a
  * valid navigation stream off for one frame. */
 static uint8_t gNavSurfaceEnabledSubFrameMask = 0xFF;
@@ -117,8 +131,8 @@ MmwDemo_SurfaceGen_Cfg gNavPointCfg = {
         .maxRangeBin = 32767U
     },
     .minMovingSpeedMps = 0.0f,
-    .maxSurfacePoints = 384U,
-    .uartMaxSurfacePoints = 384U
+    .maxSurfacePoints = MMWDEMO_SURFACE_MAX_BOXES,
+    .uartMaxSurfacePoints = MMWDEMO_SURFACE_MAX_BOXES
 };
 
 #if defined(USE_2D_AOA_DPU)
@@ -944,6 +958,16 @@ int32_t DPC_ObjectDetection_execute
 
     subFrmObj = &objDetObj->subFrameObj[objDetObj->subFrameIndx];
 
+    memset(&gHSRAM.surfaceStatus, 0, sizeof(gHSRAM.surfaceStatus));
+    gHSRAM.surfaceStatus.version = MMWDEMO_SURFACE_STATUS_VERSION;
+    gHSRAM.surfaceStatus.size = sizeof(gHSRAM.surfaceStatus);
+    /* The SDK does not export the unclamped intermediate Doppler count.
+     * Silicon counter wrap has not been qualified: never claim full coverage
+     * solely because the returned list fits. */
+    gHSRAM.surfaceStatus.flags = MMWDEMO_SURFACE_COVERAGE_UNVERIFIED |
+                                MMWDEMO_SURFACE_TIMING_UNVALIDATED;
+    gHSRAM.numCustomObstacles = 0U;
+
     retVal = DPU_RangeProcHWA_process(subFrmObj->dpuRangeObj, &outRangeProc);
     if (retVal != 0)
     {
@@ -986,6 +1010,9 @@ int32_t DPC_ObjectDetection_execute
         {
             navSharedCfg.trackingPeriodUsec[timingIdx] =
                 navShared->trackingPeriodUsec[timingIdx];
+            navSharedCfg.framePeriodUsec[timingIdx] = navShared->framePeriodUsec[timingIdx];
+            navSharedCfg.postProcReserveUsec[timingIdx] = navShared->postProcReserveUsec[timingIdx];
+            navSharedCfg.surfaceMotionMode[timingIdx] = navShared->surfaceMotionMode[timingIdx];
         }
         asm(" "); /* compiler memory barrier */
         navCfgSeqAfter = navShared->isValid;
@@ -1011,6 +1038,11 @@ int32_t DPC_ObjectDetection_execute
                 navSharedCfg.maxSurfacePoints;
             gNavPointCfg.uartMaxSurfacePoints =
                 navSharedCfg.uartMaxSurfacePoints;
+            {
+                uint8_t changed = gNavSurfaceEnabledSubFrameMask ^ navSharedCfg.enabledSurfaceMask;
+                for (timingIdx = 0U; timingIdx < MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES; timingIdx++)
+                    if (changed & (1U << timingIdx)) MmwDemo_SurfaceGen_resetSubFrame(timingIdx);
+            }
             gNavSurfaceEnabledSubFrameMask =
                 navSharedCfg.enabledSurfaceMask;
 
@@ -1020,6 +1052,9 @@ int32_t DPC_ObjectDetection_execute
             {
                 gNavTrackingPeriodUsec[timingIdx] =
                     navSharedCfg.trackingPeriodUsec[timingIdx];
+                gSurfaceFramePeriodUs[timingIdx] = navSharedCfg.framePeriodUsec[timingIdx];
+                gSurfaceReserveUs[timingIdx] = navSharedCfg.postProcReserveUsec[timingIdx];
+                gSurfaceMotionMode[timingIdx] = navSharedCfg.surfaceMotionMode[timingIdx];
             }
         }
     }
@@ -1063,15 +1098,16 @@ int32_t DPC_ObjectDetection_execute
     }
 
     /* Dynamic FOV routing from CLI (cfarFovCfg and aoaFovCfg) */
-    fovMinRange = (subFrmObj->dynCfg.fovRange.min > 0.0f) ? subFrmObj->dynCfg.fovRange.min : 0.15f;
-    fovMaxRange = (subFrmObj->dynCfg.fovRange.max > fovMinRange) ? subFrmObj->dynCfg.fovRange.max : 8.64f;
+    fovMinRange = subFrmObj->dynCfg.fovRange.min;
+    fovMaxRange = subFrmObj->dynCfg.fovRange.max;
     navCfg = gNavPointCfg;
     if ((subFrmObj->staticCfg.rangeStep > 0.0f) &&
         (subFrmObj->staticCfg.numRangeBins > 0U))
     {
-        float minRangeBin = fovMinRange / subFrmObj->staticCfg.rangeStep;
+        float bias = objDetObj->commonCfg.compRxChanCfg.rangeBias;
+        float minRangeBin = fmaxf(0.0f, (fovMinRange + bias) / subFrmObj->staticCfg.rangeStep + 0.5f);
         float maxRangeBin =
-            (fovMaxRange / subFrmObj->staticCfg.rangeStep) + 0.5f;
+            fmaxf(0.0f, (fovMaxRange + bias) / subFrmObj->staticCfg.rangeStep + 0.5f);
 
         if (minRangeBin >= (float)subFrmObj->staticCfg.numRangeBins)
         {
@@ -1110,10 +1146,10 @@ int32_t DPC_ObjectDetection_execute
     if ((subFrmObj->dynCfg.fovAoaCfg.minAzimuthDeg != subFrmObj->dynCfg.fovAoaCfg.maxAzimuthDeg) &&
         (subFrmObj->dynCfg.fovAoaCfg.maxAzimuthDeg > subFrmObj->dynCfg.fovAoaCfg.minAzimuthDeg))
     {
-        gNavPointCfg.sourceCfg.minAzimuthDeg = (int16_t)subFrmObj->dynCfg.fovAoaCfg.minAzimuthDeg;
-        gNavPointCfg.sourceCfg.maxAzimuthDeg = (int16_t)subFrmObj->dynCfg.fovAoaCfg.maxAzimuthDeg;
-        gNavPointCfg.sourceCfg.minElevationDeg = (int16_t)subFrmObj->dynCfg.fovAoaCfg.minElevationDeg;
-        gNavPointCfg.sourceCfg.maxElevationDeg = (int16_t)subFrmObj->dynCfg.fovAoaCfg.maxElevationDeg;
+        gNavPointCfg.sourceCfg.minAzimuthDeg = subFrmObj->dynCfg.fovAoaCfg.minAzimuthDeg;
+        gNavPointCfg.sourceCfg.maxAzimuthDeg = subFrmObj->dynCfg.fovAoaCfg.maxAzimuthDeg;
+        gNavPointCfg.sourceCfg.minElevationDeg = subFrmObj->dynCfg.fovAoaCfg.minElevationDeg;
+        gNavPointCfg.sourceCfg.maxElevationDeg = subFrmObj->dynCfg.fovAoaCfg.maxElevationDeg;
     }
     navCfg.sourceCfg.minAzimuthDeg =
         gNavPointCfg.sourceCfg.minAzimuthDeg;
@@ -1124,6 +1160,18 @@ int32_t DPC_ObjectDetection_execute
     navCfg.sourceCfg.maxElevationDeg =
         gNavPointCfg.sourceCfg.maxElevationDeg;
 
+    {
+        DPU_CFARCAProc_FovCfg raw = subFrmObj->dynCfg.fovRange;
+        raw.min = fmaxf(0.0f, raw.min + objDetObj->commonCfg.compRxChanCfg.rangeBias);
+        raw.max = fmaxf(0.0f, raw.max + objDetObj->commonCfg.compRxChanCfg.rangeBias);
+        if (raw.min != gSurfaceRawFov[objDetObj->subFrameIndx].min ||
+            raw.max != gSurfaceRawFov[objDetObj->subFrameIndx].max) {
+            retVal = DPU_CFARCAProcHWA_control(subFrmObj->dpuCFARCAObj,
+                DPU_CFARCAProcHWA_Cmd_FovRangeCfg, &raw, sizeof(raw));
+            if (retVal != 0) goto exit;
+            gSurfaceRawFov[objDetObj->subFrameIndx] = raw;
+        }
+    }
     if (subFrmObj->isAoAHWAparamSetOverlappedWithCFAR == true)
     {
         retVal = DPU_CFARCAProcHWA_config(subFrmObj->dpuCFARCAObj, &subFrmObj->dpuCfg.cfarCfg);
@@ -1137,6 +1185,24 @@ int32_t DPC_ObjectDetection_execute
     if (retVal != 0)
     {
         goto exit;
+    }
+    gHSRAM.surfaceStatus.cfarReturned = (uint16_t)outCfarcaProc.numCfarDetectedPoints;
+    if (outCfarcaProc.numCfarDetectedPoints >= MMWDEMO_SURFACE_CFAR_CAPACITY)
+        gHSRAM.surfaceStatus.flags |= MMWDEMO_SURFACE_CFAR_LIMIT;
+    {
+        uint16_t peakCount = 0U;
+        uint32_t words = subFrmObj->dpuCfg.cfarCfg.res.cfarDopplerDetOutBitMaskSize;
+        uint32_t i, bits = 0U;
+        if (HWA_readCFARPeakCountReg(gSurfaceHwaHandle, (uint8_t *)&peakCount,
+                                   sizeof(peakCount)) != 0 || peakCount >= 2048U)
+            gHSRAM.surfaceStatus.flags |= MMWDEMO_SURFACE_CFAR_LIMIT;
+        if (subFrmObj->dynCfg.cfarCfgDoppler.thresholdScale != 0U) {
+            for (i = 0U; i < words; i++) {
+                uint32_t word = subFrmObj->dpuCfg.cfarCfg.res.cfarDopplerDetOutBitMask[i];
+                while (word) { word &= word - 1U; bits++; }
+            }
+            if (bits >= 2048U) gHSRAM.surfaceStatus.flags |= MMWDEMO_SURFACE_CFAR_LIMIT;
+        }
     }
 
     DebugP_log1("ObjDet DPC: number of detected objects after HWA CFAR = %d\n",
@@ -1162,7 +1228,7 @@ int32_t DPC_ObjectDetection_execute
     }
 
     retVal = DPU_AoAProcHWA_process(subFrmObj->dpuAoAObj,
-                 outCfarcaProc.numCfarDetectedPoints, &outAoaProc);
+                 MIN(outCfarcaProc.numCfarDetectedPoints, DPC_OBJDET_MAX_NUM_OBJECTS), &outAoaProc);
     if (retVal != 0)
     {
         goto exit;
@@ -1178,6 +1244,8 @@ int32_t DPC_ObjectDetection_execute
     if (navEnabled != 0U)
     {
         memset(&denseStaticCfg, 0, sizeof(denseStaticCfg));
+        /* Restore the CPU window after core-local CFAR scratch reuse. */
+        DPC_ObjDet_GenDopplerWindow(&subFrmObj->dpuCfg.dopplerCfg);
         DPC_ObjDet_GetRxChPhaseComp(&subFrmObj->staticCfg,
                                     &objDetObj->commonCfg.compRxChanCfg,
                                     &denseCompRxCfg);
@@ -1238,6 +1306,38 @@ int32_t DPC_ObjectDetection_execute
         navStaticCfg.rangeStepMeters = subFrmObj->staticCfg.rangeStep;
         navStaticCfg.dopplerStepMps = subFrmObj->staticCfg.dopplerStep;
         navStaticCfg.rangeBiasMeters = denseCompRxCfg.rangeBias;
+        navStaticCfg.minRangeMeters = fovMinRange;
+        navStaticCfg.maxRangeMeters = fovMaxRange;
+        navStaticCfg.motionMode = gSurfaceMotionMode[objDetObj->subFrameIndx];
+        navStaticCfg.status = &gHSRAM.surfaceStatus;
+        navStaticCfg.elapsedUsec = gNavTrackingPeriodUsec[objDetObj->subFrameIndx];
+        if (gSurfaceLastStart[objDetObj->subFrameIndx] != 0U) {
+            navStaticCfg.elapsedUsec =
+                (objDetObj->stats.frameStartTimeStamp -
+                 gSurfaceLastStart[objDetObj->subFrameIndx]) / 600U;
+            if ((objDetObj->stats.frameStartIntCounter -
+                 gSurfaceLastFrame[objDetObj->subFrameIndx]) > MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES)
+                navStaticCfg.elapsedUsec = 100001U;
+        }
+        if (gNavTrackingPeriodUsec[objDetObj->subFrameIndx] > 100000U)
+            navStaticCfg.elapsedUsec = 100001U;
+        gSurfaceLastStart[objDetObj->subFrameIndx] = objDetObj->stats.frameStartTimeStamp;
+        gSurfaceLastFrame[objDetObj->subFrameIndx] = objDetObj->stats.frameStartIntCounter;
+        gHSRAM.surfaceStatus.framePeriodUs = gSurfaceFramePeriodUs[objDetObj->subFrameIndx];
+        gHSRAM.surfaceStatus.previousExportUs =
+            gNavTimingResultExportedCycles[objDetObj->subFrameIndx] / 600U;
+        gHSRAM.surfaceStatus.previousExportFrameNumber =
+            gSurfaceExportFrame[objDetObj->subFrameIndx];
+        if (gHSRAM.surfaceStatus.previousExportUs >
+            gHSRAM.surfaceStatus.framePeriodUs)
+            gHSRAM.surfaceStatus.flags |= MMWDEMO_SURFACE_PREVIOUS_DEADLINE;
+        if (gSurfaceReserveUs[objDetObj->subFrameIndx] == 0xFFFFFFFFU)
+            gHSRAM.surfaceStatus.flags |= MMWDEMO_SURFACE_PROCESS_ERROR;
+        gSurfaceAvailableProcessingUs[objDetObj->subFrameIndx] =
+            (gSurfaceFramePeriodUs[objDetObj->subFrameIndx] >
+             gSurfaceReserveUs[objDetObj->subFrameIndx]) ?
+            gSurfaceFramePeriodUs[objDetObj->subFrameIndx] -
+            gSurfaceReserveUs[objDetObj->subFrameIndx] : 0U;
         navStaticCfg.framePeriodSec =
             (float)gNavTrackingPeriodUsec[objDetObj->subFrameIndx] /
             1000000.0f;
@@ -1312,18 +1412,16 @@ int32_t DPC_ObjectDetection_execute
         result->compRxChanBiasMeasurement = NULL;
     }
 
-    /* Pack diagnostic metrics into interChirpProcessingMargin:
-     * Byte 3: -gNavLastProcessError (0 = OK, else error code)
-     * Byte 2: numCfarDetectedPoints (CFAR peaks)
-     * Byte 1: gNavDbgDenseSamples (dense elevation output samples)
-     * Byte 0: gNavDbgFilteredSamples (samples after historyFilter) */
-    objDetObj->stats.interChirpProcessingMargin =
-        ((uint32_t)((uint8_t)(-gNavLastProcessError)) << 24) |
-        ((uint32_t)(outCfarcaProc.numCfarDetectedPoints & 0xFF) << 16) |
-        ((uint32_t)(gNavDbgDenseSamples & 0xFF) << 8) |
-        ((uint32_t)(gNavDbgFilteredSamples & 0xFF));
+    /* No inter-chirp margin measurement is available on this custom path.
+     * Full-width detection diagnostics are carried by TLV21. */
+    objDetObj->stats.interChirpProcessingMargin = 0U;
 
     objDetObj->stats.interFrameEndTimeStamp = Cycleprofiler_getTimeStamp();
+    gHSRAM.surfaceStatus.processingUs =
+        (objDetObj->stats.interFrameEndTimeStamp - objDetObj->stats.frameStartTimeStamp) / 600U;
+    if (gHSRAM.surfaceStatus.processingUs > gSurfaceMaxDpcUsec[objDetObj->subFrameIndx])
+        gSurfaceMaxDpcUsec[objDetObj->subFrameIndx] = gHSRAM.surfaceStatus.processingUs;
+    gHSRAM.surfaceStatus.maxProcessingUs = gSurfaceMaxDpcUsec[objDetObj->subFrameIndx];
     result->stats = &objDetObj->stats;
 
     /* populate DPM_resultBuf - first pointer and size are for results of the
@@ -1451,12 +1549,19 @@ static int32_t DPC_ObjectDetection_start (DPM_DPCHandle handle)
            sizeof(gNavTimingMaxTailCycles));
     memset((void *)gNavTimingResultExportedCycles, 0,
            sizeof(gNavTimingResultExportedCycles));
+    memset((void *)gNavTimingMaxResultExportedCycles, 0,
+           sizeof(gNavTimingMaxResultExportedCycles));
     extern MmwDemo_HSRAM gHSRAM;
     volatile const MmwDemo_NavCliCfg *pNavInitCfg = (volatile const MmwDemo_NavCliCfg *)&gHSRAM.navCfg;
     gNavSurfaceEnabledSubFrameMask = (pNavInitCfg->enabledSurfaceMask != 0U) ? pNavInitCfg->enabledSurfaceMask : 0xFF;
 
     MmwDemo_DenseElevation_reset();
     MmwDemo_SurfaceGen_reset();
+    memset(gSurfaceLastStart, 0, sizeof(gSurfaceLastStart));
+    memset(gSurfaceLastFrame, 0, sizeof(gSurfaceLastFrame));
+    memset(gSurfaceExportFrame, 0, sizeof(gSurfaceExportFrame));
+    memset(gSurfaceMaxDpcUsec, 0, sizeof(gSurfaceMaxDpcUsec));
+    memset((void *)gSurfaceRecommendedPeriodUs, 0, sizeof(gSurfaceRecommendedPeriodUs));
 
     /* Start marks consumption of all pre-start configs, reset the flag to check
      * if pre-starts were issued only after common config was issued for the next
@@ -1471,6 +1576,19 @@ static int32_t DPC_ObjectDetection_start (DPM_DPCHandle handle)
      * to ensure we reconfig for the current (0) sub-frame before starting */
     DPC_ObjDet_reconfigSubFrame(objDetObj, objDetObj->subFrameIndx);
 
+ #ifdef MMWDEMO_SURFACE_SELFTEST
+    /* DPM task context; configured DPUs and interrupts are available, RF is
+     * not yet started by MSS. Never run fixtures during acquisition. */
+    if (!gSurfaceStartupSelfTestRan) {
+        gSurfaceStartupSelfTestFailures = MmwDemo_SurfaceGen_selfTest();
+        gSurfaceStartupSelfTestFailures |= MmwDemo_SurfaceDetection_selfTest() << 16U;
+        gSurfaceStartupSelfTestRan = 1U;
+        DPC_ObjDet_reconfigSubFrame(objDetObj, objDetObj->subFrameIndx);
+        MmwDemo_SurfaceGen_reset();
+    }
+    if (gSurfaceStartupSelfTestFailures != 0U)
+        return DPC_OBJECTDETECTION_EINVAL;
+ #endif
     /* Trigger Range DPU, related to reconfig above */
     subFrmObj = &objDetObj->subFrameObj[objDetObj->subFrameIndx];
 #ifdef OVERLAY_RANGE_HWA_PARAMS
@@ -2111,6 +2229,7 @@ static int32_t DPC_ObjDet_CFARCAconfig(DPU_CFARCAProcHWA_Handle dpuHandle,
                    uint32_t                      hwaMemBankAddr[4],
                    uint16_t                      hwaMemBankSize,
                    float                         rangeBias,
+                   DPU_CFARCAProc_FovCfg         *rawFov,
                    uint32_t                      *CoreLocalRamScratchUsage,
                    DPU_CFARCAProcHWA_Config      *cfgSave)
 {
@@ -2133,10 +2252,10 @@ static int32_t DPC_ObjDet_CFARCAconfig(DPU_CFARCAProcHWA_Handle dpuHandle,
     cfarCfg.dynCfg.cfarCfgDoppler = &dynCfg->cfarCfgDoppler;
     cfarCfg.dynCfg.cfarCfgRange   = &dynCfg->cfarCfgRange;
     cfarCfg.dynCfg.fovDoppler     = &dynCfg->fovDoppler;
-    cfarCfg.dynCfg.fovRange       = &dynCfg->fovRange;
-
-    /* need to adjust min by range bias */
-    cfarCfg.dynCfg.fovRange->min  += rangeBias;
+    *rawFov = dynCfg->fovRange;
+    rawFov->min = fmaxf(0.0f, rawFov->min + rangeBias);
+    rawFov->max = fmaxf(0.0f, rawFov->max + rangeBias);
+    cfarCfg.dynCfg.fovRange = rawFov;
 
     /* hwres config */
     hwRes->detMatrix = *detMatrix;
@@ -2531,6 +2650,7 @@ exit:
  *  \ingroup DPC_OBJDET__INTERNAL_FUNCTION
  */
 static int32_t DPC_ObjDet_preStartConfig(SubFrameObj *obj,
+                  uint8_t subFrameNum,
                   DPC_ObjectDetection_PreStartCommonCfg *commonCfg,
                    DPC_ObjectDetection_StaticCfg *staticCfg,
                    DPC_ObjectDetection_DynCfg    *dynCfg,
@@ -2560,6 +2680,28 @@ static int32_t DPC_ObjDet_preStartConfig(SubFrameObj *obj,
      */
     obj->staticCfg = *staticCfg;
     obj->dynCfg = *dynCfg;
+    {
+        float bias = commonCfg->compRxChanCfg.rangeBias;
+        float lo, hi;
+        uint32_t first, last;
+        if (!isfinite(staticCfg->rangeStep) || !(staticCfg->rangeStep > 0.0f) ||
+            !isfinite(bias) || !isfinite(dynCfg->fovRange.min) ||
+            !isfinite(dynCfg->fovRange.max) || dynCfg->fovRange.min < 0.0f ||
+            !(dynCfg->fovRange.max > dynCfg->fovRange.min) ||
+            staticCfg->numRangeBins == 0U ||
+            staticCfg->numRangeBins > MMWDEMO_DENSE_ELEV_MAX_RANGE_BINS)
+            return DPC_OBJECTDETECTION_EINVAL;
+        lo = fmaxf(0.0f, (dynCfg->fovRange.min + bias) / staticCfg->rangeStep + 0.5f);
+        hi = fmaxf(0.0f, (dynCfg->fovRange.max + bias) / staticCfg->rangeStep + 0.5f);
+        if (lo >= staticCfg->numRangeBins || !isfinite(hi))
+            return DPC_OBJECTDETECTION_EINVAL;
+        first = (uint32_t)lo;
+        last = (hi >= staticCfg->numRangeBins) ? staticCfg->numRangeBins - 1U : (uint32_t)hi;
+        if (last < first || !staticCfg->numDopplerBins ||
+            (last - first + 1U) * staticCfg->numDopplerBins > MMWDEMO_SURFACE_CFAR_CAPACITY)
+            return DPC_OBJECTDETECTION_EINVAL;
+        MmwDemo_SurfaceGen_resetSubFrame(subFrameNum);
+    }
 
     hwaWindowOffset = DPC_OBJDET_HWA_WINDOW_RAM_OFFSET;
 
@@ -2597,9 +2739,9 @@ static int32_t DPC_ObjDet_preStartConfig(SubFrameObj *obj,
     detMatrix.datafmt = DPIF_DETMATRIX_FORMAT_1;
 
     /* Core Local - CFAR output list */
-    cfarRngDopSnrListSize = DPC_OBJDET_MAX_NUM_OBJECTS;
+    cfarRngDopSnrListSize = MMWDEMO_SURFACE_CFAR_CAPACITY;
 
-    cfarRngDopSnrList = DPC_ObjDet_MemPoolAlloc(CoreLocalRamObj,
+    cfarRngDopSnrList = DPC_ObjDet_MemPoolAlloc(L3ramObj,
                             cfarRngDopSnrListSize * sizeof(DPIF_CFARDetList),
                             DPC_OBJDET_CFAR_DET_LIST_BYTE_ALIGNMENT);
     if (cfarRngDopSnrList == NULL)
@@ -2647,6 +2789,7 @@ static int32_t DPC_ObjDet_preStartConfig(SubFrameObj *obj,
                  &hwaMemBankAddr[0],
                  hwaMemBankSize,
                  commonCfg->compRxChanCfg.rangeBias,
+                 &gSurfaceRawFov[subFrameNum],
                  &cfarCoreLocalRamScratchUsage,
                  &obj->dpuCfg.cfarCfg);
     if (retVal != 0)
@@ -2808,6 +2951,7 @@ static int32_t DPC_ObjectDetection_ioctl
         for(i = 0; i < objDetObj->commonCfg.numSubFrames; i++)
         {
             subFrmObj = &objDetObj->subFrameObj[i];
+            MmwDemo_SurfaceGen_resetSubFrame((uint16_t)i);
 
             DPC_ObjDet_GetRxChPhaseComp(&subFrmObj->staticCfg, inpCfg, &outCfg);
 
@@ -2893,11 +3037,21 @@ static int32_t DPC_ObjectDetection_ioctl
         {
             gNavTimingResultExportedCycles[inp->subFrameIdx] =
                 resultExportedCycles;
+            gSurfaceExportFrame[inp->subFrameIdx] =
+                objDetObj->stats.frameStartIntCounter;
             if (resultExportedCycles >
                 gNavTimingMaxResultExportedCycles[inp->subFrameIdx])
             {
                 gNavTimingMaxResultExportedCycles[inp->subFrameIdx] =
                     resultExportedCycles;
+            }
+            {
+                uint64_t usec =
+                    ((uint64_t)gNavTimingMaxResultExportedCycles[inp->subFrameIdx] + 599ULL) / 600ULL;
+                uint64_t period = (usec * 5ULL + 3ULL) / 4ULL;
+                if (period < 50000ULL) period = 50000ULL;
+                gSurfaceRecommendedPeriodUs[inp->subFrameIdx] =
+                    (uint32_t)(((period + 999ULL) / 1000ULL) * 1000ULL);
             }
             navEndOffsetCycles =
                 gNavTimingNavEndOffsetCycles[inp->subFrameIdx];
@@ -2970,6 +3124,7 @@ static int32_t DPC_ObjectDetection_ioctl
 
                 /* save into object */
                 subFrmObj->dynCfg.cfarCfgRange = cfg->cfg;
+                MmwDemo_SurfaceGen_resetSubFrame(subFrameNum);
 
                 break;
             }
@@ -2992,6 +3147,7 @@ static int32_t DPC_ObjectDetection_ioctl
 
                 /* save into object */
                 subFrmObj->dynCfg.cfarCfgDoppler = cfg->cfg;
+                MmwDemo_SurfaceGen_resetSubFrame(subFrameNum);
 
                 break;
             }
@@ -3002,14 +3158,37 @@ static int32_t DPC_ObjectDetection_ioctl
                 DebugP_assert(argLen == sizeof(DPC_ObjectDetection_fovRangeCfg));
 
                 cfg = (DPC_ObjectDetection_fovRangeCfg*)arg;
+                {
+                    float step = subFrmObj->staticCfg.rangeStep;
+                    float bias = objDetObj->commonCfg.compRxChanCfg.rangeBias;
+                    float lo = fmaxf(0.0f, (cfg->cfg.min + bias) / step + 0.5f);
+                    float hi = fmaxf(0.0f, (cfg->cfg.max + bias) / step + 0.5f);
+                    uint32_t first, last;
+                    if (!isfinite(cfg->cfg.min) || !isfinite(cfg->cfg.max) ||
+                        cfg->cfg.min < 0.0f || cfg->cfg.max <= cfg->cfg.min ||
+                        !isfinite(lo) || !isfinite(hi) ||
+                        lo >= subFrmObj->staticCfg.numRangeBins) {
+                        retVal = DPC_OBJECTDETECTION_EINVAL; goto exit;
+                    }
+                    first = (uint32_t)lo;
+                    last = hi >= subFrmObj->staticCfg.numRangeBins ?
+                        subFrmObj->staticCfg.numRangeBins - 1U : (uint32_t)hi;
+                    if (last < first || (last-first+1U) *
+                        subFrmObj->staticCfg.numDopplerBins > MMWDEMO_SURFACE_CFAR_CAPACITY) {
+                        retVal = DPC_OBJECTDETECTION_EINVAL; goto exit;
+                    }
+                }
 
                 /* Add range bias to the minimum/maximum */
-                cfg->cfg.min += objDetObj->commonCfg.compRxChanCfg.rangeBias;
-                cfg->cfg.max += objDetObj->commonCfg.compRxChanCfg.rangeBias;
+                gSurfaceRawFov[subFrameNum] = cfg->cfg;
+                gSurfaceRawFov[subFrameNum].min = fmaxf(0.0f,
+                    cfg->cfg.min + objDetObj->commonCfg.compRxChanCfg.rangeBias);
+                gSurfaceRawFov[subFrameNum].max = fmaxf(0.0f,
+                    cfg->cfg.max + objDetObj->commonCfg.compRxChanCfg.rangeBias);
 
                 retVal = DPU_CFARCAProcHWA_control(subFrmObj->dpuCFARCAObj,
                              DPU_CFARCAProcHWA_Cmd_FovRangeCfg,
-                             &cfg->cfg,
+                             &gSurfaceRawFov[subFrameNum],
                              sizeof(DPU_CFARCAProc_FovCfg));
                 if (retVal != 0)
                 {
@@ -3018,6 +3197,7 @@ static int32_t DPC_ObjectDetection_ioctl
 
                 /* save into object */
                 subFrmObj->dynCfg.fovRange = cfg->cfg;
+                MmwDemo_SurfaceGen_resetSubFrame(subFrameNum);
 
                 break;
             }
@@ -3108,6 +3288,7 @@ static int32_t DPC_ObjectDetection_ioctl
 
                 /* save into object */
                 subFrmObj->dynCfg.fovAoaCfg = cfg->cfg;
+                MmwDemo_SurfaceGen_resetSubFrame(subFrameNum);
 
                 break;
             }
@@ -3144,6 +3325,7 @@ static int32_t DPC_ObjectDetection_ioctl
                 cfg = (DPC_ObjectDetection_StaticClutterRemovalCfg*)arg;
 
                 DPC_ObjDet_Config_StaticClutterRemovalCfg(subFrmObj, &cfg->cfg);
+                MmwDemo_SurfaceGen_resetSubFrame(subFrameNum);
 
                 break;
             }
@@ -3179,7 +3361,7 @@ static int32_t DPC_ObjectDetection_ioctl
                 memUsage = &cfg->memUsage;
                 memUsage->L3RamTotal = objDetObj->L3RamObj.cfg.size;
                 memUsage->CoreLocalRamTotal = objDetObj->CoreLocalRamObj.cfg.size;
-                retVal = DPC_ObjDet_preStartConfig(subFrmObj,
+                retVal = DPC_ObjDet_preStartConfig(subFrmObj, subFrameNum,
                              &objDetObj->commonCfg, &cfg->staticCfg, &cfg->dynCfg,
                              &objDetObj->edmaHandle[0],
                              &objDetObj->L3RamObj,
@@ -3325,6 +3507,7 @@ static DPM_DPCHandle DPC_ObjectDetection_init
     rangeInitParams.hwaHandle = dpcInitParams->hwaHandle;
     aoaInitParams.hwaHandle = dpcInitParams->hwaHandle;
     cfarInitParams.hwaHandle = dpcInitParams->hwaHandle;
+    gSurfaceHwaHandle = dpcInitParams->hwaHandle;
     dopplerInitParams.hwaHandle = dpcInitParams->hwaHandle;
 
     for(i = 0; i < RL_MAX_SUBFRAMES; i++)
@@ -3453,3 +3636,7 @@ exit:
 
     return (retVal);
 }
+
+#ifdef MMWDEMO_SURFACE_SELFTEST
+#include "tests/detection_fixtures.inc"
+#endif

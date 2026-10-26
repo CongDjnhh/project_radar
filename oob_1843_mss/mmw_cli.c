@@ -73,7 +73,7 @@
 #include "surface_gen.h"
 
 #ifndef MMWDEMO_ENABLE_LEGACY_CFAR_AOA
-#define MMWDEMO_ENABLE_LEGACY_CFAR_AOA (1)
+#define MMWDEMO_ENABLE_LEGACY_CFAR_AOA (0)
 #endif
 
 /**************************************************************************
@@ -99,6 +99,7 @@ static int32_t MmwDemo_CLIChirpQualitySigImgMonCfg (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLIAnalogMonitorCfg (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLILvdsStreamCfg (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLIConfigDataPort (int32_t argc, char* argv[]);
+static int32_t MmwDemo_CLISurfaceMotionCfg(int32_t argc, char* argv[]);
 
 /**************************************************************************
  *************************** Extern Definitions *******************************
@@ -277,6 +278,17 @@ static int32_t MmwDemo_CLISensorStart (int32_t argc, char* argv[])
      * Retreive and check mmwave Open related config before calling openSensor
      ***********************************************************************************/
 
+    {
+        uint32_t sf;
+        for (sf = 0U; sf < gMmwMssMCB.objDetCommonCfg.preStartCommonCfg.numSubFrames; sf++) {
+            if (gMmwMssMCB.subFrameCfg[sf].guiMonSel.customObstacles &&
+                MmwDemo_getNavPostProcReserveUsecForState((uint8_t)sf,
+                    MMWDEMO_SURFACE_MAX_BOXES, 1U, 0U) == 0xFFFFFFFFU) {
+                CLI_write("Error: custom obstacles require bounded UART output; disable LVDS\n");
+                return -1;
+            }
+        }
+    }
     /*  Fill demo's MCB mmWave openCfg structure from the CLI configs*/
     if (gMmwMssMCB.sensorState == MmwDemo_SensorState_INIT)
     {
@@ -456,13 +468,47 @@ static void MmwDemo_CLIInitNavDefaults(
     sharedCfg->minMovingSpeedMps = 0.00f;
     sharedCfg->minRangeBin = 0;
     sharedCfg->maxRangeBin = 256;
-    sharedCfg->maxSurfacePoints = 256U;
-    sharedCfg->uartMaxSurfacePoints = 256U;
+    sharedCfg->maxSurfacePoints = MMWDEMO_SURFACE_MAX_BOXES;
+    sharedCfg->uartMaxSurfacePoints = MMWDEMO_SURFACE_MAX_BOXES;
     sharedCfg->reservedNav[0] = 0U;
     sharedCfg->reservedNav[1] = 0U;
     sharedCfg->reservedNav[2] = 0U;
     sharedCfg->reservedNav[3] = 0U;
     sharedCfg->enabledSurfaceMask = 0U;
+}
+
+static int32_t MmwDemo_CLISurfaceMotionCfg(int32_t argc, char* argv[])
+{
+    extern MmwDemo_HSRAM gHSRAM;
+    volatile MmwDemo_NavCliCfg *shared = &gHSRAM.navCfg;
+    int32_t sf, mode;
+    uint32_t first, last, i;
+    uint8_t generation;
+    UInt key;
+    if (gMmwMssMCB.sensorState == MmwDemo_SensorState_STARTED) {
+        CLI_write("Error: surfaceMotionCfg requires sensorStop\n");
+        return -1;
+    }
+    if (argc != 3 ||
+        MmwDemo_CLIParseInt32(argv[1], -1, RL_MAX_SUBFRAMES - 1, &sf) != 0 ||
+        MmwDemo_CLIParseInt32(argv[2], 0, 1, &mode) != 0) {
+        CLI_write("Error: surfaceMotionCfg <subFrameIdx|-1> <0 mobile|1 fixed>\n");
+        return -1;
+    }
+    first = (sf < 0) ? 0U : (uint32_t)sf;
+    last = (sf < 0) ? RL_MAX_SUBFRAMES - 1U : (uint32_t)sf;
+    key = Hwi_disable();
+    generation = shared->isValid + 1U;
+    if (!generation) generation = 1U;
+    if (!shared->isValid) MmwDemo_CLIInitNavDefaults(shared);
+    shared->isValid = 0U;
+    MEM_BARRIER();
+    for (i = first; i <= last; i++) shared->surfaceMotionMode[i] = (uint8_t)mode;
+    MEM_BARRIER();
+    shared->isValid = generation;
+    MEM_BARRIER();
+    Hwi_restore(key);
+    return 0;
 }
 
 static uint8_t MmwDemo_CLIUpdateSubFrameMask(
@@ -516,7 +562,10 @@ static int32_t MmwDemo_CLIGuiMonSel (int32_t argc, char* argv[])
     int32_t customObstacles = 0;
     if (argc >= 10)
     {
-        customObstacles = atoi(argv[9]);
+        if (MmwDemo_CLIParseInt32(argv[9], 0, 1, &customObstacles) != 0) {
+            CLI_write("Error: customObstacles must be 0 or 1\n");
+            return -1;
+        }
     }
     else
     {
@@ -656,9 +705,9 @@ static int32_t MmwDemo_CLICfarCfg (int32_t argc, char* argv[])
     threshold                 = (float) atof (argv[8]);
     cfarCfg.peakGroupingEn    = (uint8_t) atoi (argv[9]);
 
-    if (threshold > 100.0)
+    if (!isfinite(threshold) || threshold < 0.0f || threshold > 100.0f)
     {
-        CLI_write("Error: Maximum value for CFAR thresholdScale is 100.0 dB.\n");
+        CLI_write("Error: CFAR thresholdScale must be finite and in 0..100 dB.\n");
         return -1;
     }   
     
@@ -1029,6 +1078,8 @@ static int32_t MmwDemo_CLICompRangeBiasAndRxChanPhaseCfg (int32_t argc, char* ar
 {
     DPU_AoAProc_compRxChannelBiasCfg   cfg;
     int32_t Re, Im;
+    float realPart, imagPart;
+    char *end;
     int32_t argInd;
     int32_t i;
 
@@ -1043,16 +1094,30 @@ static int32_t MmwDemo_CLICompRangeBiasAndRxChanPhaseCfg (int32_t argc, char* ar
     memset ((void *)&cfg, 0, sizeof(cfg));
 
     /* Populate configuration: */
-    cfg.rangeBias          = (float) atof (argv[1]);
+    cfg.rangeBias = strtof(argv[1], &end);
+    if (end == argv[1] || *end != '\0' || !isfinite(cfg.rangeBias)) {
+        CLI_write("Error: rangeBias must be finite\n");
+        return -1;
+    }
 
     argInd = 2;
     for (i=0; i < SYS_COMMON_NUM_TX_ANTENNAS*SYS_COMMON_NUM_RX_CHANNEL; i++)
     {
-        Re = (int32_t) (atof (argv[argInd++]) * 32768.);
+        realPart = strtof(argv[argInd], &end);
+        if (end == argv[argInd] || *end != '\0' || !isfinite(realPart)) {
+            CLI_write("Error: phase coefficients must be finite\n"); return -1;
+        }
+        argInd++;
+        Re = (int32_t)(fmaxf(-1.0f, fminf(1.0f, realPart)) * 32768.0f);
         MATHUTILS_SATURATE16(Re);
         cfg.rxChPhaseComp[i].real = (int16_t) Re;
 
-        Im = (int32_t) (atof (argv[argInd++]) * 32768.);
+        imagPart = strtof(argv[argInd], &end);
+        if (end == argv[argInd] || *end != '\0' || !isfinite(imagPart)) {
+            CLI_write("Error: phase coefficients must be finite\n"); return -1;
+        }
+        argInd++;
+        Im = (int32_t)(fmaxf(-1.0f, fminf(1.0f, imagPart)) * 32768.0f);
         MATHUTILS_SATURATE16(Im);
         cfg.rxChPhaseComp[i].imag = (int16_t) Im;
 
@@ -1528,7 +1593,10 @@ void MmwDemo_CLIInit (uint8_t taskPriority)
     cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLISensorStop;
     cnt++;
 
-    // navPointCfg removed as per user request
+    cliCfg.tableEntry[cnt].cmd = "surfaceMotionCfg";
+    cliCfg.tableEntry[cnt].helpString = "<subFrameIdx> <0 mobile|1 fixed>";
+    cliCfg.tableEntry[cnt].cmdHandlerFxn = MmwDemo_CLISurfaceMotionCfg;
+    cnt++;
 
 
 

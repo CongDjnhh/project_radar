@@ -28,13 +28,16 @@ extern "C" {
 #define MMWDEMO_DENSE_ELEV_MAX_DOPPLER_BINS       (128U)
 #define MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES          (4U)
 #define MMWDEMO_DENSE_ELEV_MAX_ROWS               (4U)
-#define MMWDEMO_DENSE_ELEV_MAX_OUTPUT_SAMPLES     (1536U)
+#define MMWDEMO_DENSE_ELEV_MAX_OUTPUT_SAMPLES     (3072U)
+#define MMWDEMO_DENSE_ELEV_MAX_CFAR_PEAKS         (1536U)
+#define MMWDEMO_DENSE_ELEV_MAX_RANGE_BINS         (1024U)
 
 #define MMWDEMO_DENSE_ELEVATION_MAGIC             (0x44454C56U) /* DELV */
 #define MMWDEMO_DENSE_ELEVATION_PROTOCOL_VERSION  (8U)
 
-/* V7 is one complete radar frame, never a rolling or cross-frame sweep. */
-#define MMWDEMO_DENSE_FLAG_CFAR_BYPASSED           (1U << 0)
+/* Frame-local processing flags. Upstream HWA coverage is reported in TLV21. */
+#define MMWDEMO_DENSE_FLAG_CFAR_SEEDED             (1U << 0)
+#define MMWDEMO_DENSE_FLAG_CFAR_BYPASSED MMWDEMO_DENSE_FLAG_CFAR_SEEDED
 #define MMWDEMO_DENSE_FLAG_DOPPLER_PREFILTER       (1U << 1)
 #define MMWDEMO_DENSE_FLAG_RX_PHASE_COMPENSATED    (1U << 2)
 #define MMWDEMO_DENSE_FLAG_TDM_COMPENSATED         (1U << 3)
@@ -45,7 +48,7 @@ extern "C" {
 #define MMWDEMO_DENSE_FLAG_STATIC_CLUTTER_APPLIED   (1U << 8)
 #define MMWDEMO_DENSE_FLAG_AZIMUTH_NMS              (1U << 9)
 #define MMWDEMO_DENSE_REQUIRED_FLAGS \
-    (MMWDEMO_DENSE_FLAG_CFAR_BYPASSED | \
+    (MMWDEMO_DENSE_FLAG_CFAR_SEEDED | \
      MMWDEMO_DENSE_FLAG_DOPPLER_PREFILTER | \
      MMWDEMO_DENSE_FLAG_RX_PHASE_COMPENSATED | \
      MMWDEMO_DENSE_FLAG_TDM_COMPENSATED | \
@@ -101,7 +104,7 @@ typedef struct MmwDemo_DenseElevation_OutputSample_t
 typedef char MmwDemo_DenseOutputSampleEarlyCheck[
     (sizeof(MmwDemo_DenseElevation_OutputSample) == 20U) ? 1 : -1];
 
-/** Header at the beginning of every TLV 11 payload. */
+/** Header of the internal frame-local dense candidate buffer. */
 typedef struct MmwDemo_DenseElevation_OutputHeader_t
 {
     uint32_t magic;
@@ -147,9 +150,9 @@ typedef struct MmwDemo_DenseElevation_StaticCfg_t
     uint32_t numCfarPeaks; uint32_t frameNumber;
 } MmwDemo_DenseElevation_StaticCfg;
 
-/** Process every configured range in the current radar frame. Work is never
- * continued in a later frame: each call publishes the complete source cloud
- * for the radar frame held in staticCfg, or a negative error code. */
+/** Process every supplied CFAR detection in the configured range this frame.
+ * Finite output capacity is reported by OUTPUT_LIMITED. Upstream HWA
+ * completeness is not implied by successful dense processing. */
 int32_t MmwDemo_DenseElevation_process(
     const MmwDemo_DenseElevation_Cfg *cfg,
     const MmwDemo_DenseElevation_StaticCfg *staticCfg,

@@ -93,6 +93,7 @@ typedef enum MmwDemo_output_message_type_e
 
     /*! @brief   Custom obstacle point cloud (x, y, z, v, snr, width) */
     MMWDEMO_OUTPUT_MSG_CUSTOM_OBSTACLES = 20,
+    MMWDEMO_OUTPUT_MSG_SURFACE_STATUS = 21,
 
     MMWDEMO_OUTPUT_MSG_MAX
 } MmwDemo_output_message_type;
@@ -186,6 +187,49 @@ typedef struct ObstacleBox_t MmwDemo_CustomObstacle;
 
 typedef char ObstacleBoxSizeCheck[(sizeof(ObstacleBox) == 32U) ? 1 : -1];
 
+#define MMWDEMO_SURFACE_STATUS_VERSION       (1U)
+#define MMWDEMO_SURFACE_CFAR_CAPACITY        (1536U)
+#define MMWDEMO_SURFACE_MAX_BOXES            (255U)
+#define MMWDEMO_SURFACE_MOTION_MOBILE        (0U)
+#define MMWDEMO_SURFACE_MOTION_FIXED         (1U)
+#define MMWDEMO_SURFACE_CFAR_LIMIT           (1UL << 0)
+#define MMWDEMO_SURFACE_DENSE_LIMIT          (1UL << 1)
+#define MMWDEMO_SURFACE_CLUSTER_LIMIT        (1UL << 2)
+#define MMWDEMO_SURFACE_BOX_LIMIT            (1UL << 3)
+#define MMWDEMO_SURFACE_UART_LIMIT           (1UL << 4)
+#define MMWDEMO_SURFACE_INVALID_GEOMETRY     (1UL << 5)
+#define MMWDEMO_SURFACE_PROCESS_ERROR        (1UL << 6)
+#define MMWDEMO_SURFACE_COVERAGE_UNVERIFIED   (1UL << 7)
+#define MMWDEMO_SURFACE_PREVIOUS_DEADLINE     (1UL << 8)
+#define MMWDEMO_SURFACE_TIMING_UNVALIDATED    (1UL << 9)
+#define MMWDEMO_SURFACE_HOLD_ACTIVE           (1UL << 10)
+#define MMWDEMO_SURFACE_HISTORY_LIMIT         (1UL << 11)
+#define MMWDEMO_SURFACE_BUDGET_EXCEEDED       (1UL << 12)
+
+/* TLV21 v1, little endian <HHI8H6I>. Timing of the preceding export is
+ * explicitly tagged: this frame cannot yet know its own UART completion. */
+typedef struct MmwDemo_SurfaceStatus_t {
+    uint16_t version;
+    uint16_t size;
+    uint32_t flags;
+    uint16_t cfarReturned;
+    uint16_t cfarProcessed;
+    uint16_t denseProduced;
+    uint16_t denseClustered;
+    uint16_t clusterCount;
+    uint16_t boxCount;
+    uint16_t heldCount;
+    uint16_t rangeCount;
+    uint32_t processingUs;
+    uint32_t maxProcessingUs;
+    uint32_t previousExportUs;
+    uint32_t framePeriodUs;
+    uint32_t uartEstimatedUs;
+    uint32_t previousExportFrameNumber;
+} MmwDemo_SurfaceStatus;
+typedef char MmwDemo_SurfaceStatusSizeCheck[
+    (sizeof(MmwDemo_SurfaceStatus) == 48U) ? 1 : -1];
+
 /**
  * @brief
  *  Post-clustering obstacle target classification codes encoded in the high byte
@@ -200,8 +244,11 @@ typedef char ObstacleBoxSizeCheck[(sizeof(ObstacleBox) == 32U) ? 1 : -1];
     ((int16_t)((((uint16_t)(classType) & 0x00FFU) << 8U) | ((uint16_t)(rawId) & 0x00FFU)))
 #define MMWDEMO_UNPACK_OBSTACLE_CLASS(boxId) \
     ((uint8_t)(((uint16_t)(boxId) >> 8U) & 0x00FFU))
-#define MMWDEMO_UNPACK_OBSTACLE_TRACK_ID(boxId) \
+#define MMWDEMO_UNPACK_OBSTACLE_FRAME_RANK(boxId) \
     ((uint8_t)((uint16_t)(boxId) & 0x00FFU))
+/* Compatibility name; the value is a frame rank, not a persistent track ID. */
+#define MMWDEMO_UNPACK_OBSTACLE_TRACK_ID(boxId) \
+    MMWDEMO_UNPACK_OBSTACLE_FRAME_RANK(boxId)
 
 /**
  * @brief
@@ -222,7 +269,8 @@ typedef struct MmwDemo_NavCliCfg_t {
     uint16_t uartMaxSurfacePoints; /* MSS feedback cap; user grid is unchanged */
     /* snrThresholdDb was removed: detection sensitivity is owned by the CFAR
      * configuration (CLI cfarCfg). The 4 bytes keep the struct size stable. */
-    uint8_t  reservedNav[8];
+    uint8_t  surfaceMotionMode[MMWDEMO_NAV_SHARED_MAX_SUBFRAMES];
+    uint8_t  reservedNav[4];
     uint8_t  isValid;
     uint8_t  enabledSurfaceMask;
     uint8_t  reserved[50];
@@ -255,6 +303,7 @@ typedef struct MmwDemo_HSRAM_t
     /*! @brief   Custom obstacles payload */
     uint16_t                       numCustomObstacles;
     MmwDemo_CustomObstacle         customObstacles[256U];
+    MmwDemo_SurfaceStatus          surfaceStatus;
 
     /*! @brief   Payload data of result */
     uint8_t                        payload[MMWDEMO_HSRAM_PAYLOAD_SIZE];

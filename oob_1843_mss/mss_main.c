@@ -713,6 +713,9 @@ volatile uint32_t gMmwDemoUartWriteErrorCount = 0U;
 /* TI keeps this limit private to objectdetection.c, so mirror the wire-side
  * maximum locally instead of modifying or including an SDK source file. */
 #define MMWDEMO_NAV_TI_MAX_DETECTED_OBJECTS      (500U)
+#ifndef MMWDEMO_ENABLE_LEGACY_CFAR_AOA
+#define MMWDEMO_ENABLE_LEGACY_CFAR_AOA (0)
+#endif
 
 /**
  * @brief
@@ -1294,6 +1297,7 @@ static void MmwDemo_transmitProcessedOutput
 )
 {
     MmwDemo_output_message_header header;
+    MmwDemo_SurfaceStatus surfaceStatus = gHSRAM.surfaceStatus;
     MmwDemo_GuiMonSel   *pGuiMonSel;
     MmwDemo_GuiMonSel   guiMonSel;
     MmwDemo_SubFrameCfg *subFrameCfg;
@@ -1326,6 +1330,11 @@ static void MmwDemo_transmitProcessedOutput
      * must not change a condition between the TLV-table and UART-write phases. */
     guiMonSel = subFrameCfg->guiMonSel;
     pGuiMonSel = &guiMonSel;
+    if (gHSRAM.numCustomObstacles > MMWDEMO_SURFACE_MAX_BOXES) {
+        gHSRAM.numCustomObstacles = 0U;
+        surfaceStatus.flags |= MMWDEMO_SURFACE_PROCESS_ERROR;
+    }
+    surfaceStatus.boxCount = gHSRAM.numCustomObstacles;
 
     /* Clear message header and padding. */
     memset((void *)&header, 0, sizeof(MmwDemo_output_message_header));
@@ -1422,6 +1431,13 @@ static void MmwDemo_transmitProcessedOutput
 
 
 
+    if (pGuiMonSel->customObstacles == 1U)
+    {
+        tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_SURFACE_STATUS;
+        tl[tlvIdx].length = sizeof(surfaceStatus);
+        packetLen += sizeof(MmwDemo_output_message_tl) + sizeof(surfaceStatus);
+        tlvIdx++;
+    }
     if (pGuiMonSel->logMagRange)
     {
         tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_RANGE_PROFILE;
@@ -1484,6 +1500,17 @@ static void MmwDemo_transmitProcessedOutput
     header.timeCpuCycles = Pmu_getCount(0);
     header.frameNumber = stats->frameStartIntCounter;
     header.subFrameNumber = result->subFrameIdx;
+    surfaceStatus.uartEstimatedUs = (uint32_t)(
+        ((uint64_t)header.totalPacketLen * 10000000ULL +
+         gMmwMssMCB.cfg.platformCfg.loggingBaudRate - 1ULL) /
+        gMmwMssMCB.cfg.platformCfg.loggingBaudRate);
+    if (surfaceStatus.framePeriodUs != 0U &&
+        surfaceStatus.uartEstimatedUs >= surfaceStatus.framePeriodUs)
+        surfaceStatus.flags |= MMWDEMO_SURFACE_UART_LIMIT;
+    if (surfaceStatus.framePeriodUs != 0U &&
+        ((uint64_t)surfaceStatus.processingUs + surfaceStatus.uartEstimatedUs + 3000ULL) * 5ULL >
+        (uint64_t)surfaceStatus.framePeriodUs * 4ULL)
+        surfaceStatus.flags |= MMWDEMO_SURFACE_BUDGET_EXCEEDED;
 
     UART_writePolling(
         &header, sizeof(MmwDemo_output_message_header));
@@ -1526,6 +1553,12 @@ static void MmwDemo_transmitProcessedOutput
 
 
 
+    if (pGuiMonSel->customObstacles == 1U)
+    {
+        UART_writePolling(&tl[tlvIdx], sizeof(MmwDemo_output_message_tl));
+        UART_writePolling(&surfaceStatus, sizeof(surfaceStatus));
+        tlvIdx++;
+    }
     /* Send Range profile */
     if (pGuiMonSel->logMagRange)
     {
@@ -1918,8 +1951,6 @@ uint32_t MmwDemo_getNavPostProcReserveUsecForState(
     uint64_t uartUsec;
     uint64_t reserveUsec;
 
-    (void)maxSurfacePoints;
-    (void)surfaceEnabled;
     (void)targetEnabled;
 
     /* Navigation and LVDS share a non-double-buffered result lifetime.  Until
@@ -1932,6 +1963,7 @@ uint32_t MmwDemo_getNavPostProcReserveUsecForState(
         return 0xFFFFFFFFU;
     }
 
+#if MMWDEMO_ENABLE_LEGACY_CFAR_AOA
     if ((gui->detectedObjects == 1U) ||
         (gui->detectedObjects == 2U))
     {
@@ -1944,6 +1976,16 @@ uint32_t MmwDemo_getNavPostProcReserveUsecForState(
         packetBytes += sizeof(MmwDemo_output_message_tl) +
             (uint64_t)MMWDEMO_NAV_TI_MAX_DETECTED_OBJECTS *
             sizeof(DPIF_PointCloudSideInfo);
+    }
+#endif
+    if (surfaceEnabled != 0U)
+    {
+        packetBytes += sizeof(MmwDemo_output_message_tl) + sizeof(MmwDemo_SurfaceStatus);
+        if (maxSurfacePoints > MMWDEMO_SURFACE_MAX_BOXES)
+            maxSurfacePoints = MMWDEMO_SURFACE_MAX_BOXES;
+        if (maxSurfacePoints != 0U)
+            packetBytes += sizeof(MmwDemo_output_message_tl) +
+                           (uint64_t)maxSurfacePoints * sizeof(ObstacleBox);
     }
     if (gui->logMagRange != 0U)
     {
@@ -3058,8 +3100,6 @@ static void MmwDemo_handleObjectDetResult
     DPM_Buffer  *ptrResult
 )
 {
-    static uint32_t lastResultTime[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
-    static uint32_t lastNavSurfacePayloadSize[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
     int32_t     retVal;
     DPC_ObjectDetection_ExecuteResultExportedInfo exportInfo;
     DPC_ObjectDetection_ExecuteResult        *dpcResults;
@@ -3094,122 +3134,26 @@ static void MmwDemo_handleObjectDetResult
     currSubFrameStats = &gMmwMssMCB.subFrameStats[currSubFrameIdx];
     prevSubFrameStats = &gMmwMssMCB.subFrameStats[prevSubFrameIdx];
 
-    /* Allocate the next frame's UART budget to navigation surfaces. */
+    /* Preserve full-frame coverage. The configured frame period, rather than
+     * a heuristic 20-byte point estimate, determines the required rate.
+     * Transport never silently thins the current frame's obstacle list. */
     {
-        uint32_t now = Cycleprofiler_getTimeStamp();
-        uint32_t previous = lastResultTime[currSubFrameIdx];
-        uint16_t nextMaxNavSurface = 384U;
-        uint16_t configuredMaxNavSurface = 384U;
-        uint8_t navGeneration;
-        uint8_t navSurfaceOutputEnabled = 0U;
-        UInt key;
-        volatile MmwDemo_NavCliCfg *sharedNavFeedbackCfg =
-            (volatile MmwDemo_NavCliCfg *)&gHSRAM.navCfg;
-
-        key = Hwi_disable();
-        navGeneration = sharedNavFeedbackCfg->isValid;
-        if (navGeneration != 0U)
-        {
-            navSurfaceOutputEnabled =
-                ((sharedNavFeedbackCfg->enabledSurfaceMask &
-                  (1U << currSubFrameIdx)) != 0U) ? 1U : 0U;
-            if ((sharedNavFeedbackCfg->maxSurfacePoints != 0U) &&
-                (sharedNavFeedbackCfg->maxSurfacePoints <=
-                 MMWDEMO_NAV_MAX_SURFACE_POINTS))
-            {
-                configuredMaxNavSurface =
-                    sharedNavFeedbackCfg->maxSurfacePoints;
-            }
-        }
-        Hwi_restore(key);
-        nextMaxNavSurface = configuredMaxNavSurface;
-
-        if (previous != 0U)
-        {
-            uint32_t periodCycles = now - previous;
-            uint32_t periodUsec = periodCycles / R4F_CLOCK_MHZ;
-            uint32_t uartBudgetUsec = (periodUsec * 2U) / 5U;
-            uint32_t previousProcessingUsec =
-                currSubFrameStats->outputStats.interFrameProcessingTime;
-            uint32_t deadlineBudgetUsec = 0U;
-            uint64_t uartBytesBudget;
-            uint64_t previousTotalBytes =
-                ((uint64_t)gMmwMssMCB.cfg.platformCfg.loggingBaudRate *
-                 (uint64_t)currSubFrameStats->outputStats.transmitOutputTime) /
-                10000000ULL;
-            uint64_t customBytes =
-                (uint64_t)lastNavSurfacePayloadSize[currSubFrameIdx];
-            uint64_t fixedBytes = 256ULL;
-            uint64_t remainingBytes;
-
-            if (previousTotalBytes > customBytes)
-            {
-                fixedBytes = previousTotalBytes - customBytes;
-            }
-            if (periodUsec > (previousProcessingUsec + 2000U))
-            {
-                deadlineBudgetUsec =
-                    periodUsec - previousProcessingUsec - 2000U;
-            }
-            if (uartBudgetUsec > deadlineBudgetUsec)
-            {
-                uartBudgetUsec = deadlineBudgetUsec;
-            }
-            uartBytesBudget =
-                ((uint64_t)gMmwMssMCB.cfg.platformCfg.loggingBaudRate *
-                 (uint64_t)uartBudgetUsec) / 10000000ULL;
-            /* Reserve one segment for changed TLV headers/padding not present
-             * in the previous packet estimate. */
-            fixedBytes += MMWDEMO_OUTPUT_MSG_SEGMENT_LEN;
-            remainingBytes = (uartBytesBudget > fixedBytes) ?
-                             (uartBytesBudget - fixedBytes) : 0ULL;
-
-            if (navSurfaceOutputEnabled != 0U)
-            {
-                uint64_t pointBytes =
-                    sizeof(DPIF_PointCloudCartesian) +
-                    sizeof(DPIF_PointCloudSideInfo);
-                uint64_t navOverhead = sizeof(MmwDemo_output_message_tl) * 2U;
-                uint64_t navSampleBudget = 0ULL;
-                if (remainingBytes > navOverhead)
-                {
-                    navSampleBudget = (remainingBytes - navOverhead) / pointBytes;
-                }
-                if (navSampleBudget > configuredMaxNavSurface)
-                {
-                    navSampleBudget = configuredMaxNavSurface;
-                }
-                if (navSampleBudget < 1ULL)
-                {
-                    navSampleBudget = 1ULL;
-                }
-                nextMaxNavSurface = (uint16_t)navSampleBudget;
-            }
-        }
-        lastResultTime[currSubFrameIdx] = now;
-
-        /* Publish the feedback cap through the same zero/generation
-         * transaction consumed coherently by DSS. */
-        key = Hwi_disable();
-        if ((navGeneration != 0U) &&
-            (sharedNavFeedbackCfg->isValid == navGeneration))
-        {
-            uint8_t nextGeneration = navGeneration + 1U;
-            if (nextGeneration == 0U)
-            {
-                nextGeneration = 1U;
-            }
-            sharedNavFeedbackCfg->isValid = 0U;
+        UInt key = Hwi_disable();
+        volatile MmwDemo_NavCliCfg *shared = &gHSRAM.navCfg;
+        uint8_t generation = shared->isValid;
+        if (generation != 0U) {
+            uint8_t next = generation + 1U;
+            if (next == 0U) next = 1U;
+            shared->isValid = 0U;
             MEM_BARRIER();
-            sharedNavFeedbackCfg->uartMaxSurfacePoints = nextMaxNavSurface;
-            sharedNavFeedbackCfg->postProcReserveUsec[currSubFrameIdx] =
-                MmwDemo_getNavPostProcReserveUsecForState(
-                    currSubFrameIdx,
-                    nextMaxNavSurface,
-                    navSurfaceOutputEnabled,
+            shared->uartMaxSurfacePoints = MMWDEMO_SURFACE_MAX_BOXES;
+            shared->postProcReserveUsec[currSubFrameIdx] =
+                MmwDemo_getNavPostProcReserveUsecForState(currSubFrameIdx,
+                    MMWDEMO_SURFACE_MAX_BOXES,
+                    (shared->enabledSurfaceMask & (1U << currSubFrameIdx)) != 0U,
                     0U);
             MEM_BARRIER();
-            sharedNavFeedbackCfg->isValid = nextGeneration;
+            shared->isValid = next;
             MEM_BARRIER();
         }
         Hwi_restore(key);
@@ -3278,12 +3222,6 @@ static void MmwDemo_handleObjectDetResult
     MmwDemo_transmitProcessedOutput(gMmwMssMCB.loggingUartHandle,
                                     dpcResults,
                                     &currSubFrameStats->outputStats);
-    lastNavSurfacePayloadSize[currSubFrameIdx] =
-        ((gMmwMssMCB.subFrameCfg[currSubFrameIdx].guiMonSel.customObstacles == 1U) &&
-         (gHSRAM.numCustomObstacles > 0U)) ?
-        ((uint32_t)gHSRAM.numCustomObstacles *
-             sizeof(MmwDemo_CustomObstacle) +
-         (uint32_t)sizeof(MmwDemo_output_message_tl)) : 0U;
 
     /* Wait until s/w session is complete. We expect the LVDS transmission of
      * s/w session to be completed by now because the UART transmission above is slower.

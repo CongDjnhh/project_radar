@@ -1,792 +1,445 @@
 /**
- * @file surface_gen.c
- *
- * @brief Per-frame surface point generation and nearest-surface reduction.
- *
- * The dense source estimator provides candidate points for nearest-surface
- * angular ray reduction and prioritized point selection.
+ * Full-frame connected components and conservative XYZ boxes.
+ * Scratch is shared sequentially; temporal state belongs to each subframe.
  */
-
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
-
+#include <float.h>
 #include <ti/utils/cycleprofiler/cycle_profiler.h>
-
 #include "surface_gen.h"
 
+#define SURFACE_SAMPLES MMWDEMO_DENSE_ELEV_MAX_OUTPUT_SAMPLES
+#define SURFACE_HISTORY 64U
+#define SURFACE_HOLD_US 100000UL
+#define SURFACE_CELLS 64U
+#define SURFACE_BUFFER_SIZE (sizeof(MmwDemo_DenseElevation_OutputHeader) + \
+    SURFACE_SAMPLES * sizeof(MmwDemo_DenseElevation_OutputSample))
+
+typedef struct SurfaceBounds_t {
+    float loX, hiX, loY, hiY, loZ, hiZ;
+    uint16_t snr;
+    int16_t doppler;
+    uint16_t minRange;
+    uint8_t valid, rank;
+} SurfaceBounds;
+typedef struct SurfaceHistory_t {
+    ObstacleBox box;
+    uint32_t ageUs;
+    uint8_t valid;
+} SurfaceHistory;
+
+#pragma DATA_SECTION(gSurfaceBounds, ".l3ram")
+#pragma DATA_ALIGN(gSurfaceBounds, 8)
+static far SurfaceBounds gSurfaceBounds[SURFACE_SAMPLES];
+#pragma DATA_SECTION(gSurfaceParent, ".l3ram")
+static far int16_t gSurfaceParent[SURFACE_SAMPLES];
+#pragma DATA_SECTION(gSurfaceOrder, ".l3ram")
+static far uint16_t gSurfaceOrder[SURFACE_SAMPLES];
+#pragma DATA_SECTION(gSurfaceHistory, ".l3ram")
+static far SurfaceHistory gSurfaceHistory[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES][SURFACE_HISTORY];
+static uint8_t gSurfaceMotion[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
+volatile uint32_t gSurfaceInvalidGeometryCount[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
+volatile uint32_t gNavEmitSurfaceCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
+volatile uint32_t gNavEmitSurfaceMaxCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 extern volatile uint32_t gNavDbgDenseSamples;
 extern volatile uint32_t gNavDbgFilteredSamples;
 
-#define MMWDEMO_NAV_NUM_ANGLE_CELLS \
-    (MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS * \
-     MMWDEMO_NAV_NUM_ELEVATION_SECTORS)
-#define MMWDEMO_NAV_SELECTION_BYTES \
-    ((MMWDEMO_NAV_NUM_ANGLE_CELLS + 7U) / 8U)
-#define MMWDEMO_NAV_CANDIDATE_BUFFER_SIZE \
-    (sizeof(MmwDemo_DenseElevation_OutputHeader) + \
-     MMWDEMO_DENSE_ELEV_MAX_OUTPUT_SAMPLES * \
-     sizeof(MmwDemo_DenseElevation_OutputSample))
-
-/* ========================================================================
- * Motion-compensated two-frame confirmation — replaces the decay/hit/count
- * persistence grid. The old filter admitted every sample because the hit
- * bonus (+NAV_HIST_HIT_BONUS) was applied before the threshold test inside
- * the same frame, so nothing was ever rejected.
- *
- * A sample is published only when its (azimuth, range-group) cell — or the
- * cell the target is predicted to have occupied one frame ago — was also
- * detected in the previous frame:
- *   - single-frame spikes (RFI, multipath flicker) are suppressed;
- *   - persistent surfaces at every range are retained (multi-layer);
- *   - closing targets stay confirmed because the lookup follows the
- *     Doppler-predicted range walk (positive Doppler = approaching, so the
- *     previous range was larger).
- * Cost per frame: O(samples + grid clear) byte operations. A newly detected
- * surface is withheld for one frame; platform yaw likewise costs one
- * re-confirmation frame (azimuth cells shift with the platform).
- * ====================================================================== */
-#define MMWDEMO_NAV_PERSIST_MAX_OBSTACLES (64U)
-#define MMWDEMO_NAV_PERSIST_DEFAULT_TTL   (3U)
-
-typedef struct MmwDemo_NavPersistObstacle_t {
-    ObstacleBox box;
-    uint8_t     ttl;        /*!< Remaining lifetime in frames */
-    uint8_t     valid;      /*!< 1 = active, 0 = inactive */
-} MmwDemo_NavPersistObstacle;
-
-/* Persistent across frames -> must reside in L3 RAM */
-#pragma DATA_SECTION(gNavPersistList, ".l3ram")
-#pragma DATA_ALIGN(gNavPersistList, 8)
-static far MmwDemo_NavPersistObstacle gNavPersistList[MMWDEMO_NAV_PERSIST_MAX_OBSTACLES];
-
-#define MMWDEMO_NAV_CLUSTER_MAX_BOXES   (64U)
-#define MMWDEMO_NAV_CLUSTER_MAX_SAMPLES (256U)
-
-typedef struct MmwDemo_NavClusterAcc_t {
-    uint16_t minRange;
-    uint16_t maxRange;
-    float    minU;
-    float    maxU;
-    float    minV;
-    float    maxV;
-    float    sumWeight;
-    float    weightedRange;
-    float    weightedU;
-    float    weightedV;
-    int16_t  peakDoppler;
-    int16_t  peakSnr;
-    int16_t  peakPower;
-} MmwDemo_NavClusterAcc;
-
-#pragma DATA_SECTION(gNavClusterParent, ".navScratch")
-#pragma DATA_ALIGN(gNavClusterParent, 8)
-static int16_t gNavClusterParent[MMWDEMO_NAV_CLUSTER_MAX_SAMPLES];
-
-#pragma DATA_SECTION(gNavRootToBox, ".navScratch")
-#pragma DATA_ALIGN(gNavRootToBox, 8)
-static int16_t gNavRootToBox[MMWDEMO_NAV_CLUSTER_MAX_SAMPLES];
-
-#pragma DATA_SECTION(gNavClusterAcc, ".navScratch")
-#pragma DATA_ALIGN(gNavClusterAcc, 8)
-static MmwDemo_NavClusterAcc gNavClusterAcc[MMWDEMO_NAV_CLUSTER_MAX_BOXES];
-
-#pragma DATA_SECTION(gNavRawBoxes, ".navScratch")
-#pragma DATA_ALIGN(gNavRawBoxes, 8)
-static ObstacleBox gNavRawBoxes[MMWDEMO_NAV_CLUSTER_MAX_BOXES];
-
-#pragma DATA_SECTION(gNavMatchedCurr, ".navScratch")
-#pragma DATA_ALIGN(gNavMatchedCurr, 4)
-static uint8_t gNavMatchedCurr[MMWDEMO_NAV_CLUSTER_MAX_BOXES];
-
-#pragma DATA_SECTION(gNavMatchedPersist, ".navScratch")
-#pragma DATA_ALIGN(gNavMatchedPersist, 4)
-static uint8_t gNavMatchedPersist[MMWDEMO_NAV_PERSIST_MAX_OBSTACLES];
-
-#pragma DATA_SECTION(gNavPredictedX, ".navScratch")
-#pragma DATA_ALIGN(gNavPredictedX, 8)
-static float gNavPredictedX[MMWDEMO_NAV_PERSIST_MAX_OBSTACLES];
-
-#pragma DATA_SECTION(gNavPredictedY, ".navScratch")
-#pragma DATA_ALIGN(gNavPredictedY, 8)
-static float gNavPredictedY[MMWDEMO_NAV_PERSIST_MAX_OBSTACLES];
-
-#pragma DATA_SECTION(gNavMovementX, ".navScratch")
-#pragma DATA_ALIGN(gNavMovementX, 8)
-static float gNavMovementX[MMWDEMO_NAV_PERSIST_MAX_OBSTACLES];
-
-#pragma DATA_SECTION(gNavMovementY, ".navScratch")
-#pragma DATA_ALIGN(gNavMovementY, 8)
-static float gNavMovementY[MMWDEMO_NAV_PERSIST_MAX_OBSTACLES];
-
-/* Cycle profiling for emitSurface. Read via CCS watch to assess execution cost. */
-volatile uint32_t gNavEmitSurfaceCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
-volatile uint32_t gNavEmitSurfaceMaxCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
-
-static int16_t MmwDemo_NavCluster_find(int16_t *parent, int16_t i)
+static int16_t Surface_find(int16_t i)
 {
     int16_t root = i;
-    while (root != parent[root])
-    {
-        root = parent[root];
-    }
-    while (i != root)
-    {
-        int16_t next = parent[i];
-        parent[i] = root;
+    while (gSurfaceParent[root] != root) root = gSurfaceParent[root];
+    while (i != root) {
+        int16_t next = gSurfaceParent[i];
+        gSurfaceParent[i] = root;
         i = next;
     }
     return root;
 }
 
-static uint16_t MmwDemo_SurfaceGen_updatePersistence(
-    const ObstacleBox *currBoxes,
-    uint16_t numCurr,
-    ObstacleBox *outBoxes,
-    uint16_t maxOutput,
-    const MmwDemo_SurfaceGen_StaticCfg *staticCfg)
+static void Surface_product(float a, float b, float c, float d,
+                            float *lo, float *hi)
 {
-    uint16_t p, c;
-    uint8_t *matchedCurr = gNavMatchedCurr;
-    uint8_t *matchedPersist = gNavMatchedPersist;
-    float *predictedX = gNavPredictedX;
-    float *predictedY = gNavPredictedY;
-    float *movementX = gNavMovementX;
-    float *movementY = gNavMovementY;
-    uint16_t outCount = 0U;
-
-    memset(matchedCurr, 0, sizeof(gNavMatchedCurr));
-    memset(matchedPersist, 0, sizeof(gNavMatchedPersist));
-
-    /* Predict each track once so association compares detections against the
-     * position the obstacle is expected to occupy in this frame. */
-    for (p = 0U; p < MMWDEMO_NAV_PERSIST_MAX_OBSTACLES; p++)
-    {
-        predictedX[p] = gNavPersistList[p].box.x;
-        predictedY[p] = gNavPersistList[p].box.y;
-        movementX[p] = 0.0f;
-        movementY[p] = 0.0f;
-
-        if (gNavPersistList[p].valid != 0U)
-        {
-            float radDistSq =
-                (gNavPersistList[p].box.x * gNavPersistList[p].box.x) +
-                (gNavPersistList[p].box.y * gNavPersistList[p].box.y);
-            float deltaR =
-                gNavPersistList[p].box.velocity * staticCfg->framePeriodSec;
-
-            if (radDistSq > 0.01f)
-            {
-                float invDist = 1.0f / sqrtf(radDistSq);
-                movementX[p] =
-                    deltaR * gNavPersistList[p].box.x * invDist;
-                movementY[p] =
-                    deltaR * gNavPersistList[p].box.y * invDist;
-            }
-            else
-            {
-                movementY[p] = deltaR;
-            }
-            predictedX[p] += movementX[p];
-            predictedY[p] += movementY[p];
-        }
-    }
-
-    /* Match current detections against active persistent obstacles */
-    for (c = 0U; c < numCurr; c++)
-    {
-        float bestDist = 1e9f;
-        int16_t bestP = -1;
-
-        for (p = 0U; p < MMWDEMO_NAV_PERSIST_MAX_OBSTACLES; p++)
-        {
-            float dy, dx, dz, totalDist, maxDy, maxDx;
-
-            if (gNavPersistList[p].valid == 0U)
-            {
-                continue;
-            }
-            if (matchedPersist[p] != 0U)
-            {
-                continue; /* 1-to-1 association: avoid multiple current boxes stealing the same track */
-            }
-
-            dy = currBoxes[c].y - predictedY[p];
-            dx = currBoxes[c].x - predictedX[p];
-            dz = currBoxes[c].z - gNavPersistList[p].box.z;
-            if (dy < 0.0f) { dy = -dy; }
-            if (dx < 0.0f) { dx = -dx; }
-            if (dz < 0.0f) { dz = -dz; }
-
-            /* Allow for lateral/radial prediction error without letting fast
-             * motion alone create an unbounded association gate. */
-            maxDy = 0.35f + (0.5f * fabsf(movementY[p]));
-            maxDx = 0.45f + (0.5f * fabsf(movementX[p]));
-            if ((dy <= maxDy) && (dx <= maxDx) && (dz <= 0.60f))
-            {
-                totalDist = dy + dx + dz;
-                if (totalDist < bestDist)
-                {
-                    bestDist = totalDist;
-                    bestP = (int16_t)p;
-                }
-            }
-        }
-
-        if (bestP >= 0)
-        {
-            /* Matched: update persistent obstacle with latest measurement */
-            gNavPersistList[bestP].box = currBoxes[c];
-            gNavPersistList[bestP].ttl = MMWDEMO_NAV_PERSIST_DEFAULT_TTL;
-            matchedCurr[c] = 1U;
-            matchedPersist[bestP] = 1U;
-        }
-    }
-
-    /* Age out unmatched persistent obstacles (intermittent dropout handling)
-     * Executed before new tracks are added to prevent accidental eviction. */
-    for (p = 0U; p < MMWDEMO_NAV_PERSIST_MAX_OBSTACLES; p++)
-    {
-        if (gNavPersistList[p].valid == 0U)
-        {
-            continue;
-        }
-
-        if (matchedPersist[p] == 0U)
-        {
-            /* Dropped in this frame: decrement TTL */
-            if (gNavPersistList[p].ttl > 0U)
-            {
-                gNavPersistList[p].ttl--;
-            }
-            if (gNavPersistList[p].ttl == 0U)
-            {
-                gNavPersistList[p].valid = 0U;
-            }
-            else
-            {
-                /* 2D radial motion extrapolation along line of sight */
-                float radDistSq = (gNavPersistList[p].box.x * gNavPersistList[p].box.x) +
-                                  (gNavPersistList[p].box.y * gNavPersistList[p].box.y);
-                if (radDistSq > 0.01f)
-                {
-                    float invDist = 1.0f / sqrtf(radDistSq);
-                    float dirX = gNavPersistList[p].box.x * invDist;
-                    float dirY = gNavPersistList[p].box.y * invDist;
-                    float deltaR = gNavPersistList[p].box.velocity * staticCfg->framePeriodSec;
-
-                    gNavPersistList[p].box.x += deltaR * dirX;
-                    gNavPersistList[p].box.y += deltaR * dirY;
-                }
-                else
-                {
-                    gNavPersistList[p].box.y += gNavPersistList[p].box.velocity * staticCfg->framePeriodSec;
-                }
-                gNavPersistList[p].box.velocity *= 0.85f;
-
-                if ((gNavPersistList[p].box.y < 0.15f) || (gNavPersistList[p].box.y > 8.64f))
-                {
-                    gNavPersistList[p].valid = 0U;
-                }
-            }
-        }
-    }
-
-    /* Fail-open: add all new/unmatched current boxes immediately into vacant slots */
-    for (c = 0U; c < numCurr; c++)
-    {
-        if (matchedCurr[c] == 0U)
-        {
-            for (p = 0U; p < MMWDEMO_NAV_PERSIST_MAX_OBSTACLES; p++)
-            {
-                if (gNavPersistList[p].valid == 0U)
-                {
-                    gNavPersistList[p].box = currBoxes[c];
-                    gNavPersistList[p].ttl = MMWDEMO_NAV_PERSIST_DEFAULT_TTL;
-                    gNavPersistList[p].valid = 1U;
-                    matchedPersist[p] = 1U;
-                    break;
-                }
-            }
-        }
-    }
-
-    /* Emit active persistent obstacles to outBoxes */
-    for (p = 0U; (p < MMWDEMO_NAV_PERSIST_MAX_OBSTACLES) && (outCount < maxOutput); p++)
-    {
-        if (gNavPersistList[p].valid != 0U)
-        {
-            outBoxes[outCount] = gNavPersistList[p].box;
-            outCount++;
-        }
-    }
-
-    /* Sort by forward distance (y): closest hazards first */
-    if (outCount > 1U)
-    {
-        uint16_t i;
-        for (i = 1U; i < outCount; i++)
-        {
-            ObstacleBox key = outBoxes[i];
-            int16_t k = (int16_t)i - 1;
-            while ((k >= 0) && (outBoxes[k].y > key.y))
-            {
-                outBoxes[k + 1] = outBoxes[k];
-                k--;
-            }
-            outBoxes[k + 1] = key;
-        }
-    }
-
-    /* Assign canonical sequential box IDs after sorting and classify obstacle targets */
-    {
-        uint16_t i;
-        for (i = 0U; i < outCount; i++)
-        {
-            ObstacleBox *obs = &outBoxes[i];
-            uint8_t classType = MMWDEMO_OBSTACLE_CLASS_UNKNOWN;
-            uint8_t rawId = (uint8_t)((i < 255U) ? (i + 1U) : 255U);
-
-            /* Rule 1: Drone (Compact 3D footprint, airborne elevation) */
-            if ((obs->width_x <= 1.0f) && (obs->depth_y <= 1.0f) &&
-                (obs->height_z <= 0.6f) && (obs->z >= 0.4f))
-            {
-                classType = MMWDEMO_OBSTACLE_CLASS_DRONE;
-            }
-            /* Rule 2: Pedestrian (Narrow horizontal footprint, tall vertical extent, ground-linked) */
-            else if ((obs->width_x <= 0.9f) && (obs->depth_y <= 0.9f) &&
-                     (obs->height_z >= 1.0f) && (obs->z <= 0.5f))
-            {
-                classType = MMWDEMO_OBSTACLE_CLASS_PEDESTRIAN;
-            }
-            /* Rule 3: Vehicle (Large horizontal extent and high radar cross-section / SNR) */
-            else if (((obs->width_x >= 1.1f) || (obs->depth_y >= 1.5f)) &&
-                     (obs->snr >= 200))
-            {
-                classType = MMWDEMO_OBSTACLE_CLASS_VEHICLE;
-            }
-            else
-            {
-                classType = MMWDEMO_OBSTACLE_CLASS_UNKNOWN;
-            }
-
-            obs->boxId = MMWDEMO_PACK_OBSTACLE_BOX_ID(classType, rawId);
-        }
-    }
-
-    return outCount;
+    *lo = fminf(fminf(a*c, a*d), fminf(b*c, b*d));
+    *hi = fmaxf(fmaxf(a*c, a*d), fmaxf(b*c, b*d));
 }
 
-static uint16_t MmwDemo_SurfaceGen_emitObstacleBoxes(
-    const MmwDemo_DenseElevation_OutputSample *samples,
-    uint16_t sampleCount,
-    uint16_t maxOutput,
-    ObstacleBox *outObstacles,
-    const MmwDemo_SurfaceGen_StaticCfg *staticCfg)
+/* 0: invalid measurement, 1: accepted, 2: outside physical range FOV. */
+static uint8_t Surface_bounds(const MmwDemo_DenseElevation_OutputSample *s,
+    const MmwDemo_SurfaceGen_StaticCfg *cfg, SurfaceBounds *b)
 {
-    uint16_t N = (sampleCount > MMWDEMO_NAV_CLUSTER_MAX_SAMPLES) ?
-                 MMWDEMO_NAV_CLUSTER_MAX_SAMPLES : sampleCount;
-    uint16_t i, j, b;
-    uint16_t numBoxes = 0U;
-    uint16_t limit = 0U;
-
-    if ((maxOutput == 0U) || (outObstacles == NULL))
-    {
+    float u = (float)s->azimuthUQ15 / 32767.0f;
+    float v = (float)s->sourceVQ15 / 32767.0f;
+    float r = (float)s->rangeIdx * cfg->rangeStepMeters - cfg->rangeBiasMeters;
+    float du = 0.5f * (float)s->azimuthWidthUQ15 / 32767.0f;
+    float dv = 0.5f * (float)s->elevationWidthUQ15 / 32767.0f;
+    float r0, r1, u0, u1, v0, v1, nearU, nearV, farU, farV;
+    memset(b, 0, sizeof(*b));
+    if (!isfinite(r) || r < 0.0f ||
+        s->rangeIdx >= cfg->sourceStaticCfg.numRangeBins ||
+        s->dopplerIdx < -(int32_t)(cfg->sourceStaticCfg.numDopplerBins/2U) ||
+        s->dopplerIdx >= (int32_t)(cfg->sourceStaticCfg.numDopplerBins/2U))
+        return 0U;
+    r0 = fmaxf(0.0f, r - 0.5f * cfg->rangeStepMeters);
+    r1 = r + 0.5f * cfg->rangeStepMeters;
+    /* The CFAR DPU rounds its FOV to bins. Keep the portion of a boundary
+     * cell that intersects the physical interval instead of dropping it. */
+    if (r1 < cfg->minRangeMeters || r0 > cfg->maxRangeMeters) return 2U;
+    r0 = fmaxf(r0, cfg->minRangeMeters);
+    r1 = fminf(r1, cfg->maxRangeMeters);
+    u = fmaxf(-1.0f, fminf(1.0f, u));
+    v = fmaxf(-1.0f, fminf(1.0f, v));
+    u0 = fmaxf(-1.0f, u-du); u1 = fminf(1.0f, u+du);
+    v0 = fmaxf(-1.0f, v-dv); v1 = fminf(1.0f, v+dv);
+    Surface_product(r0, r1, u0, u1, &b->loX, &b->hiX);
+    Surface_product(r0, r1, v0, v1, &b->loZ, &b->hiZ);
+    nearU = (u0 <= 0.0f && u1 >= 0.0f) ? 0.0f : fminf(fabsf(u0), fabsf(u1));
+    nearV = (v0 <= 0.0f && v1 >= 0.0f) ? 0.0f : fminf(fabsf(v0), fabsf(v1));
+    /* u/v describe a support interval, not a single point. Their independently
+     * weighted centers can lie outside the disk although part of the observed
+     * footprint is physical. Reject only an interval with no intersection. */
+    if (nearU*nearU + nearV*nearV > 1.0001f) {
+        b->valid = 0U;
         return 0U;
     }
-
-    if ((N > 0U) && (samples != NULL))
-    {
-        /* Step 1: Initialize Union-Find sets */
-        for (i = 0U; i < N; i++)
-        {
-            gNavClusterParent[i] = (int16_t)i;
-            gNavRootToBox[i] = -1;
-        }
-
-        /* Step 2: Spatial and kinematic connectivity clustering */
-        for (i = 0U; i < N; i++)
-        {
-            int32_t r_i = (int32_t)samples[i].rangeIdx;
-            int32_t d_i = (int32_t)samples[i].dopplerIdx;
-            float u_i = (float)samples[i].azimuthUQ15 / 32767.0f;
-            float hw_u_i = 0.5f * ((float)samples[i].azimuthWidthUQ15 / 32767.0f);
-            float u_min_i = u_i - hw_u_i;
-            float u_max_i = u_i + hw_u_i;
-
-            float v_i = (float)samples[i].sourceVQ15 / 32767.0f;
-            float hw_v_i = 0.5f * ((float)samples[i].elevationWidthUQ15 / 32767.0f);
-            float v_min_i = v_i - hw_v_i;
-            float v_max_i = v_i + hw_v_i;
-
-            for (j = i + 1U; j < N; j++)
-            {
-                int32_t r_diff = (int32_t)samples[j].rangeIdx - r_i;
-                if (r_diff < 0) { r_diff = -r_diff; }
-                if (r_diff > 2)
-                {
-                    continue; /* Range gap too large */
-                }
-
-                int32_t d_diff = (int32_t)samples[j].dopplerIdx - d_i;
-                if (d_diff < 0) { d_diff = -d_diff; }
-                if (d_diff > 3)
-                {
-                    continue; /* Doppler velocity difference too large */
-                }
-
-                float u_j = (float)samples[j].azimuthUQ15 / 32767.0f;
-                float hw_u_j = 0.5f * ((float)samples[j].azimuthWidthUQ15 / 32767.0f);
-                float u_min_j = u_j - hw_u_j;
-                float u_max_j = u_j + hw_u_j;
-
-                /* Check azimuth overlap / adjacency within ~2 bins (0.06 in u-space) */
-                if ((u_min_i > (u_max_j + 0.06f)) || (u_min_j > (u_max_i + 0.06f)))
-                {
-                    continue;
-                }
-
-                float v_j = (float)samples[j].sourceVQ15 / 32767.0f;
-                float hw_v_j = 0.5f * ((float)samples[j].elevationWidthUQ15 / 32767.0f);
-                float v_min_j = v_j - hw_v_j;
-                float v_max_j = v_j + hw_v_j;
-
-                /* Check elevation overlap / adjacency within tolerance (0.15 in v-space) */
-                if ((v_min_i > (v_max_j + 0.15f)) || (v_min_j > (v_max_i + 0.15f)))
-                {
-                    continue;
-                }
-
-                /* Connected: merge sets */
-                {
-                    int16_t root_i = MmwDemo_NavCluster_find(gNavClusterParent, (int16_t)i);
-                    int16_t root_j = MmwDemo_NavCluster_find(gNavClusterParent, (int16_t)j);
-                    if (root_i != root_j)
-                    {
-                        gNavClusterParent[root_i] = root_j;
-                    }
-                }
-            }
-        }
-
-        /* Step 3: Aggregate clusters into bounding box descriptors */
-        for (i = 0U; i < N; i++)
-        {
-            int16_t root = MmwDemo_NavCluster_find(gNavClusterParent, (int16_t)i);
-            int16_t boxIdx = gNavRootToBox[root];
-
-            float u = (float)samples[i].azimuthUQ15 / 32767.0f;
-            float hw_u = 0.5f * ((float)samples[i].azimuthWidthUQ15 / 32767.0f);
-            float u_min = u - hw_u;
-            float u_max = u + hw_u;
-
-            float v = (float)samples[i].sourceVQ15 / 32767.0f;
-            float hw_v = 0.5f * ((float)samples[i].elevationWidthUQ15 / 32767.0f);
-            float v_min = v - hw_v;
-            float v_max = v + hw_v;
-
-            float sampleWeight = (float)samples[i].snrDb10;
-            if (sampleWeight < 1.0f)
-            {
-                sampleWeight = 1.0f;
-            }
-
-            if (boxIdx < 0)
-            {
-                if (numBoxes >= MMWDEMO_NAV_CLUSTER_MAX_BOXES)
-                {
-                    continue;
-                }
-                boxIdx = (int16_t)numBoxes;
-                gNavRootToBox[root] = boxIdx;
-                numBoxes++;
-
-                gNavClusterAcc[boxIdx].minRange = samples[i].rangeIdx;
-                gNavClusterAcc[boxIdx].maxRange = samples[i].rangeIdx;
-                gNavClusterAcc[boxIdx].minU = u_min;
-                gNavClusterAcc[boxIdx].maxU = u_max;
-                gNavClusterAcc[boxIdx].minV = v_min;
-                gNavClusterAcc[boxIdx].maxV = v_max;
-                gNavClusterAcc[boxIdx].sumWeight = sampleWeight;
-                gNavClusterAcc[boxIdx].weightedRange = (float)samples[i].rangeIdx * sampleWeight;
-                gNavClusterAcc[boxIdx].weightedU = u * sampleWeight;
-                gNavClusterAcc[boxIdx].weightedV = v * sampleWeight;
-                gNavClusterAcc[boxIdx].peakDoppler = samples[i].dopplerIdx;
-                gNavClusterAcc[boxIdx].peakSnr = (int16_t)samples[i].snrDb10;
-                gNavClusterAcc[boxIdx].peakPower = samples[i].powerDb10;
-            }
-            else
-            {
-                if (samples[i].rangeIdx < gNavClusterAcc[boxIdx].minRange)
-                {
-                    gNavClusterAcc[boxIdx].minRange = samples[i].rangeIdx;
-                }
-                if (samples[i].rangeIdx > gNavClusterAcc[boxIdx].maxRange)
-                {
-                    gNavClusterAcc[boxIdx].maxRange = samples[i].rangeIdx;
-                }
-                if (u_min < gNavClusterAcc[boxIdx].minU)
-                {
-                    gNavClusterAcc[boxIdx].minU = u_min;
-                }
-                if (u_max > gNavClusterAcc[boxIdx].maxU)
-                {
-                    gNavClusterAcc[boxIdx].maxU = u_max;
-                }
-                if (v_min < gNavClusterAcc[boxIdx].minV)
-                {
-                    gNavClusterAcc[boxIdx].minV = v_min;
-                }
-                if (v_max > gNavClusterAcc[boxIdx].maxV)
-                {
-                    gNavClusterAcc[boxIdx].maxV = v_max;
-                }
-                gNavClusterAcc[boxIdx].sumWeight += sampleWeight;
-                gNavClusterAcc[boxIdx].weightedRange += (float)samples[i].rangeIdx * sampleWeight;
-                gNavClusterAcc[boxIdx].weightedU += u * sampleWeight;
-                gNavClusterAcc[boxIdx].weightedV += v * sampleWeight;
-
-                if ((int16_t)samples[i].snrDb10 > gNavClusterAcc[boxIdx].peakSnr)
-                {
-                    gNavClusterAcc[boxIdx].peakSnr = (int16_t)samples[i].snrDb10;
-                    gNavClusterAcc[boxIdx].peakDoppler = samples[i].dopplerIdx;
-                }
-                if (samples[i].powerDb10 > gNavClusterAcc[boxIdx].peakPower)
-                {
-                    gNavClusterAcc[boxIdx].peakPower = samples[i].powerDb10;
-                }
-            }
-        }
-
-        /* Step 4: Compute physical 3D box coordinates, dimensions and SNR */
-        limit = (numBoxes < MMWDEMO_NAV_CLUSTER_MAX_BOXES) ? numBoxes : MMWDEMO_NAV_CLUSTER_MAX_BOXES;
-        for (b = 0U; b < limit; b++)
-        {
-            float rangeSpan = (float)(gNavClusterAcc[b].maxRange - gNavClusterAcc[b].minRange + 1U);
-            float depth_y = rangeSpan * staticCfg->rangeStepMeters;
-            float rCenter;
-            float dist;
-            float minU, maxU, uCenter, width_u, width_x;
-            float minV, maxV, vCenter, height_v, height_z;
-            float uvNormSq, x, z, ySq, y;
-
-            if (depth_y < staticCfg->rangeStepMeters)
-            {
-                depth_y = staticCfg->rangeStepMeters;
-            }
-            if (depth_y > 2.50f)
-            {
-                depth_y = 2.50f;
-            }
-
-            /* SNR-weighted centroid for stable center tracking without boundary jitter */
-            if (gNavClusterAcc[b].sumWeight > 0.0f)
-            {
-                rCenter = gNavClusterAcc[b].weightedRange / gNavClusterAcc[b].sumWeight;
-                uCenter = gNavClusterAcc[b].weightedU / gNavClusterAcc[b].sumWeight;
-                vCenter = gNavClusterAcc[b].weightedV / gNavClusterAcc[b].sumWeight;
-            }
-            else
-            {
-                rCenter = 0.5f * (float)(gNavClusterAcc[b].minRange + gNavClusterAcc[b].maxRange);
-                uCenter = 0.5f * (gNavClusterAcc[b].minU + gNavClusterAcc[b].maxU);
-                vCenter = 0.5f * (gNavClusterAcc[b].minV + gNavClusterAcc[b].maxV);
-            }
-
-            dist = rCenter * staticCfg->rangeStepMeters + staticCfg->rangeBiasMeters;
-            if (dist < 0.0f)
-            {
-                dist = 0.0f;
-            }
-
-            minU = gNavClusterAcc[b].minU;
-            maxU = gNavClusterAcc[b].maxU;
-            if (minU < -1.0f) { minU = -1.0f; }
-            if (maxU >  1.0f) { maxU =  1.0f; }
-            if (minU > maxU)  { float tmp = minU; minU = maxU; maxU = tmp; }
-            width_u = maxU - minU;
-            width_x = dist * width_u;
-            if (width_x < 0.10f)
-            {
-                width_x = 0.10f;
-            }
-            if (width_x > 3.00f)
-            {
-                width_x = 3.00f;
-            }
-
-            minV = gNavClusterAcc[b].minV;
-            maxV = gNavClusterAcc[b].maxV;
-            if (minV < -1.0f) { minV = -1.0f; }
-            if (maxV >  1.0f) { maxV =  1.0f; }
-            if (minV > maxV)  { float tmp = minV; minV = maxV; maxV = tmp; }
-            height_v = maxV - minV;
-            height_z = dist * height_v;
-            if (height_z < 0.10f)
-            {
-                height_z = 0.10f;
-            }
-            if (height_z > 3.00f)
-            {
-                height_z = 3.00f;
-            }
-
-            /* Projection onto unit forward hemisphere to prevent ySq < 0 at wide angles */
-            uvNormSq = (uCenter * uCenter) + (vCenter * vCenter);
-            if (uvNormSq > 0.99f)
-            {
-                float scale = sqrtf(0.99f / uvNormSq);
-                uCenter *= scale;
-                vCenter *= scale;
-            }
-
-            x = dist * uCenter;
-            z = dist * vCenter;
-            ySq = (dist * dist) - (x * x) - (z * z);
-            y = (ySq > 0.0f) ? sqrtf(ySq) : 0.0f;
-
-            gNavRawBoxes[b].x = x;
-            gNavRawBoxes[b].y = y;
-            gNavRawBoxes[b].z = z;
-            gNavRawBoxes[b].width_x = width_x;
-            gNavRawBoxes[b].depth_y = depth_y;
-            gNavRawBoxes[b].height_z = height_z;
-            gNavRawBoxes[b].velocity = (float)gNavClusterAcc[b].peakDoppler * staticCfg->dopplerStepMps;
-            /* Prioritize true CFAR SNR (in 0.1 dB units); fallback to power if SNR not valid */
-            gNavRawBoxes[b].snr = (gNavClusterAcc[b].peakSnr > 0) ?
-                                  gNavClusterAcc[b].peakSnr : gNavClusterAcc[b].peakPower;
-            gNavRawBoxes[b].boxId = (int16_t)(b + 1U);
-        }
-    }
-
-    /* Update multi-frame persistence: fail-open for new obstacles, preserve confirmed ones */
-    return MmwDemo_SurfaceGen_updatePersistence(gNavRawBoxes, limit, outObstacles, maxOutput, staticCfg);
+    farU = fmaxf(fabsf(u0), fabsf(u1));
+    farV = fmaxf(fabsf(v0), fabsf(v1));
+    /* Intersecting angular support with the physical disk can only tighten
+     * these bounds. Invalid rectangle corners conservatively give yMin=0. */
+    b->loY = r0 * sqrtf(fmaxf(0.0f, 1.0f-farU*farU-farV*farV));
+    b->hiY = r1 * sqrtf(fmaxf(0.0f, 1.0f-nearU*nearU-nearV*nearV));
+    b->snr = (s->snrDb10 > 32767U) ? 32767U : s->snrDb10;
+    b->doppler = s->dopplerIdx;
+    b->minRange = s->rangeIdx;
+    b->valid = 1U;
+    return 1U;
 }
 
-static uint16_t MmwDemo_SurfaceGen_emitSurface(
-    const MmwDemo_DenseElevation_OutputSample *samples,
-    uint16_t sampleCount,
-    uint16_t maxOutput,
-    ObstacleBox *outObstacles,
-    const MmwDemo_SurfaceGen_StaticCfg *staticCfg,
-    uint16_t *availableCount)
+static uint8_t Surface_connected(const MmwDemo_DenseElevation_OutputSample *a,
+                                const MmwDemo_DenseElevation_OutputSample *b)
 {
-    *availableCount = sampleCount;
-    return MmwDemo_SurfaceGen_emitObstacleBoxes(
-        samples, sampleCount, maxOutput, outObstacles, staticCfg);
+    int32_t d = (int32_t)a->dopplerIdx - b->dopplerIdx;
+    float u = fabsf((float)a->azimuthUQ15-b->azimuthUQ15) / 32767.0f;
+    float v = fabsf((float)a->sourceVQ15-b->sourceVQ15) / 32767.0f;
+    if (d < 0) d = -d;
+    return (uint8_t)(d <= 3 &&
+        u <= 0.06f + 0.5f*((float)a->azimuthWidthUQ15+b->azimuthWidthUQ15)/32767.0f &&
+        v <= 0.15f + 0.5f*((float)a->elevationWidthUQ15+b->elevationWidthUQ15)/32767.0f);
 }
 
-int32_t MmwDemo_SurfaceGen_process(
-    const MmwDemo_SurfaceGen_Cfg *cfg,
-    const MmwDemo_SurfaceGen_StaticCfg *staticCfg,
-    uint8_t *candidateBuffer,
-    uint32_t candidateBufferSize,
-    MmwDemo_CustomObstacle *outObstacles,
-    uint16_t maxOutputPoints,
-    uint32_t *numPointsOut)
+static uint8_t Surface_before(const MmwDemo_DenseElevation_OutputSample *a,
+                             const MmwDemo_DenseElevation_OutputSample *b)
 {
-    MmwDemo_DenseElevation_OutputHeader *candidateHeader;
-    MmwDemo_DenseElevation_OutputSample *samples;
-    uint32_t candidateSize = 0U;
-    uint32_t emitSurfaceStartCycles;
-    uint16_t surfaceAvailable = 0U;
-    uint16_t maxSurface;
-    int32_t retVal;
+    if (a->rangeIdx != b->rangeIdx) return a->rangeIdx < b->rangeIdx;
+    if (a->dopplerIdx != b->dopplerIdx) return a->dopplerIdx < b->dopplerIdx;
+    if (a->azimuthUQ15 != b->azimuthUQ15) return a->azimuthUQ15 < b->azimuthUQ15;
+    if (a->sourceVQ15 != b->sourceVQ15) return a->sourceVQ15 < b->sourceVQ15;
+    if (a->azimuthWidthUQ15 != b->azimuthWidthUQ15)
+        return a->azimuthWidthUQ15 < b->azimuthWidthUQ15;
+    if (a->elevationWidthUQ15 != b->elevationWidthUQ15)
+        return a->elevationWidthUQ15 < b->elevationWidthUQ15;
+    return a->snrDb10 > b->snrDb10;
+}
 
-    if (numPointsOut != NULL)
-    {
-        *numPointsOut = 0U;
+static void Surface_merge(SurfaceBounds *a, const SurfaceBounds *b)
+{
+    a->loX=fminf(a->loX,b->loX); a->hiX=fmaxf(a->hiX,b->hiX);
+    a->loY=fminf(a->loY,b->loY); a->hiY=fmaxf(a->hiY,b->hiY);
+    a->loZ=fminf(a->loZ,b->loZ); a->hiZ=fmaxf(a->hiZ,b->hiZ);
+    if (b->minRange < a->minRange) a->minRange = b->minRange;
+    if (b->snr > a->snr || (b->snr == a->snr && b->doppler < a->doppler)) {
+        a->snr = b->snr; a->doppler = b->doppler;
     }
-    if ((cfg == NULL) || (staticCfg == NULL) || (outObstacles == NULL) ||
-        (candidateBuffer == NULL) ||
-        (candidateBufferSize < MMWDEMO_NAV_CANDIDATE_BUFFER_SIZE) ||
-        (numPointsOut == NULL) ||
-        (maxOutputPoints == 0U) ||
-        (cfg->maxSurfacePoints == 0U) ||
-        (!isfinite(staticCfg->rangeStepMeters)) ||
-        !(staticCfg->rangeStepMeters > 0.0f) ||
-        (!isfinite(staticCfg->dopplerStepMps)) ||
-        (!isfinite(staticCfg->framePeriodSec)) ||
-        (staticCfg->framePeriodSec < 0.0f) ||
-        (!isfinite(staticCfg->rangeBiasMeters)) ||
-        (staticCfg->sourceStaticCfg.subFrameNum >=
-         MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES) ||
-        !(staticCfg->dopplerStepMps > 0.0f))
-    {
-        return MMWDEMO_NAV_EINVAL;
+}
+
+static float Surface_extent(float lo, float hi, float minimum)
+{
+    /* Outward margin for reconstruction as center +/- extent/2 in float32. */
+    return fmaxf(minimum, hi-lo +
+        8.0f*FLT_EPSILON*(1.0f+fabsf(lo)+fabsf(hi)));
+}
+
+static void Surface_box(const SurfaceBounds *b,
+                        const MmwDemo_SurfaceGen_StaticCfg *cfg, ObstacleBox *out)
+{
+    out->x=0.5f*(b->loX+b->hiX); out->y=0.5f*(b->loY+b->hiY);
+    out->z=0.5f*(b->loZ+b->hiZ);
+    out->width_x=Surface_extent(b->loX,b->hiX,0.10f);
+    out->depth_y=Surface_extent(b->loY,b->hiY,cfg->rangeStepMeters);
+    out->height_z=Surface_extent(b->loZ,b->hiZ,0.10f);
+    out->velocity=(float)b->doppler*cfg->dopplerStepMps;
+    out->snr=(int16_t)b->snr;
+    out->boxId=0;
+}
+
+static uint8_t Surface_better(uint16_t a, int16_t b)
+{
+    if (b < 0) return 1U;
+    if (gSurfaceBounds[a].snr != gSurfaceBounds[b].snr)
+        return gSurfaceBounds[a].snr > gSurfaceBounds[b].snr;
+    return a < (uint16_t)b;
+}
+
+static uint16_t Surface_cell(const SurfaceBounds *b,
+                            const MmwDemo_SurfaceGen_StaticCfg *cfg)
+{
+    float rawMin=(cfg->minRangeMeters+cfg->rangeBiasMeters)/cfg->rangeStepMeters;
+    float rawMax=(cfg->maxRangeMeters+cfg->rangeBiasMeters)/cfg->rangeStepMeters;
+    uint32_t first=(rawMin > 0.0f) ? (uint32_t)rawMin : 0U;
+    uint32_t last=(rawMax > 0.0f) ? (uint32_t)rawMax : 0U;
+    uint32_t span=(last >= first) ? last-first+1U : 1U;
+    float x=0.5f*(b->loX+b->hiX), y=0.5f*(b->loY+b->hiY), z=0.5f*(b->loZ+b->hiZ);
+    float norm=sqrtf(x*x+y*y+z*z);
+    uint32_t rc=(b->minRange > first) ? 8U*(b->minRange-first)/span : 0U;
+    uint32_t ac=(uint32_t)(4.0f*(1.0f+((norm > 0.0f) ? x/norm : 0.0f)));
+    if (rc > 7U) rc=7U;
+    if (ac > 7U) ac=7U;
+    return (uint16_t)(rc*8U+ac);
+}
+
+void MmwDemo_SurfaceGen_resetSubFrame(uint16_t sf)
+{
+    if (sf < MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES) {
+        memset(gSurfaceHistory[sf],0,sizeof(gSurfaceHistory[sf]));
+        gSurfaceMotion[sf]=0xFFU;
     }
-
-    maxSurface = (cfg->maxSurfacePoints < maxOutputPoints) ?
-                 cfg->maxSurfacePoints : maxOutputPoints;
-    if ((cfg->uartMaxSurfacePoints != 0U) &&
-        (cfg->uartMaxSurfacePoints < maxSurface))
-    {
-        maxSurface = cfg->uartMaxSurfacePoints;
-    }
-
-    retVal = MmwDemo_DenseElevation_process(
-        &cfg->sourceCfg,
-        &staticCfg->sourceStaticCfg,
-        candidateBuffer,
-        candidateBufferSize,
-        MMWDEMO_DENSE_ELEV_MAX_OUTPUT_SAMPLES,
-        &candidateSize);
-    if (retVal != 0)
-    {
-        return retVal;
-    }
-
-    /* The dense candidate buffer is scratch until navigation has copied the
-     * selected points into the frame output. */
-    candidateHeader =
-        (MmwDemo_DenseElevation_OutputHeader *)candidateBuffer;
-    if ((candidateSize < sizeof(*candidateHeader)) ||
-        (candidateHeader->magic != MMWDEMO_DENSE_ELEVATION_MAGIC) ||
-        (candidateHeader->version !=
-         MMWDEMO_DENSE_ELEVATION_PROTOCOL_VERSION) ||
-        (candidateHeader->headerSize != sizeof(*candidateHeader)) ||
-         (candidateHeader->sampleSize !=
-          sizeof(MmwDemo_DenseElevation_OutputSample)) ||
-        (candidateHeader->protocolStatus != 0U) ||
-        ((candidateHeader->flags & MMWDEMO_DENSE_REQUIRED_FLAGS) !=
-         MMWDEMO_DENSE_REQUIRED_FLAGS) ||
-        (candidateHeader->numSamples >
-         MMWDEMO_DENSE_ELEV_MAX_OUTPUT_SAMPLES) ||
-        (candidateSize != sizeof(*candidateHeader) +
-         (uint32_t)candidateHeader->numSamples *
-         sizeof(MmwDemo_DenseElevation_OutputSample)))
-    {
-        return MMWDEMO_NAV_ECANDIDATE_PAYLOAD;
-    }
-
-    samples = (MmwDemo_DenseElevation_OutputSample *)(
-        candidateBuffer + candidateHeader->headerSize);
-
-    gNavDbgDenseSamples = (uint32_t)candidateHeader->numSamples;
-
-    emitSurfaceStartCycles = Cycleprofiler_getTimeStamp();
-    *numPointsOut = (uint32_t)MmwDemo_SurfaceGen_emitSurface(
-        samples, candidateHeader->numSamples, maxSurface,
-        outObstacles, staticCfg,
-        &surfaceAvailable);
-
-    gNavDbgFilteredSamples = *numPointsOut;
-
-    {
-        uint32_t emitElapsed = Cycleprofiler_getTimeStamp() -
-                               emitSurfaceStartCycles;
-        uint16_t sfIdx = candidateHeader->subFrameNumber;
-        gNavEmitSurfaceCycles[sfIdx] = emitElapsed;
-        if (emitElapsed > gNavEmitSurfaceMaxCycles[sfIdx])
-        {
-            gNavEmitSurfaceMaxCycles[sfIdx] = emitElapsed;
-        }
-    }
-
-    return 0;
 }
 
 void MmwDemo_SurfaceGen_reset(void)
 {
-    memset(gNavPersistList, 0, sizeof(gNavPersistList));
+    uint16_t sf;
+    for (sf=0U; sf<MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES; sf++)
+        MmwDemo_SurfaceGen_resetSubFrame(sf);
 }
+
+static uint16_t Surface_history(ObstacleBox *out, uint16_t current, uint16_t cap,
+                               const MmwDemo_SurfaceGen_StaticCfg *cfg)
+{
+    uint16_t sf=cfg->sourceStaticCfg.subFrameNum;
+    SurfaceHistory *h=gSurfaceHistory[sf];
+    uint8_t matched[SURFACE_HISTORY], matchedCurr[MMWDEMO_SURFACE_MAX_BOXES];
+    uint16_t c,p,count=current,held=0U;
+    memset(matched,0,sizeof(matched));
+    memset(matchedCurr,0,sizeof(matchedCurr));
+    if (gSurfaceMotion[sf] != cfg->motionMode) {
+        MmwDemo_SurfaceGen_resetSubFrame(sf); gSurfaceMotion[sf]=cfg->motionMode;
+    }
+    for (p=0U;p<SURFACE_HISTORY;p++) {
+        if (h[p].valid) {
+            if (cfg->elapsedUsec > SURFACE_HOLD_US ||
+                h[p].ageUs > SURFACE_HOLD_US-cfg->elapsedUsec) h[p].valid=0U;
+            else h[p].ageUs+=cfg->elapsedUsec;
+        }
+    }
+    for (c=0U;c<current;c++) {
+        int16_t best=-1; float bestDist=1e9f;
+        for (p=0U;p<SURFACE_HISTORY;p++) {
+            float dx,dy,dz,dist;
+            if (!h[p].valid || matched[p]) continue;
+            dx=fabsf(out[c].x-h[p].box.x); dy=fabsf(out[c].y-h[p].box.y);
+            dz=fabsf(out[c].z-h[p].box.z); dist=dx+dy+dz;
+            if (dx<=0.45f && dy<=0.35f && dz<=0.60f && dist<bestDist) {
+                bestDist=dist; best=(int16_t)p;
+            }
+        }
+        if (best>=0) {
+            h[best].box=out[c]; h[best].ageUs=0U;
+            matched[best]=1U; matchedCurr[c]=1U;
+        }
+    }
+    /* Current measurements never wait for a free history slot. */
+    if (cfg->motionMode==MMWDEMO_SURFACE_MOTION_FIXED) {
+        for (p=0U;p<SURFACE_HISTORY;p++) {
+            if (h[p].valid && !matched[p]) {
+                if (count<cap) { out[count++]=h[p].box; held++; }
+                else cfg->status->flags|=MMWDEMO_SURFACE_BOX_LIMIT;
+            }
+        }
+    }
+    for (c=0U;c<current;c++) {
+        int16_t slot=-1;
+        if (matchedCurr[c]) continue;
+        for (p=0U;p<SURFACE_HISTORY;p++) {
+            if (matched[p]) continue;
+            if (!h[p].valid) { slot=(int16_t)p; break; }
+            if (slot<0 || h[p].ageUs>h[slot].ageUs) slot=(int16_t)p;
+        }
+        if (slot>=0) {
+            h[slot].box=out[c]; h[slot].ageUs=0U; h[slot].valid=1U; matched[slot]=1U;
+        } else cfg->status->flags|=MMWDEMO_SURFACE_HISTORY_LIMIT;
+    }
+    cfg->status->heldCount=held;
+    if (held) cfg->status->flags|=MMWDEMO_SURFACE_HOLD_ACTIVE;
+    return count;
+}
+
+int32_t MmwDemo_SurfaceGen_cluster(
+    const MmwDemo_DenseElevation_OutputSample *samples,uint16_t n,
+    const MmwDemo_SurfaceGen_StaticCfg *cfg,
+    ObstacleBox *out,uint16_t cap,uint32_t *count)
+{
+    uint16_t i,j,current=0U,reps=0U;
+    int16_t best[SURFACE_CELLS];
+    uint32_t clusters=0U;
+    if (count) *count=0U;
+    if (cfg && cfg->status && n>SURFACE_SAMPLES)
+        cfg->status->flags |= MMWDEMO_SURFACE_CLUSTER_LIMIT | MMWDEMO_SURFACE_PROCESS_ERROR;
+    if (!cfg || !out || !count || !cfg->status || n>SURFACE_SAMPLES ||
+        (n && !samples) || !cap ||
+        cfg->sourceStaticCfg.subFrameNum>=MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES ||
+        !cfg->sourceStaticCfg.numRangeBins || !cfg->sourceStaticCfg.numDopplerBins ||
+        cfg->motionMode>MMWDEMO_SURFACE_MOTION_FIXED ||
+        (cfg->motionMode==MMWDEMO_SURFACE_MOTION_FIXED && cfg->elapsedUsec==0U) ||
+        !isfinite(cfg->rangeStepMeters) || !(cfg->rangeStepMeters>0.0f) ||
+        !isfinite(cfg->rangeBiasMeters) || !isfinite(cfg->dopplerStepMps) ||
+        !(cfg->dopplerStepMps>0.0f) || !isfinite(cfg->minRangeMeters) ||
+        !isfinite(cfg->maxRangeMeters) || cfg->minRangeMeters<0.0f ||
+        !(cfg->maxRangeMeters>cfg->minRangeMeters)) return MMWDEMO_NAV_EINVAL;
+    if (cap>MMWDEMO_SURFACE_MAX_BOXES) cap=MMWDEMO_SURFACE_MAX_BOXES;
+    for (i=0U;i<n;i++) {
+        uint16_t at=i;
+        while (at && Surface_before(&samples[i],&samples[gSurfaceOrder[at-1U]])) {
+            gSurfaceOrder[at]=gSurfaceOrder[at-1U]; at--;
+        }
+        gSurfaceOrder[at]=i;
+    }
+    for (i=0U;i<n;i++) {
+        uint8_t valid;
+        gSurfaceParent[i]=(int16_t)i;
+        valid=Surface_bounds(&samples[gSurfaceOrder[i]],cfg,&gSurfaceBounds[i]);
+        if (!valid) {
+            cfg->status->flags|=MMWDEMO_SURFACE_INVALID_GEOMETRY;
+            gSurfaceInvalidGeometryCount[cfg->sourceStaticCfg.subFrameNum]++;
+        } else if (valid==1U) cfg->status->denseClustered++;
+    }
+    for (i=0U;i<n;i++) {
+        const MmwDemo_DenseElevation_OutputSample *a=&samples[gSurfaceOrder[i]];
+        if (!gSurfaceBounds[i].valid) continue;
+        for (j=i+1U;j<n;j++) {
+            const MmwDemo_DenseElevation_OutputSample *b=&samples[gSurfaceOrder[j]];
+            int16_t ri,rj;
+            if ((uint32_t)b->rangeIdx>(uint32_t)a->rangeIdx+2U) break;
+            if (!gSurfaceBounds[j].valid || !Surface_connected(a,b)) continue;
+            ri=Surface_find((int16_t)i); rj=Surface_find((int16_t)j);
+            if (ri==rj) continue;
+            if (gSurfaceBounds[ri].rank<gSurfaceBounds[rj].rank) gSurfaceParent[ri]=rj;
+            else {
+                gSurfaceParent[rj]=ri;
+                if (gSurfaceBounds[ri].rank==gSurfaceBounds[rj].rank) gSurfaceBounds[ri].rank++;
+            }
+        }
+    }
+    for (i=0U;i<n;i++) {
+        int16_t root=Surface_find((int16_t)i);
+        if (gSurfaceBounds[i].valid && root!=(int16_t)i)
+            Surface_merge(&gSurfaceBounds[root],&gSurfaceBounds[i]);
+    }
+    for (i=0U;i<SURFACE_CELLS;i++) best[i]=-1;
+    for (i=0U;i<n;i++) {
+        if (gSurfaceBounds[i].valid && Surface_find((int16_t)i)==(int16_t)i) {
+            uint16_t cell=Surface_cell(&gSurfaceBounds[i],cfg);
+            clusters++; gSurfaceBounds[i].rank=0U;
+            if (Surface_better(i,best[cell])) best[cell]=(int16_t)i;
+        }
+    }
+    cfg->status->clusterCount=(uint16_t)clusters;
+    if (clusters>cap) cfg->status->flags|=MMWDEMO_SURFACE_BOX_LIMIT;
+    for (i=0U;i<SURFACE_CELLS;i++) if (best[i]>=0) best[reps++]=best[i];
+    /* With fewer slots than occupied cells, sample the complete cell range. */
+    for (i=0U;i<reps && current<cap;i++) {
+        uint16_t pos=(reps>cap) ? (uint16_t)((uint32_t)i*reps/cap) : i;
+        uint16_t root=(uint16_t)best[pos];
+        Surface_box(&gSurfaceBounds[root],cfg,&out[current++]);
+        gSurfaceBounds[root].rank=1U;
+    }
+    while (current<cap && current<clusters) {
+        int16_t next=-1;
+        for (i=0U;i<n;i++)
+            if (gSurfaceBounds[i].valid && !gSurfaceBounds[i].rank &&
+                Surface_find((int16_t)i)==(int16_t)i && Surface_better(i,next))
+                next=(int16_t)i;
+        if (next<0) break;
+        Surface_box(&gSurfaceBounds[next],cfg,&out[current++]);
+        gSurfaceBounds[next].rank=1U;
+    }
+    current=Surface_history(out,current,cap,cfg);
+    for (i=1U;i<current;i++) {
+        ObstacleBox key=out[i]; uint16_t at=i;
+        while (at && (out[at-1U].y>key.y ||
+            (out[at-1U].y==key.y && out[at-1U].x>key.x))) {
+            out[at]=out[at-1U]; at--;
+        }
+        out[at]=key;
+    }
+    for (i=0U;i<current;i++) {
+        ObstacleBox *b=&out[i];
+        uint8_t type=MMWDEMO_OBSTACLE_CLASS_UNKNOWN;
+        if (b->width_x<=1.0f && b->depth_y<=1.0f &&
+            b->height_z<=0.6f && b->z>=0.4f) type=MMWDEMO_OBSTACLE_CLASS_DRONE;
+        else if (b->width_x<=0.9f && b->depth_y<=0.9f &&
+            b->height_z>=1.0f && b->z<=0.5f) type=MMWDEMO_OBSTACLE_CLASS_PEDESTRIAN;
+        else if ((b->width_x>=1.1f || b->depth_y>=1.5f) &&
+            b->snr>=200) type=MMWDEMO_OBSTACLE_CLASS_VEHICLE;
+        b->boxId=MMWDEMO_PACK_OBSTACLE_BOX_ID(type,i+1U);
+    }
+    cfg->status->boxCount=current;
+    *count=current;
+    return 0;
+}
+
+int32_t MmwDemo_SurfaceGen_process(
+    const MmwDemo_SurfaceGen_Cfg *cfg,const MmwDemo_SurfaceGen_StaticCfg *staticCfg,
+    uint8_t *buffer,uint32_t size,MmwDemo_CustomObstacle *out,
+    uint16_t maxOutput,uint32_t *count)
+{
+    MmwDemo_DenseElevation_OutputHeader *header;
+    MmwDemo_DenseElevation_OutputSample *samples;
+    uint32_t produced=0U,start,elapsed;
+    uint16_t cap,sf;
+    int32_t ret;
+    if (count) *count=0U;
+    if (!cfg || !staticCfg || !staticCfg->status || !buffer ||
+        size<SURFACE_BUFFER_SIZE || !out || !count || !maxOutput ||
+        !cfg->maxSurfacePoints ||
+        staticCfg->sourceStaticCfg.subFrameNum>=MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES)
+        return MMWDEMO_NAV_EINVAL;
+    sf=staticCfg->sourceStaticCfg.subFrameNum;
+    ret=MmwDemo_DenseElevation_process(&cfg->sourceCfg,&staticCfg->sourceStaticCfg,
+        buffer,size,SURFACE_SAMPLES,&produced);
+    if (ret) { staticCfg->status->flags|=MMWDEMO_SURFACE_PROCESS_ERROR; return ret; }
+    header=(MmwDemo_DenseElevation_OutputHeader *)buffer;
+    if (produced<sizeof(*header) || header->magic!=MMWDEMO_DENSE_ELEVATION_MAGIC ||
+        header->version!=MMWDEMO_DENSE_ELEVATION_PROTOCOL_VERSION ||
+        header->headerSize!=sizeof(*header) || header->sampleSize!=sizeof(*samples) ||
+        header->protocolStatus || header->subFrameNumber!=sf ||
+        header->numSamples>SURFACE_SAMPLES ||
+        (header->flags & MMWDEMO_DENSE_REQUIRED_FLAGS)!=MMWDEMO_DENSE_REQUIRED_FLAGS ||
+        produced!=sizeof(*header)+header->numSamples*sizeof(*samples)) {
+        staticCfg->status->flags|=MMWDEMO_SURFACE_PROCESS_ERROR;
+        return MMWDEMO_NAV_ECANDIDATE_PAYLOAD;
+    }
+    staticCfg->status->cfarProcessed=(uint16_t)header->reservedPad;
+    staticCfg->status->rangeCount=(uint16_t)(header->reservedPad>>16U);
+    staticCfg->status->denseProduced=header->numSamples;
+    if (header->flags & MMWDEMO_DENSE_FLAG_OUTPUT_LIMITED)
+        staticCfg->status->flags|=MMWDEMO_SURFACE_DENSE_LIMIT;
+    cap=(cfg->maxSurfacePoints<maxOutput) ? cfg->maxSurfacePoints : maxOutput;
+    if (cfg->uartMaxSurfacePoints && cfg->uartMaxSurfacePoints<cap) {
+        cap=cfg->uartMaxSurfacePoints;
+        staticCfg->status->flags|=MMWDEMO_SURFACE_UART_LIMIT;
+    }
+    samples=(MmwDemo_DenseElevation_OutputSample *)(buffer+sizeof(*header));
+    gNavDbgDenseSamples=header->numSamples;
+    start=Cycleprofiler_getTimeStamp();
+    ret=MmwDemo_SurfaceGen_cluster(samples,header->numSamples,staticCfg,out,cap,count);
+    elapsed=Cycleprofiler_getTimeStamp()-start;
+    gNavEmitSurfaceCycles[sf]=elapsed;
+    if (elapsed>gNavEmitSurfaceMaxCycles[sf]) gNavEmitSurfaceMaxCycles[sf]=elapsed;
+    gNavDbgFilteredSamples=*count;
+    if (ret) staticCfg->status->flags|=MMWDEMO_SURFACE_PROCESS_ERROR;
+    return ret;
+}
+
+#ifdef MMWDEMO_SURFACE_SELFTEST
+#include "tests/surface_fixtures.inc"
+#endif
