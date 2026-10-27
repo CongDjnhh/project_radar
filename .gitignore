@@ -5,7 +5,12 @@ Debug/
 Release/
 **/Debug/
 **/Release/
+isk/
+aop/
+**/isk/
+**/aop/
 src/makefile.libs
+.build-surface/
 
 # ==========================================================
 # 2. File thực thi & Nhị phân của TI mmWave Radar (AWR1843 / AWR2x44P)
@@ -23,21 +28,32 @@ src/makefile.libs
 *.xem4
 *.rprc
 *.tiimage
+crcFile
 
 # ==========================================================
 # 3. File biên dịch trung gian C/C++ & TI Compiler
 # ==========================================================
 *.obj
 *.o
+*.oe674
+*.oe66
+*.oer4f
+*.oer4ft
+*.oer5f
+*.oem4
 *.d
+*.d_raw
+*.dep
 *.pp
 *.opt
 *.lib
 *.a
 *.sdo
 *.mk
-*. subdir_vars.mk
-*. subdir_rules.mk
+*.subdir_vars.mk
+*.subdir_rules.mk
+configPkg/
+**/configPkg/
 
 # ==========================================================
 # 4. File sinh tự động từ TI SysConfig (Chỉ giữ lại file gốc *.syscfg)
@@ -50,7 +66,7 @@ syscfg/
 **/ti_power_clock_config.*
 
 # ==========================================================
-# 5. Cấu hình cá nhân trên CCStudio Theia / VS Code / Clangd
+# 5. Cấu hình cá nhân trên CCStudio Theia / VS Code / Clangd / AI Tools
 # ==========================================================
 .theia/
 .vscode/
@@ -58,8 +74,12 @@ syscfg/
 .metadata/
 .clangd/
 .cache/
+.codex/
 compile_commands.json
 *.launch
+dual_agent*
+run_dual_agent.bat
+FINAL_DUAL_AGENT_OUTPUT.md
 
 # ==========================================================
 # 6. File rác của Hệ điều hành
@@ -70,3 +90,9 @@ Desktop.ini
 *~
 *.bak
 *.tmp
+
+# ==========================================================
+# 7. Tài liệu và output phân tích sinh tự động & Cache
+# ==========================================================
+docs/**/*.*
+graphify-out/

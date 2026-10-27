@@ -13,6 +13,8 @@
 #define SURFACE_HISTORY 64U
 #define SURFACE_HOLD_US 100000UL
 #define SURFACE_CELLS 64U
+#define SURFACE_MAX_ROW_SAMPLES MMWDEMO_DENSE_ELEV_MAX_RANGE_SAMPLES
+#define SURFACE_ACTIVE_CAP (3U * SURFACE_MAX_ROW_SAMPLES)
 #define SURFACE_BUFFER_SIZE (sizeof(MmwDemo_DenseElevation_OutputHeader) + \
     SURFACE_SAMPLES * sizeof(MmwDemo_DenseElevation_OutputSample))
 
@@ -28,6 +30,20 @@ typedef struct SurfaceHistory_t {
     uint32_t ageUs;
     uint8_t valid;
 } SurfaceHistory;
+typedef struct SurfaceWinSlot_t {
+    uint16_t rangeIdx;
+    uint16_t count;
+    MmwDemo_DenseElevation_OutputSample samples[SURFACE_MAX_ROW_SAMPLES];
+    uint8_t valid[SURFACE_MAX_ROW_SAMPLES];
+    int16_t activeIdx[SURFACE_MAX_ROW_SAMPLES];
+} SurfaceWinSlot;
+typedef struct SurfaceActiveNode_t {
+    SurfaceBounds bounds;
+    uint16_t birthOrder;
+    int16_t parent;
+    uint8_t inUse;
+    uint8_t keep;
+} SurfaceActiveNode;
 
 #pragma DATA_SECTION(gSurfaceBounds, ".l3ram")
 #pragma DATA_ALIGN(gSurfaceBounds, 8)
@@ -38,6 +54,13 @@ static far int16_t gSurfaceParent[SURFACE_SAMPLES];
 static far uint16_t gSurfaceOrder[SURFACE_SAMPLES];
 #pragma DATA_SECTION(gSurfaceHistory, ".l3ram")
 static far SurfaceHistory gSurfaceHistory[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES][SURFACE_HISTORY];
+#pragma DATA_SECTION(gSurfaceWin, ".l3ram")
+#pragma DATA_ALIGN(gSurfaceWin, 8)
+static far SurfaceWinSlot gSurfaceWin[3];
+#pragma DATA_SECTION(gSurfaceActive, ".l3ram")
+#pragma DATA_ALIGN(gSurfaceActive, 8)
+static far SurfaceActiveNode gSurfaceActive[SURFACE_ACTIVE_CAP];
+static uint16_t gSurfaceWinCount;
 static uint8_t gSurfaceMotion[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 volatile uint32_t gSurfaceInvalidGeometryCount[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 volatile uint32_t gNavEmitSurfaceCycles[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
@@ -123,8 +146,8 @@ static uint8_t Surface_connected(const MmwDemo_DenseElevation_OutputSample *a,
     float v = fabsf((float)a->sourceVQ15-b->sourceVQ15) / 32767.0f;
     if (d < 0) d = -d;
     return (uint8_t)(d <= 3 &&
-        u <= 0.06f + 0.5f*((float)a->azimuthWidthUQ15+b->azimuthWidthUQ15)/32767.0f &&
-        v <= 0.15f + 0.5f*((float)a->elevationWidthUQ15+b->elevationWidthUQ15)/32767.0f);
+        u <= 0.08f + 0.5f*((float)a->azimuthWidthUQ15+b->azimuthWidthUQ15)/32767.0f &&
+        v <= 0.20f + 0.5f*((float)a->elevationWidthUQ15+b->elevationWidthUQ15)/32767.0f);
 }
 
 static uint8_t Surface_before(const MmwDemo_DenseElevation_OutputSample *a,
@@ -164,9 +187,9 @@ static void Surface_box(const SurfaceBounds *b,
 {
     out->x=0.5f*(b->loX+b->hiX); out->y=0.5f*(b->loY+b->hiY);
     out->z=0.5f*(b->loZ+b->hiZ);
-    out->width_x=Surface_extent(b->loX,b->hiX,0.10f);
+    out->width_x=Surface_extent(b->loX,b->hiX,0.15f);
     out->depth_y=Surface_extent(b->loY,b->hiY,cfg->rangeStepMeters);
-    out->height_z=Surface_extent(b->loZ,b->hiZ,0.10f);
+    out->height_z=Surface_extent(b->loZ,b->hiZ,0.15f);
     out->velocity=(float)b->doppler*cfg->dopplerStepMps;
     out->snr=(int16_t)b->snr;
     out->boxId=0;
@@ -212,6 +235,7 @@ void MmwDemo_SurfaceGen_reset(void)
         MmwDemo_SurfaceGen_resetSubFrame(sf);
 }
 
+#pragma CODE_SECTION(Surface_history, ".surfaceCode")
 static uint16_t Surface_history(ObstacleBox *out, uint16_t current, uint16_t cap,
                                const MmwDemo_SurfaceGen_StaticCfg *cfg)
 {
@@ -273,14 +297,322 @@ static uint16_t Surface_history(ObstacleBox *out, uint16_t current, uint16_t cap
     return count;
 }
 
+#pragma CODE_SECTION(Surface_selectAndEmit, ".surfaceCode")
+static void Surface_selectAndEmit(
+    uint16_t nSlots, uint32_t extraClusters,
+    const MmwDemo_SurfaceGen_StaticCfg *cfg,
+    ObstacleBox *out, uint16_t cap, uint32_t *count)
+{
+    uint16_t i, k, current = 0U, reps = 0U;
+    int16_t best[SURFACE_CELLS];
+    uint16_t selected[MMWDEMO_SURFACE_MAX_BOXES];
+    uint16_t selectedCell[MMWDEMO_SURFACE_MAX_BOXES];
+    uint32_t clusters = extraClusters;
+
+    for (i = 0U; i < SURFACE_CELLS; i++) best[i] = -1;
+    for (i = 0U; i < nSlots; i++) {
+        if (gSurfaceBounds[i].valid && Surface_find((int16_t)i) == (int16_t)i) {
+            uint16_t cell = Surface_cell(&gSurfaceBounds[i], cfg);
+            clusters++;
+            gSurfaceBounds[i].rank = 0U;
+            if (Surface_better(i, best[cell])) best[cell] = (int16_t)i;
+        }
+    }
+    cfg->status->clusterCount = (clusters > 65535U) ? 65535U : (uint16_t)clusters;
+    if (clusters > cap) cfg->status->flags |= MMWDEMO_SURFACE_BOX_LIMIT;
+    for (i = 0U; i < SURFACE_CELLS; i++) if (best[i] >= 0) best[reps++] = best[i];
+    /* With fewer slots than occupied cells, sample the complete cell range. */
+    for (i = 0U; i < reps && current < cap; i++) {
+        uint16_t pos = (reps > cap) ? (uint16_t)((uint32_t)i * reps / cap) : i;
+        uint16_t root = (uint16_t)best[pos];
+        selected[current] = root;
+        selectedCell[current] = Surface_cell(&gSurfaceBounds[root], cfg);
+        current++;
+        gSurfaceBounds[root].rank = 1U;
+    }
+    while (current < cap && current < clusters) {
+        int16_t next = -1;
+        for (i = 0U; i < nSlots; i++)
+            if (gSurfaceBounds[i].valid && !gSurfaceBounds[i].rank &&
+                Surface_find((int16_t)i) == (int16_t)i && Surface_better(i, next))
+                next = (int16_t)i;
+        if (next < 0) break;
+        selected[current] = (uint16_t)next;
+        selectedCell[current] = Surface_cell(&gSurfaceBounds[next], cfg);
+        current++;
+        gSurfaceBounds[next].rank = 1U;
+    }
+    /* Q7: Conservative overflow AABB merging into selected representatives. */
+    if (clusters > current && current > 0U) {
+        for (i = 0U; i < nSlots; i++) {
+            if (gSurfaceBounds[i].valid && !gSurfaceBounds[i].rank &&
+                Surface_find((int16_t)i) == (int16_t)i) {
+                uint16_t cell = Surface_cell(&gSurfaceBounds[i], cfg);
+                float cx = 0.5f * (gSurfaceBounds[i].loX + gSurfaceBounds[i].hiX);
+                float cy = 0.5f * (gSurfaceBounds[i].loY + gSurfaceBounds[i].hiY);
+                float cz = 0.5f * (gSurfaceBounds[i].loZ + gSurfaceBounds[i].hiZ);
+                uint16_t bestIdx = 0U;
+                float bestSameDist = FLT_MAX;
+                float bestAnyDist = FLT_MAX;
+                uint8_t foundSame = 0U;
+                for (k = 0U; k < current; k++) {
+                    uint16_t sel = selected[k];
+                    float sx = 0.5f * (gSurfaceBounds[sel].loX + gSurfaceBounds[sel].hiX);
+                    float sy = 0.5f * (gSurfaceBounds[sel].loY + gSurfaceBounds[sel].hiY);
+                    float sz = 0.5f * (gSurfaceBounds[sel].loZ + gSurfaceBounds[sel].hiZ);
+                    float dist = fabsf(cx - sx) + fabsf(cy - sy) + fabsf(cz - sz);
+                    if (selectedCell[k] == cell) {
+                        if (!foundSame || dist < bestSameDist) {
+                            bestSameDist = dist;
+                            bestIdx = k;
+                            foundSame = 1U;
+                        }
+                    } else if (!foundSame && dist < bestAnyDist) {
+                        bestAnyDist = dist;
+                        bestIdx = k;
+                    }
+                }
+                Surface_merge(&gSurfaceBounds[selected[bestIdx]], &gSurfaceBounds[i]);
+            }
+        }
+    }
+    for (i = 0U; i < current; i++) {
+        Surface_box(&gSurfaceBounds[selected[i]], cfg, &out[i]);
+    }
+    current = Surface_history(out, current, cap, cfg);
+    for (i = 1U; i < current; i++) {
+        ObstacleBox key = out[i]; uint16_t at = i;
+        while (at && (out[at - 1U].y > key.y ||
+            (out[at - 1U].y == key.y && out[at - 1U].x > key.x))) {
+            out[at] = out[at - 1U]; at--;
+        }
+        out[at] = key;
+    }
+    for (i = 0U; i < current; i++) {
+        ObstacleBox *b = &out[i];
+        uint8_t type = MMWDEMO_OBSTACLE_CLASS_UNKNOWN;
+        if (b->width_x <= 1.0f && b->depth_y <= 1.0f &&
+            b->height_z <= 0.6f && b->z >= 0.4f) type = MMWDEMO_OBSTACLE_CLASS_DRONE;
+        else if (b->width_x <= 0.9f && b->depth_y <= 0.9f &&
+            b->height_z >= 1.0f && b->z <= 0.5f) type = MMWDEMO_OBSTACLE_CLASS_PEDESTRIAN;
+        else if ((b->width_x >= 1.1f || b->depth_y >= 1.5f) &&
+            b->snr >= 200) type = MMWDEMO_OBSTACLE_CLASS_VEHICLE;
+        b->boxId = MMWDEMO_PACK_OBSTACLE_BOX_ID(type, i + 1U);
+    }
+    cfg->status->boxCount = current;
+    *count = current;
+}
+
+static int16_t Surface_activeFind(int16_t i)
+{
+    int16_t root = i;
+    while (gSurfaceActive[root].parent != root)
+        root = gSurfaceActive[root].parent;
+    while (i != root) {
+        int16_t next = gSurfaceActive[i].parent;
+        gSurfaceActive[i].parent = root;
+        i = next;
+    }
+    return root;
+}
+
+static void Surface_activeUnion(int16_t a, int16_t b)
+{
+    int16_t ra = Surface_activeFind(a);
+    int16_t rb = Surface_activeFind(b);
+    if (ra == rb) return;
+    if (gSurfaceActive[ra].bounds.rank < gSurfaceActive[rb].bounds.rank) {
+        gSurfaceActive[ra].parent = rb;
+        Surface_merge(&gSurfaceActive[rb].bounds, &gSurfaceActive[ra].bounds);
+    } else {
+        gSurfaceActive[rb].parent = ra;
+        if (gSurfaceActive[ra].bounds.rank == gSurfaceActive[rb].bounds.rank)
+            gSurfaceActive[ra].bounds.rank++;
+        Surface_merge(&gSurfaceActive[ra].bounds, &gSurfaceActive[rb].bounds);
+    }
+}
+
+static void Surface_streamEmitCompleted(
+    const SurfaceBounds *b, uint16_t birthOrder,
+    const MmwDemo_SurfaceGen_StaticCfg *cfg,
+    uint16_t *completedSlots, uint32_t *overflowClusters)
+{
+    if (*completedSlots < SURFACE_SAMPLES) {
+        uint16_t at = *completedSlots;
+        while (at > 0U && gSurfaceOrder[at - 1U] > birthOrder) {
+            gSurfaceBounds[at] = gSurfaceBounds[at - 1U];
+            gSurfaceOrder[at] = gSurfaceOrder[at - 1U];
+            gSurfaceParent[at] = (int16_t)at;
+            at--;
+        }
+        gSurfaceBounds[at] = *b;
+        gSurfaceBounds[at].rank = 0U;
+        gSurfaceOrder[at] = birthOrder;
+        gSurfaceParent[at] = (int16_t)at;
+        (*completedSlots)++;
+    } else {
+        uint16_t cell = Surface_cell(b, cfg);
+        uint16_t i, bestIdx = 0U;
+        uint8_t foundCell = 0U;
+        float cx = 0.5f * (b->loX + b->hiX);
+        float cy = 0.5f * (b->loY + b->hiY);
+        float cz = 0.5f * (b->loZ + b->hiZ);
+        float bestDist = FLT_MAX;
+        for (i = 0U; i < *completedSlots; i++) {
+            uint16_t c = Surface_cell(&gSurfaceBounds[i], cfg);
+            float sx = 0.5f * (gSurfaceBounds[i].loX + gSurfaceBounds[i].hiX);
+            float sy = 0.5f * (gSurfaceBounds[i].loY + gSurfaceBounds[i].hiY);
+            float sz = 0.5f * (gSurfaceBounds[i].loZ + gSurfaceBounds[i].hiZ);
+            float dist = fabsf(cx - sx) + fabsf(cy - sy) + fabsf(cz - sz);
+            if (c == cell) {
+                if (!foundCell || dist < bestDist) {
+                    bestDist = dist;
+                    bestIdx = i;
+                    foundCell = 1U;
+                }
+            } else if (!foundCell && dist < bestDist) {
+                bestDist = dist;
+                bestIdx = i;
+            }
+        }
+        Surface_merge(&gSurfaceBounds[bestIdx], b);
+        (*overflowClusters)++;
+    }
+}
+
+static void Surface_streamRetireSlot0(
+    const MmwDemo_SurfaceGen_StaticCfg *cfg,
+    uint16_t *completedSlots, uint32_t *overflowClusters)
+{
+    SurfaceWinSlot *w0 = &gSurfaceWin[0];
+    uint16_t i, j, s;
+
+    for (i = 0U; i < w0->count; i++) {
+        if (!w0->valid[i]) continue;
+        for (j = i + 1U; j < w0->count; j++) {
+            if (w0->valid[j] && Surface_connected(&w0->samples[i], &w0->samples[j]))
+                Surface_activeUnion(w0->activeIdx[i], w0->activeIdx[j]);
+        }
+        for (s = 1U; s < gSurfaceWinCount; s++) {
+            SurfaceWinSlot *ws = &gSurfaceWin[s];
+            if ((uint32_t)ws->rangeIdx > (uint32_t)w0->rangeIdx + 2U) break;
+            for (j = 0U; j < ws->count; j++) {
+                if (ws->valid[j] && Surface_connected(&w0->samples[i], &ws->samples[j]))
+                    Surface_activeUnion(w0->activeIdx[i], ws->activeIdx[j]);
+            }
+        }
+    }
+
+    for (i = 0U; i < SURFACE_ACTIVE_CAP; i++)
+        gSurfaceActive[i].keep = 0U;
+
+    for (s = 1U; s < gSurfaceWinCount; s++) {
+        SurfaceWinSlot *ws = &gSurfaceWin[s];
+        for (j = 0U; j < ws->count; j++) {
+            if (ws->valid[j]) {
+                int16_t root = Surface_activeFind(ws->activeIdx[j]);
+                ws->activeIdx[j] = root;
+                gSurfaceActive[root].keep = 1U;
+            }
+        }
+    }
+
+    for (i = 0U; i < w0->count; i++) {
+        int16_t root;
+        if (!w0->valid[i]) continue;
+        root = Surface_activeFind(w0->activeIdx[i]);
+        if (gSurfaceActive[root].keep == 0U) {
+            gSurfaceActive[root].keep = 2U;
+            Surface_streamEmitCompleted(&gSurfaceActive[root].bounds,
+                gSurfaceActive[root].birthOrder, cfg, completedSlots, overflowClusters);
+        }
+    }
+
+    for (i = 0U; i < SURFACE_ACTIVE_CAP; i++) {
+        if (gSurfaceActive[i].keep == 1U) {
+            gSurfaceActive[i].parent = (int16_t)i;
+        } else {
+            gSurfaceActive[i].inUse = 0U;
+            gSurfaceActive[i].keep = 0U;
+        }
+    }
+
+    for (s = 1U; s < gSurfaceWinCount; s++)
+        gSurfaceWin[s - 1U] = gSurfaceWin[s];
+    gSurfaceWinCount--;
+}
+
+static void Surface_streamPushRange(
+    uint16_t rangeIdx,
+    const MmwDemo_DenseElevation_OutputSample *samples,
+    uint16_t nSamples,
+    const MmwDemo_SurfaceGen_StaticCfg *cfg,
+    uint16_t *nextBirthOrder,
+    uint16_t *completedSlots,
+    uint32_t *overflowClusters)
+{
+    SurfaceWinSlot *ws;
+    uint16_t i, slotSearch = 0U;
+
+    while (gSurfaceWinCount > 0U &&
+           (((uint32_t)rangeIdx > (uint32_t)gSurfaceWin[0].rangeIdx + 2U) ||
+            (gSurfaceWinCount >= 3U))) {
+        Surface_streamRetireSlot0(cfg, completedSlots, overflowClusters);
+    }
+
+    ws = &gSurfaceWin[gSurfaceWinCount++];
+    ws->rangeIdx = rangeIdx;
+    ws->count = (nSamples > SURFACE_MAX_ROW_SAMPLES) ? SURFACE_MAX_ROW_SAMPLES : nSamples;
+    for (i = 0U; i < ws->count; i++) {
+        MmwDemo_DenseElevation_OutputSample key = samples[i];
+        uint16_t at = i;
+        while (at > 0U && Surface_before(&key, &ws->samples[at - 1U])) {
+            ws->samples[at] = ws->samples[at - 1U];
+            at--;
+        }
+        ws->samples[at] = key;
+    }
+
+    for (i = 0U; i < ws->count; i++) {
+        SurfaceBounds b;
+        uint8_t valid = Surface_bounds(&ws->samples[i], cfg, &b);
+        uint16_t birth = (*nextBirthOrder)++;
+        if (valid == 0U) {
+            cfg->status->flags |= MMWDEMO_SURFACE_INVALID_GEOMETRY;
+            gSurfaceInvalidGeometryCount[cfg->sourceStaticCfg.subFrameNum]++;
+            ws->valid[i] = 0U;
+            ws->activeIdx[i] = -1;
+        } else if (valid == 2U) {
+            ws->valid[i] = 0U;
+            ws->activeIdx[i] = -1;
+        } else {
+            cfg->status->denseClustered++;
+            while (slotSearch < SURFACE_ACTIVE_CAP && gSurfaceActive[slotSearch].inUse)
+                slotSearch++;
+            if (slotSearch < SURFACE_ACTIVE_CAP) {
+                gSurfaceActive[slotSearch].bounds = b;
+                gSurfaceActive[slotSearch].birthOrder = birth;
+                gSurfaceActive[slotSearch].parent = (int16_t)slotSearch;
+                gSurfaceActive[slotSearch].inUse = 1U;
+                gSurfaceActive[slotSearch].keep = 0U;
+                ws->valid[i] = 1U;
+                ws->activeIdx[i] = (int16_t)slotSearch;
+                slotSearch++;
+            } else {
+                ws->valid[i] = 0U;
+                ws->activeIdx[i] = -1;
+            }
+        }
+    }
+}
+
+#pragma CODE_SECTION(MmwDemo_SurfaceGen_cluster, ".surfaceCode")
 int32_t MmwDemo_SurfaceGen_cluster(
     const MmwDemo_DenseElevation_OutputSample *samples,uint16_t n,
     const MmwDemo_SurfaceGen_StaticCfg *cfg,
     ObstacleBox *out,uint16_t cap,uint32_t *count)
 {
-    uint16_t i,j,current=0U,reps=0U;
-    int16_t best[SURFACE_CELLS];
-    uint32_t clusters=0U;
+    uint16_t i,j;
     if (count) *count=0U;
     if (cfg && cfg->status && n>SURFACE_SAMPLES)
         cfg->status->flags |= MMWDEMO_SURFACE_CLUSTER_LIMIT | MMWDEMO_SURFACE_PROCESS_ERROR;
@@ -334,59 +666,11 @@ int32_t MmwDemo_SurfaceGen_cluster(
         if (gSurfaceBounds[i].valid && root!=(int16_t)i)
             Surface_merge(&gSurfaceBounds[root],&gSurfaceBounds[i]);
     }
-    for (i=0U;i<SURFACE_CELLS;i++) best[i]=-1;
-    for (i=0U;i<n;i++) {
-        if (gSurfaceBounds[i].valid && Surface_find((int16_t)i)==(int16_t)i) {
-            uint16_t cell=Surface_cell(&gSurfaceBounds[i],cfg);
-            clusters++; gSurfaceBounds[i].rank=0U;
-            if (Surface_better(i,best[cell])) best[cell]=(int16_t)i;
-        }
-    }
-    cfg->status->clusterCount=(uint16_t)clusters;
-    if (clusters>cap) cfg->status->flags|=MMWDEMO_SURFACE_BOX_LIMIT;
-    for (i=0U;i<SURFACE_CELLS;i++) if (best[i]>=0) best[reps++]=best[i];
-    /* With fewer slots than occupied cells, sample the complete cell range. */
-    for (i=0U;i<reps && current<cap;i++) {
-        uint16_t pos=(reps>cap) ? (uint16_t)((uint32_t)i*reps/cap) : i;
-        uint16_t root=(uint16_t)best[pos];
-        Surface_box(&gSurfaceBounds[root],cfg,&out[current++]);
-        gSurfaceBounds[root].rank=1U;
-    }
-    while (current<cap && current<clusters) {
-        int16_t next=-1;
-        for (i=0U;i<n;i++)
-            if (gSurfaceBounds[i].valid && !gSurfaceBounds[i].rank &&
-                Surface_find((int16_t)i)==(int16_t)i && Surface_better(i,next))
-                next=(int16_t)i;
-        if (next<0) break;
-        Surface_box(&gSurfaceBounds[next],cfg,&out[current++]);
-        gSurfaceBounds[next].rank=1U;
-    }
-    current=Surface_history(out,current,cap,cfg);
-    for (i=1U;i<current;i++) {
-        ObstacleBox key=out[i]; uint16_t at=i;
-        while (at && (out[at-1U].y>key.y ||
-            (out[at-1U].y==key.y && out[at-1U].x>key.x))) {
-            out[at]=out[at-1U]; at--;
-        }
-        out[at]=key;
-    }
-    for (i=0U;i<current;i++) {
-        ObstacleBox *b=&out[i];
-        uint8_t type=MMWDEMO_OBSTACLE_CLASS_UNKNOWN;
-        if (b->width_x<=1.0f && b->depth_y<=1.0f &&
-            b->height_z<=0.6f && b->z>=0.4f) type=MMWDEMO_OBSTACLE_CLASS_DRONE;
-        else if (b->width_x<=0.9f && b->depth_y<=0.9f &&
-            b->height_z>=1.0f && b->z<=0.5f) type=MMWDEMO_OBSTACLE_CLASS_PEDESTRIAN;
-        else if ((b->width_x>=1.1f || b->depth_y>=1.5f) &&
-            b->snr>=200) type=MMWDEMO_OBSTACLE_CLASS_VEHICLE;
-        b->boxId=MMWDEMO_PACK_OBSTACLE_BOX_ID(type,i+1U);
-    }
-    cfg->status->boxCount=current;
-    *count=current;
+    Surface_selectAndEmit(n, 0U, cfg, out, cap, count);
     return 0;
 }
 
+#pragma CODE_SECTION(MmwDemo_SurfaceGen_process, ".surfaceCode")
 int32_t MmwDemo_SurfaceGen_process(
     const MmwDemo_SurfaceGen_Cfg *cfg,const MmwDemo_SurfaceGen_StaticCfg *staticCfg,
     uint8_t *buffer,uint32_t size,MmwDemo_CustomObstacle *out,
@@ -394,50 +678,95 @@ int32_t MmwDemo_SurfaceGen_process(
 {
     MmwDemo_DenseElevation_OutputHeader *header;
     MmwDemo_DenseElevation_OutputSample *samples;
-    uint32_t produced=0U,start,elapsed;
-    uint16_t cap,sf;
+    MmwDemo_DenseElevation_OutputSample rangeSamples[SURFACE_MAX_ROW_SAMPLES];
+    uint32_t start, elapsed, totalProduced = 0U, overflowClusters = 0U;
+    uint16_t cap, sf, minRange = 0U, maxRange = 0U, processedCfar = 0U, processedRanges = 0U;
+    uint16_t r, k, bufCount = 0U, nextBirthOrder = 0U, completedSlots = 0U;
+    uint8_t cfarClamped = 0U, denseLimited = 0U;
     int32_t ret;
     if (count) *count=0U;
     if (!cfg || !staticCfg || !staticCfg->status || !buffer ||
         size<SURFACE_BUFFER_SIZE || !out || !count || !maxOutput ||
         !cfg->maxSurfacePoints ||
-        staticCfg->sourceStaticCfg.subFrameNum>=MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES)
+        staticCfg->sourceStaticCfg.subFrameNum>=MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES ||
+        !staticCfg->sourceStaticCfg.numRangeBins || !staticCfg->sourceStaticCfg.numDopplerBins ||
+        staticCfg->motionMode>MMWDEMO_SURFACE_MOTION_FIXED ||
+        (staticCfg->motionMode==MMWDEMO_SURFACE_MOTION_FIXED && staticCfg->elapsedUsec==0U) ||
+        !isfinite(staticCfg->rangeStepMeters) || !(staticCfg->rangeStepMeters>0.0f) ||
+        !isfinite(staticCfg->rangeBiasMeters) || !isfinite(staticCfg->dopplerStepMps) ||
+        !(staticCfg->dopplerStepMps>0.0f) || !isfinite(staticCfg->minRangeMeters) ||
+        !isfinite(staticCfg->maxRangeMeters) || staticCfg->minRangeMeters<0.0f ||
+        !(staticCfg->maxRangeMeters>staticCfg->minRangeMeters))
         return MMWDEMO_NAV_EINVAL;
     sf=staticCfg->sourceStaticCfg.subFrameNum;
-    ret=MmwDemo_DenseElevation_process(&cfg->sourceCfg,&staticCfg->sourceStaticCfg,
-        buffer,size,SURFACE_SAMPLES,&produced);
+    start=Cycleprofiler_getTimeStamp();
+    ret=MmwDemo_DenseElevation_prepareFrame(&cfg->sourceCfg,&staticCfg->sourceStaticCfg,
+        &minRange,&maxRange,&processedCfar,&cfarClamped);
     if (ret) { staticCfg->status->flags|=MMWDEMO_SURFACE_PROCESS_ERROR; return ret; }
+    if (cfarClamped) staticCfg->status->flags|=MMWDEMO_SURFACE_CFAR_LIMIT;
+
     header=(MmwDemo_DenseElevation_OutputHeader *)buffer;
-    if (produced<sizeof(*header) || header->magic!=MMWDEMO_DENSE_ELEVATION_MAGIC ||
-        header->version!=MMWDEMO_DENSE_ELEVATION_PROTOCOL_VERSION ||
-        header->headerSize!=sizeof(*header) || header->sampleSize!=sizeof(*samples) ||
-        header->protocolStatus || header->subFrameNumber!=sf ||
-        header->numSamples>SURFACE_SAMPLES ||
-        (header->flags & MMWDEMO_DENSE_REQUIRED_FLAGS)!=MMWDEMO_DENSE_REQUIRED_FLAGS ||
-        produced!=sizeof(*header)+header->numSamples*sizeof(*samples)) {
-        staticCfg->status->flags|=MMWDEMO_SURFACE_PROCESS_ERROR;
-        return MMWDEMO_NAV_ECANDIDATE_PAYLOAD;
+    samples=(MmwDemo_DenseElevation_OutputSample *)(buffer+sizeof(*header));
+    gSurfaceWinCount=0U;
+    memset(gSurfaceActive, 0, sizeof(gSurfaceActive));
+
+    for (r=minRange; r<=maxRange; r++) {
+        uint16_t nRange=0U;
+        uint8_t rangeLim=0U;
+        if (MmwDemo_DenseElevation_processRange(r,&cfg->sourceCfg,&staticCfg->sourceStaticCfg,
+                rangeSamples,SURFACE_MAX_ROW_SAMPLES,&nRange,&rangeLim)) {
+            processedRanges++;
+            if (rangeLim) denseLimited=1U;
+            if (nRange > 0U) {
+                totalProduced += nRange;
+                for (k=0U; k<nRange && bufCount<SURFACE_SAMPLES; k++)
+                    samples[bufCount++] = rangeSamples[k];
+                Surface_streamPushRange(r,rangeSamples,nRange,staticCfg,
+                    &nextBirthOrder,&completedSlots,&overflowClusters);
+            }
+        }
     }
-    staticCfg->status->cfarProcessed=(uint16_t)header->reservedPad;
-    staticCfg->status->rangeCount=(uint16_t)(header->reservedPad>>16U);
-    staticCfg->status->denseProduced=header->numSamples;
-    if (header->flags & MMWDEMO_DENSE_FLAG_OUTPUT_LIMITED)
-        staticCfg->status->flags|=MMWDEMO_SURFACE_DENSE_LIMIT;
+    while (gSurfaceWinCount > 0U)
+        Surface_streamRetireSlot0(staticCfg,&completedSlots,&overflowClusters);
+
+    memset(header, 0, sizeof(*header));
+    header->magic = MMWDEMO_DENSE_ELEVATION_MAGIC;
+    header->version = MMWDEMO_DENSE_ELEVATION_PROTOCOL_VERSION;
+    header->headerSize = sizeof(*header);
+    header->sampleSize = sizeof(*samples);
+    header->numSamples = bufCount;
+    header->flags = MMWDEMO_DENSE_REQUIRED_FLAGS |
+        ((denseLimited || totalProduced > SURFACE_SAMPLES) ? MMWDEMO_DENSE_FLAG_OUTPUT_LIMITED : 0U) |
+        (staticCfg->sourceStaticCfg.staticClutterRemovalEnabled ? MMWDEMO_DENSE_FLAG_STATIC_CLUTTER_APPLIED : 0U);
+    header->subFrameNumber = sf;
+    header->rangeStart = minRange;
+    header->rangeEnd = maxRange + 1U;
+    header->numRangeBins = staticCfg->sourceStaticCfg.numRangeBins;
+    header->numDopplerBins = staticCfg->sourceStaticCfg.numDopplerBins;
+    header->numAzimuthBins = MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
+    header->numElevationBins = MMWDEMO_DENSE_ELEV_NUM_ELEVATION_BINS;
+    header->radarFrameNumber = staticCfg->sourceStaticCfg.frameNumber;
+    header->reservedPad = (uint32_t)processedCfar | ((uint32_t)processedRanges << 16U);
+
+    staticCfg->status->cfarProcessed = processedCfar;
+    staticCfg->status->rangeCount = processedRanges;
+    staticCfg->status->denseProduced = (totalProduced > 65535U) ? 65535U : (uint16_t)totalProduced;
+    if (denseLimited)
+        staticCfg->status->flags |= MMWDEMO_SURFACE_DENSE_LIMIT;
     cap=(cfg->maxSurfacePoints<maxOutput) ? cfg->maxSurfacePoints : maxOutput;
     if (cfg->uartMaxSurfacePoints && cfg->uartMaxSurfacePoints<cap) {
         cap=cfg->uartMaxSurfacePoints;
         staticCfg->status->flags|=MMWDEMO_SURFACE_UART_LIMIT;
     }
-    samples=(MmwDemo_DenseElevation_OutputSample *)(buffer+sizeof(*header));
-    gNavDbgDenseSamples=header->numSamples;
-    start=Cycleprofiler_getTimeStamp();
-    ret=MmwDemo_SurfaceGen_cluster(samples,header->numSamples,staticCfg,out,cap,count);
+    if (cap>MMWDEMO_SURFACE_MAX_BOXES) cap=MMWDEMO_SURFACE_MAX_BOXES;
+    gNavDbgDenseSamples=staticCfg->status->denseProduced;
+    Surface_selectAndEmit(completedSlots, overflowClusters, staticCfg, out, cap, count);
     elapsed=Cycleprofiler_getTimeStamp()-start;
+    header->processingCycles = elapsed;
     gNavEmitSurfaceCycles[sf]=elapsed;
     if (elapsed>gNavEmitSurfaceMaxCycles[sf]) gNavEmitSurfaceMaxCycles[sf]=elapsed;
     gNavDbgFilteredSamples=*count;
-    if (ret) staticCfg->status->flags|=MMWDEMO_SURFACE_PROCESS_ERROR;
-    return ret;
+    return 0;
 }
 
 #ifdef MMWDEMO_SURFACE_SELFTEST

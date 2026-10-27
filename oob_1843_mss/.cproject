@@ -50,7 +50,7 @@
                                     <listOptionValue value="SOC_XWR18XX"/>
                                     <listOptionValue value="SUBSYS_MSS"/>
                                     <listOptionValue value="DOWNLOAD_FROM_CCS"/>
-                                    <listOptionValue value="MMWAVE_L3RAM_NUM_BANK=8"/>
+                                    <listOptionValue value="MMWAVE_L3RAM_NUM_BANK=6"/>
                                     <listOptionValue value="MMWAVE_SHMEM_TCMA_NUM_BANK=0"/>
                                     <listOptionValue value="MMWAVE_SHMEM_TCMB_NUM_BANK=0"/>
                                     <listOptionValue value="MMWAVE_SHMEM_BANK_SIZE=0x20000"/>
@@ -245,7 +245,7 @@
                                     <listOptionValue value="SOC_XWR18XX"/>
                                     <listOptionValue value="SUBSYS_MSS"/>
                                     <listOptionValue value="DOWNLOAD_FROM_CCS"/>
-                                    <listOptionValue value="MMWAVE_L3RAM_NUM_BANK=8"/>
+                                    <listOptionValue value="MMWAVE_L3RAM_NUM_BANK=6"/>
                                     <listOptionValue value="MMWAVE_SHMEM_TCMA_NUM_BANK=0"/>
                                     <listOptionValue value="MMWAVE_SHMEM_TCMB_NUM_BANK=0"/>
                                     <listOptionValue value="MMWAVE_SHMEM_BANK_SIZE=0x20000"/>

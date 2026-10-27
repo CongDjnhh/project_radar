@@ -9,6 +9,7 @@ SECTIONS
     systemHeap : {} >> L2SRAM_UMAP0 | L2SRAM_UMAP1
     .hwaBufs: load = HWA_RAM, type = NOINIT
     .l3ram: {} >> L3SRAM
+    .surfaceCode: {} >> L3SRAM
     /* Target fixtures exist only in MMWDEMO_SURFACE_SELFTEST builds. */
     .surfaceSelfTest: {} >> L3SRAM
     .dpc_l2Heap: { } >> L2SRAM_UMAP0 | L2SRAM_UMAP1
@@ -25,4 +26,3 @@ SECTIONS
     .demoSharedMem: { } >> HSRAM
 }
 /*----------------------------------------------------------------------------*/
-

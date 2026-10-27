@@ -203,6 +203,23 @@ uint32_t MmwDemo_SurfaceDetection_selfTest(void)
         gSurfaceCfarHardwareCount[pattern]=result.numCfarDetectedPoints;
         if (missing || expected!=result.numCfarDetectedPoints) fail|=2UL<<pattern;
     }
+    /* Verify DSP CASO-CFAR seed audit + Stage-2 rightward region growing. */
+    for (i=0U;i<4096U;i++) matrix[i]=1000U;
+    matrix[20U*16U]=6000U;
+    matrix[21U*16U]=1500U;
+    matrix[22U*16U]=1400U;
+    dc.cfarCfgRange=sf->dynCfg.cfarCfgRange;
+    dc.cfarCfgDoppler=sf->dynCfg.cfarCfgDoppler;
+    dc.cfarFovRangeMinBin=5U;
+    dc.cfarFovRangeMaxBin=90U;
+    dc.cfarFovDopplerMinBin=-8;
+    dc.cfarFovDopplerMaxBin=7;
+    dc.enableDspCfarAudit=1U;
+    dc.cfarRngDopSnrList=list;
+    dc.numCfarPeaks=0U;
+    if (MmwDemo_DenseElevation_process(&cfg,&dc,gNavCandidateScratch,
+        sizeof(gNavCandidateScratch),3072U,&bytes) ||
+        header->numSamples<3U || (header->reservedPad>>16U)!=3U) fail|=16UL;
     MmwDemo_DenseElevation_reset();
     MmwDemo_SurfaceGen_reset();
     gSurfaceDetectionSelfTestFailures=fail;

@@ -93,8 +93,8 @@ uint32_t MmwDemo_SurfaceGen_selfTest(void)
         if (dr < 0) dr = -dr;
         if (dd < 0) dd = -dd;
         if (dr <= 2 && dd <= 3 &&
-            du <= 0.06f*32767.0f + 0.5f*(s[i].azimuthWidthUQ15+s[j].azimuthWidthUQ15) &&
-            dv <= 0.15f*32767.0f + 0.5f*(s[i].elevationWidthUQ15+s[j].elevationWidthUQ15))
+            du <= 0.08f*32767.0f + 0.5f*(s[i].azimuthWidthUQ15+s[j].azimuthWidthUQ15) &&
+            dv <= 0.20f*32767.0f + 0.5f*(s[i].elevationWidthUQ15+s[j].elevationWidthUQ15))
             gSurfaceReferenceParent[Fixture_root((uint16_t)i)] = Fixture_root((uint16_t)j);
     }
     if (Fixture_run(s, 400U, &cfg, &count) || cfg.status->denseClustered != 400U)
@@ -161,13 +161,33 @@ uint32_t MmwDemo_SurfaceGen_selfTest(void)
     for (i = 0U; i < count; i++)
         if (((uint16_t)out[i].boxId & 255U) != i+1U ||
             !isfinite(out[i].x) || !isfinite(out[i].y) || !isfinite(out[i].z)) fail |= 256UL;
-    /* Explicitly generate 300 disconnected components. */
+    /* Explicitly generate 300 disconnected components and verify Q7 conservative enclosure. */
     for (i = 0U; i < 300U; i++)
         Fixture_sample(&s[i], (uint16_t)(2U+(i/16U)*3U),
             (int16_t)(((int32_t)(i%16U)*2-15)*1500));
     if (Fixture_run(s, 300U, &cfg, &count) || count != 255U ||
         cfg.status->clusterCount != 300U ||
         !(cfg.status->flags & MMWDEMO_SURFACE_BOX_LIMIT)) fail |= 256UL;
+    for (i = 0U; i < 300U; i++) {
+        SurfaceBounds sb;
+        float cx, cy, cz;
+        uint8_t covered = 0U;
+        if (Surface_bounds(&s[i], &cfg, &sb) != 1U) { fail |= 256UL; break; }
+        cx = 0.5f * (sb.loX + sb.hiX);
+        cy = 0.5f * (sb.loY + sb.hiY);
+        cz = 0.5f * (sb.loZ + sb.hiZ);
+        for (j = 0U; j < count; j++) {
+            if (cx >= out[j].x - 0.5f * out[j].width_x - 1e-4f &&
+                cx <= out[j].x + 0.5f * out[j].width_x + 1e-4f &&
+                cy >= out[j].y - 0.5f * out[j].depth_y - 1e-4f &&
+                cy <= out[j].y + 0.5f * out[j].depth_y + 1e-4f &&
+                cz >= out[j].z - 0.5f * out[j].height_z - 1e-4f &&
+                cz <= out[j].z + 0.5f * out[j].height_z + 1e-4f) {
+                covered = 1U; break;
+            }
+        }
+        if (!covered) { fail |= 256UL; break; }
+    }
     /* Bit 9: a valid angular footprint must survive a nonphysical independently
      * weighted center, while a footprint wholly outside the disk is rejected. */
     Fixture_sample(&s[0], 20U, 28507); s[0].sourceVQ15 = 19660;

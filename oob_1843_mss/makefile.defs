@@ -1,0 +1,4 @@
+# CCS includes this file before its generated targets. Multicore packaging
+# embeds DSS: a DSS-only rebuild must also rerun the MSS post-build step.
+oob_1843_mss_isk.xer4f: ../../oob_1843_dss/isk/oob_1843_dss_isk.bin
+oob_1843_mss_aop.xer4f: ../../oob_1843_dss/aop/oob_1843_dss_aop.bin

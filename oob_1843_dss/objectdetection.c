@@ -1295,6 +1295,29 @@ int32_t DPC_ObjectDetection_execute
         denseStaticCfg.numCfarPeaks = outCfarcaProc.numCfarDetectedPoints;
         denseStaticCfg.subFrameNum = objDetObj->subFrameIndx;
         denseStaticCfg.frameNumber = objDetObj->stats.frameStartIntCounter;
+        denseStaticCfg.cfarCfgRange = subFrmObj->dynCfg.cfarCfgRange;
+        denseStaticCfg.cfarCfgDoppler = subFrmObj->dynCfg.cfarCfgDoppler;
+        if (subFrmObj->staticCfg.rangeStep > 0.0f)
+        {
+            denseStaticCfg.cfarFovRangeMinBin = (int16_t)(
+                gSurfaceRawFov[objDetObj->subFrameIndx].min /
+                subFrmObj->staticCfg.rangeStep + 0.5f);
+            denseStaticCfg.cfarFovRangeMaxBin = (int16_t)(
+                gSurfaceRawFov[objDetObj->subFrameIndx].max /
+                subFrmObj->staticCfg.rangeStep + 0.5f);
+        }
+        if (subFrmObj->staticCfg.dopplerStep > 0.0f)
+        {
+            float dMin = subFrmObj->dynCfg.fovDoppler.min /
+                         subFrmObj->staticCfg.dopplerStep;
+            float dMax = subFrmObj->dynCfg.fovDoppler.max /
+                         subFrmObj->staticCfg.dopplerStep;
+            denseStaticCfg.cfarFovDopplerMinBin = (int16_t)(
+                dMin + ((dMin < 0.0f) ? -0.5f : 0.5f));
+            denseStaticCfg.cfarFovDopplerMaxBin = (int16_t)(
+                dMax + ((dMax < 0.0f) ? -0.5f : 0.5f));
+        }
+        denseStaticCfg.enableDspCfarAudit = 1U;
     }
 
     /* Navigation always completes its configured range interval from the
@@ -2698,7 +2721,10 @@ static int32_t DPC_ObjDet_preStartConfig(SubFrameObj *obj,
         first = (uint32_t)lo;
         last = (hi >= staticCfg->numRangeBins) ? staticCfg->numRangeBins - 1U : (uint32_t)hi;
         if (last < first || !staticCfg->numDopplerBins ||
-            (last - first + 1U) * staticCfg->numDopplerBins > MMWDEMO_SURFACE_CFAR_CAPACITY)
+            (((staticCfg->numRangeBins > MMWDEMO_DENSE_ELEV_MAX_STREAM_RANGE_BINS) ||
+              (staticCfg->numDopplerBins > MMWDEMO_DENSE_ELEV_MAX_STREAM_DOPPLER_BINS) ||
+              ((last - first + 1U) * staticCfg->numDopplerBins > MMWDEMO_DENSE_ELEV_MAX_RD_CELLS)) &&
+             ((last - first + 1U) * staticCfg->numDopplerBins > MMWDEMO_SURFACE_CFAR_CAPACITY)))
             return DPC_OBJECTDETECTION_EINVAL;
         MmwDemo_SurfaceGen_resetSubFrame(subFrameNum);
     }
@@ -3173,8 +3199,11 @@ static int32_t DPC_ObjectDetection_ioctl
                     first = (uint32_t)lo;
                     last = hi >= subFrmObj->staticCfg.numRangeBins ?
                         subFrmObj->staticCfg.numRangeBins - 1U : (uint32_t)hi;
-                    if (last < first || (last-first+1U) *
-                        subFrmObj->staticCfg.numDopplerBins > MMWDEMO_SURFACE_CFAR_CAPACITY) {
+                    if (last < first ||
+                        (((subFrmObj->staticCfg.numRangeBins > MMWDEMO_DENSE_ELEV_MAX_STREAM_RANGE_BINS) ||
+                          (subFrmObj->staticCfg.numDopplerBins > MMWDEMO_DENSE_ELEV_MAX_STREAM_DOPPLER_BINS) ||
+                          ((last - first + 1U) * subFrmObj->staticCfg.numDopplerBins > MMWDEMO_DENSE_ELEV_MAX_RD_CELLS)) &&
+                         ((last - first + 1U) * subFrmObj->staticCfg.numDopplerBins > MMWDEMO_SURFACE_CFAR_CAPACITY))) {
                         retVal = DPC_OBJECTDETECTION_EINVAL; goto exit;
                     }
                 }

@@ -117,9 +117,9 @@ def validate_capture(raw: bytes, baud: int = 921600, mode: str = "mobile"):
         processing, maximum, previous_export, period, uart, previous_frame = st[11:17]
         if version != 1 or payload_size != STATUS.size:
             raise ValueError("Unsupported status ABI")
-        if not (processed <= returned <= 1536 and clustered <= produced <= 3072):
+        if not (processed <= returned <= 1536 and clustered <= produced <= 16384):
             raise ValueError("Inconsistent detection/sample counts")
-        if boxes > 255 or held > boxes or clusters > 3072 or ranges > 1024:
+        if boxes > 255 or held > boxes or clusters > 16384 or ranges > 1024:
             raise ValueError("Invalid cluster/box/range count")
         if processing > maximum:
             raise ValueError("Current processing exceeds reported maximum")
@@ -222,6 +222,10 @@ class WireFixtures(unittest.TestCase):
         st = list(STATUS.unpack_from(raw, status_offset))
         st[3:8] = [1392, 1392, 2784, 2784, 512]
         st[2] = 1 << 3
+        STATUS.pack_into(raw, status_offset, *st)
+        self.assertEqual(validate_capture(bytes(raw))[0]["frames"], 1)
+        st[3:8] = [1536, 1536, 11904, 11904, 992]
+        st[2] = (1 << 0) | (1 << 3)
         STATUS.pack_into(raw, status_offset, *st)
         self.assertEqual(validate_capture(bytes(raw))[0]["frames"], 1)
 

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file dense_elevation.h
  *
  * @brief Frame-synchronous navigation source cloud seeded by the TI CFAR
@@ -15,6 +15,7 @@
 #include <ti/common/sys_common.h>
 #include <ti/datapath/dpif/dpif_radarcube.h>
 #include <ti/datapath/dpif/dpif_detmatrix.h>
+#include <ti/datapath/dpc/dpu/cfarcaproc/cfarcaproccommon.h>
 #include <ti/board/antenna_geometry.h>
 
 #ifdef __cplusplus
@@ -31,6 +32,14 @@ extern "C" {
 #define MMWDEMO_DENSE_ELEV_MAX_OUTPUT_SAMPLES     (3072U)
 #define MMWDEMO_DENSE_ELEV_MAX_CFAR_PEAKS         (1536U)
 #define MMWDEMO_DENSE_ELEV_MAX_RANGE_BINS         (1024U)
+#define MMWDEMO_DENSE_ELEV_MAX_STREAM_RANGE_BINS  (256U)
+#define MMWDEMO_DENSE_ELEV_MAX_STREAM_DOPPLER_BINS (32U)
+#define MMWDEMO_DENSE_ELEV_MAX_RD_CELLS           \
+    (MMWDEMO_DENSE_ELEV_MAX_STREAM_RANGE_BINS *   \
+     MMWDEMO_DENSE_ELEV_MAX_STREAM_DOPPLER_BINS)
+#define MMWDEMO_DENSE_ELEV_MAX_RANGE_SAMPLES      (64U)
+#define MMWDEMO_DENSE_ELEV_MAX_STREAM_SAMPLES     \
+    (2U * MMWDEMO_DENSE_ELEV_MAX_RD_CELLS)
 
 #define MMWDEMO_DENSE_ELEVATION_MAGIC             (0x44454C56U) /* DELV */
 #define MMWDEMO_DENSE_ELEVATION_PROTOCOL_VERSION  (8U)
@@ -148,6 +157,13 @@ typedef struct MmwDemo_DenseElevation_StaticCfg_t
     uint8_t  subFrameNum;
     DPIF_CFARDetList *cfarRngDopSnrList;
     uint32_t numCfarPeaks; uint32_t frameNumber;
+    DPU_CFARCAProc_CfarCfg cfarCfgRange;
+    DPU_CFARCAProc_CfarCfg cfarCfgDoppler;
+    int16_t  cfarFovRangeMinBin;
+    int16_t  cfarFovRangeMaxBin;
+    int16_t  cfarFovDopplerMinBin;
+    int16_t  cfarFovDopplerMaxBin;
+    uint8_t  enableDspCfarAudit;
 } MmwDemo_DenseElevation_StaticCfg;
 
 /** Process every supplied CFAR detection in the configured range this frame.
@@ -160,6 +176,23 @@ int32_t MmwDemo_DenseElevation_process(
     uint32_t outBufferSize,
     uint16_t maxOutputSamples,
     uint32_t *outSize);
+
+int32_t MmwDemo_DenseElevation_prepareFrame(
+    const MmwDemo_DenseElevation_Cfg *cfg,
+    const MmwDemo_DenseElevation_StaticCfg *staticCfg,
+    uint16_t *minRangeOut,
+    uint16_t *maxRangeOut,
+    uint16_t *processedCfarOut,
+    uint8_t *cfarClampedOut);
+
+uint8_t MmwDemo_DenseElevation_processRange(
+    uint16_t rangeIdx,
+    const MmwDemo_DenseElevation_Cfg *cfg,
+    const MmwDemo_DenseElevation_StaticCfg *staticCfg,
+    MmwDemo_DenseElevation_OutputSample *rangeOut,
+    uint16_t rangeCapacity,
+    uint16_t *rangeCountOut,
+    uint8_t *rangeLimitedOut);
 
 void MmwDemo_DenseElevation_reset(void);
 
