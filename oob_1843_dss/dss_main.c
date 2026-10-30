@@ -703,7 +703,10 @@ static void MmwDemo_dssInitTask(UArg arg0, UArg arg1)
     /* Launch the DPM Task */
     Task_Params_init(&taskParams);
     taskParams.priority  = MMWDEMO_DPC_OBJDET_DPM_TASK_PRIORITY;
-    taskParams.stackSize = 4*1024;
+    /* Dense elevation and surface processing run within the DPM task.  The
+     * 4 KiB SDK default overflows after a few frames and corrupts its own
+     * Task object before SYS/BIOS detects the stack guard violation. */
+    taskParams.stackSize = 8*1024;
     gMmwDssMCB.objDetDpmTaskHandle = Task_create(MmwDemo_DPC_ObjectDetection_dpmTask, &taskParams, NULL);
 
     return;

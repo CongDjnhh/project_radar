@@ -119,6 +119,7 @@ volatile uint32_t gSurfaceAvailableProcessingUs[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES
 /* Last coherent MSS publications. A generation transition must not turn a
  * valid navigation stream off for one frame. */
 static uint8_t gNavSurfaceEnabledSubFrameMask = 0xFF;
+static uint8_t gNavRegionGrowValidMask = 0U;
 
 
 MmwDemo_SurfaceGen_Cfg gNavPointCfg = {
@@ -1004,6 +1005,7 @@ int32_t DPC_ObjectDetection_execute
         navSharedCfg.uartMaxSurfacePoints =
             navShared->uartMaxSurfacePoints;
         navSharedCfg.enabledSurfaceMask = navShared->enabledSurfaceMask;
+        navSharedCfg.regionGrowValidMask = navShared->regionGrowValidMask;
         for (timingIdx = 0U;
              timingIdx < MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES;
              timingIdx++)
@@ -1013,6 +1015,11 @@ int32_t DPC_ObjectDetection_execute
             navSharedCfg.framePeriodUsec[timingIdx] = navShared->framePeriodUsec[timingIdx];
             navSharedCfg.postProcReserveUsec[timingIdx] = navShared->postProcReserveUsec[timingIdx];
             navSharedCfg.surfaceMotionMode[timingIdx] = navShared->surfaceMotionMode[timingIdx];
+            {
+                uint32_t rg;
+                for (rg = 0U; rg < 12U; rg++)
+                    navSharedCfg.regionGrow[timingIdx][rg] = navShared->regionGrow[timingIdx][rg];
+            }
         }
         asm(" "); /* compiler memory barrier */
         navCfgSeqAfter = navShared->isValid;
@@ -1045,6 +1052,7 @@ int32_t DPC_ObjectDetection_execute
             }
             gNavSurfaceEnabledSubFrameMask =
                 navSharedCfg.enabledSurfaceMask;
+            gNavRegionGrowValidMask = navSharedCfg.regionGrowValidMask;
 
             for (timingIdx = 0U;
                  timingIdx < MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES;
@@ -1056,10 +1064,18 @@ int32_t DPC_ObjectDetection_execute
                 gSurfaceReserveUs[timingIdx] = navSharedCfg.postProcReserveUsec[timingIdx];
                 gSurfaceMotionMode[timingIdx] = navSharedCfg.surfaceMotionMode[timingIdx];
             }
+            if (navSharedCfg.regionGrowValidMask & (1U << objDetObj->subFrameIndx))
+            {
+                uint32_t rg;
+                for (rg = 0U; rg < 12U; rg++)
+                    gNavPointCfg.sourceCfg.regionGrow[rg] =
+                        navSharedCfg.regionGrow[objDetObj->subFrameIndx][rg];
+            }
         }
     }
     navSurfaceEnabled =
         (gNavSurfaceEnabledSubFrameMask &
+         gNavRegionGrowValidMask &
          (1U << objDetObj->subFrameIndx)) != 0U;
     navEnabled = navSurfaceEnabled;
 
@@ -1332,6 +1348,7 @@ int32_t DPC_ObjectDetection_execute
         navStaticCfg.minRangeMeters = fovMinRange;
         navStaticCfg.maxRangeMeters = fovMaxRange;
         navStaticCfg.motionMode = gSurfaceMotionMode[objDetObj->subFrameIndx];
+        navStaticCfg.numVirtualAntAzim = (uint8_t)subFrmObj->staticCfg.numVirtualAntAzim;
         navStaticCfg.status = &gHSRAM.surfaceStatus;
         navStaticCfg.elapsedUsec = gNavTrackingPeriodUsec[objDetObj->subFrameIndx];
         if (gSurfaceLastStart[objDetObj->subFrameIndx] != 0U) {

@@ -44,6 +44,8 @@ typedef struct MmwDemo_SurfaceGen_StaticCfg_t
     float maxRangeMeters;
     uint32_t elapsedUsec;
     uint8_t motionMode;
+    uint8_t numVirtualAntAzim;
+    uint8_t reservedPad[2];
     MmwDemo_SurfaceStatus *status;
 } MmwDemo_SurfaceGen_StaticCfg;
 

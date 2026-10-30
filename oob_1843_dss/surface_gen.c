@@ -141,6 +141,12 @@ static uint8_t Surface_bounds(const MmwDemo_DenseElevation_OutputSample *s,
 static uint8_t Surface_connected(const MmwDemo_DenseElevation_OutputSample *a,
                                 const MmwDemo_DenseElevation_OutputSample *b)
 {
+    uint8_t isStaticA = ((a->dopplerIdx >= -1) && (a->dopplerIdx <= 1)) ? 1U : 0U;
+    uint8_t isStaticB = ((b->dopplerIdx >= -1) && (b->dopplerIdx <= 1)) ? 1U : 0U;
+    if (isStaticA != isStaticB) {
+        return 0U;
+    }
+
     int32_t d = (int32_t)a->dopplerIdx - b->dopplerIdx;
     float u = fabsf((float)a->azimuthUQ15-b->azimuthUQ15) / 32767.0f;
     float v = fabsf((float)a->sourceVQ15-b->sourceVQ15) / 32767.0f;
@@ -166,13 +172,66 @@ static uint8_t Surface_before(const MmwDemo_DenseElevation_OutputSample *a,
 
 static void Surface_merge(SurfaceBounds *a, const SurfaceBounds *b)
 {
-    a->loX=fminf(a->loX,b->loX); a->hiX=fmaxf(a->hiX,b->hiX);
-    a->loY=fminf(a->loY,b->loY); a->hiY=fmaxf(a->hiY,b->hiY);
-    a->loZ=fminf(a->loZ,b->loZ); a->hiZ=fmaxf(a->hiZ,b->hiZ);
+    uint8_t aStatic, bStatic;
+    a->loX = fminf(a->loX, b->loX); a->hiX = fmaxf(a->hiX, b->hiX);
+    a->loY = fminf(a->loY, b->loY); a->hiY = fmaxf(a->hiY, b->hiY);
+    a->loZ = fminf(a->loZ, b->loZ); a->hiZ = fmaxf(a->hiZ, b->hiZ);
     if (b->minRange < a->minRange) a->minRange = b->minRange;
-    if (b->snr > a->snr || (b->snr == a->snr && b->doppler < a->doppler)) {
-        a->snr = b->snr; a->doppler = b->doppler;
+
+    aStatic = ((a->doppler >= -1) && (a->doppler <= 1)) ? 1U : 0U;
+    bStatic = ((b->doppler >= -1) && (b->doppler <= 1)) ? 1U : 0U;
+
+    if (aStatic && !bStatic) {
+        a->doppler = b->doppler;
+    } else if (!aStatic && !bStatic) {
+        if (b->doppler < a->doppler) {
+            a->doppler = b->doppler;
+        }
+    } else if (aStatic && bStatic) {
+        if (b->snr > a->snr || (b->snr == a->snr && b->doppler < a->doppler)) {
+            a->doppler = b->doppler;
+        }
     }
+    if (b->snr > a->snr) {
+        a->snr = b->snr;
+    }
+}
+
+static float Surface_getKAzim(const MmwDemo_SurfaceGen_StaticCfg *cfg)
+{
+    uint8_t numAzim = cfg->numVirtualAntAzim;
+    if (numAzim == 0U)
+    {
+        numAzim = MmwDemo_DenseElevation_getAzimAntCount();
+    }
+    if (numAzim == 0U)
+    {
+        numAzim = 8U;
+    }
+    return 0.64f / (float)numAzim;
+}
+
+static float Surface_threatScore(uint16_t idx, const MmwDemo_SurfaceGen_StaticCfg *cfg)
+{
+    float y = 0.5f * (gSurfaceBounds[idx].loY + gSurfaceBounds[idx].hiY);
+    float v = (float)gSurfaceBounds[idx].doppler * cfg->dopplerStepMps;
+    /* Closing velocity (v < 0) reduces effective distance / increases threat */
+    float threat = y + ((v < 0.0f) ? (v * 1.0f) : 0.0f);
+    return threat;
+}
+
+static uint8_t Surface_threatBetter(uint16_t a, int16_t b, const MmwDemo_SurfaceGen_StaticCfg *cfg)
+{
+    if (b < 0) return 1U;
+    float ta = Surface_threatScore(a, cfg);
+    float tb = Surface_threatScore((uint16_t)b, cfg);
+    if (fabsf(ta - tb) > 1e-4f) {
+        return (ta < tb) ? 1U : 0U; /* Smaller threat score = higher priority */
+    }
+    if (gSurfaceBounds[a].snr != gSurfaceBounds[b].snr) {
+        return (gSurfaceBounds[a].snr > gSurfaceBounds[b].snr) ? 1U : 0U;
+    }
+    return (a < (uint16_t)b) ? 1U : 0U;
 }
 
 static float Surface_extent(float lo, float hi, float minimum)
@@ -315,7 +374,7 @@ static void Surface_selectAndEmit(
             uint16_t cell = Surface_cell(&gSurfaceBounds[i], cfg);
             clusters++;
             gSurfaceBounds[i].rank = 0U;
-            if (Surface_better(i, best[cell])) best[cell] = (int16_t)i;
+            if (Surface_threatBetter(i, best[cell], cfg)) best[cell] = (int16_t)i;
         }
     }
     cfg->status->clusterCount = (clusters > 65535U) ? 65535U : (uint16_t)clusters;
@@ -334,7 +393,7 @@ static void Surface_selectAndEmit(
         int16_t next = -1;
         for (i = 0U; i < nSlots; i++)
             if (gSurfaceBounds[i].valid && !gSurfaceBounds[i].rank &&
-                Surface_find((int16_t)i) == (int16_t)i && Surface_better(i, next))
+                Surface_find((int16_t)i) == (int16_t)i && Surface_threatBetter(i, next, cfg))
                 next = (int16_t)i;
         if (next < 0) break;
         selected[current] = (uint16_t)next;
@@ -342,37 +401,37 @@ static void Surface_selectAndEmit(
         current++;
         gSurfaceBounds[next].rank = 1U;
     }
-    /* Q7: Conservative overflow AABB merging into selected representatives. */
+    /* Adaptive spatial merge into closest selected representative within D_merge(R) */
     if (clusters > current && current > 0U) {
+        float k_azim = Surface_getKAzim(cfg);
         for (i = 0U; i < nSlots; i++) {
             if (gSurfaceBounds[i].valid && !gSurfaceBounds[i].rank &&
                 Surface_find((int16_t)i) == (int16_t)i) {
-                uint16_t cell = Surface_cell(&gSurfaceBounds[i], cfg);
                 float cx = 0.5f * (gSurfaceBounds[i].loX + gSurfaceBounds[i].hiX);
                 float cy = 0.5f * (gSurfaceBounds[i].loY + gSurfaceBounds[i].hiY);
                 float cz = 0.5f * (gSurfaceBounds[i].loZ + gSurfaceBounds[i].hiZ);
+                float R = sqrtf(cx * cx + cy * cy + cz * cz);
+                float dMerge = 2.0f * cfg->rangeStepMeters + k_azim * R;
+                float dMergeSq = dMerge * dMerge;
                 uint16_t bestIdx = 0U;
-                float bestSameDist = FLT_MAX;
-                float bestAnyDist = FLT_MAX;
-                uint8_t foundSame = 0U;
+                float bestDistSq = FLT_MAX;
                 for (k = 0U; k < current; k++) {
                     uint16_t sel = selected[k];
                     float sx = 0.5f * (gSurfaceBounds[sel].loX + gSurfaceBounds[sel].hiX);
                     float sy = 0.5f * (gSurfaceBounds[sel].loY + gSurfaceBounds[sel].hiY);
                     float sz = 0.5f * (gSurfaceBounds[sel].loZ + gSurfaceBounds[sel].hiZ);
-                    float dist = fabsf(cx - sx) + fabsf(cy - sy) + fabsf(cz - sz);
-                    if (selectedCell[k] == cell) {
-                        if (!foundSame || dist < bestSameDist) {
-                            bestSameDist = dist;
-                            bestIdx = k;
-                            foundSame = 1U;
-                        }
-                    } else if (!foundSame && dist < bestAnyDist) {
-                        bestAnyDist = dist;
+                    float dx = cx - sx;
+                    float dy = cy - sy;
+                    float dz = cz - sz;
+                    float distSq = dx * dx + dy * dy + dz * dz;
+                    if (distSq < bestDistSq) {
+                        bestDistSq = distSq;
                         bestIdx = k;
                     }
                 }
-                Surface_merge(&gSurfaceBounds[selected[bestIdx]], &gSurfaceBounds[i]);
+                if (bestDistSq <= dMergeSq) {
+                    Surface_merge(&gSurfaceBounds[selected[bestIdx]], &gSurfaceBounds[i]);
+                }
             }
         }
     }
@@ -391,13 +450,26 @@ static void Surface_selectAndEmit(
     for (i = 0U; i < current; i++) {
         ObstacleBox *b = &out[i];
         uint8_t type = MMWDEMO_OBSTACLE_CLASS_UNKNOWN;
-        if (b->width_x <= 1.0f && b->depth_y <= 1.0f &&
-            b->height_z <= 0.6f && b->z >= 0.4f) type = MMWDEMO_OBSTACLE_CLASS_DRONE;
-        else if (b->width_x <= 0.9f && b->depth_y <= 0.9f &&
-            b->height_z >= 1.0f && b->z <= 0.5f) type = MMWDEMO_OBSTACLE_CLASS_PEDESTRIAN;
-        else if ((b->width_x >= 1.1f || b->depth_y >= 1.5f) &&
-            b->snr >= 200) type = MMWDEMO_OBSTACLE_CLASS_VEHICLE;
-        b->boxId = MMWDEMO_PACK_OBSTACLE_BOX_ID(type, i + 1U);
+        uint8_t isStatic = ((b->velocity >= -0.25f) && (b->velocity <= 0.25f)) ? 1U : 0U;
+
+        if (isStatic) {
+            type = MMWDEMO_OBSTACLE_CLASS_UNKNOWN;
+            b->boxId = MMWDEMO_PACK_OBSTACLE_BOX_ID(type, i + 1U);
+        } else {
+            if (b->width_x <= 1.0f && b->depth_y <= 1.0f &&
+                b->height_z <= 0.6f && b->z >= 0.4f) {
+                type = MMWDEMO_OBSTACLE_CLASS_DRONE;
+            } else if (b->width_x <= 0.9f && b->depth_y <= 0.9f &&
+                       b->height_z >= 1.0f && b->z <= 0.5f) {
+                type = MMWDEMO_OBSTACLE_CLASS_PEDESTRIAN;
+            } else if ((b->width_x >= 1.1f || b->depth_y >= 1.5f) &&
+                       b->snr >= 200) {
+                type = MMWDEMO_OBSTACLE_CLASS_VEHICLE;
+            } else {
+                type = MMWDEMO_OBSTACLE_CLASS_MOVING;
+            }
+            b->boxId = (int16_t)(MMWDEMO_PACK_OBSTACLE_BOX_ID(type, i + 1U) | 0x8000);
+        }
     }
     cfg->status->boxCount = current;
     *count = current;
@@ -451,31 +523,31 @@ static void Surface_streamEmitCompleted(
         gSurfaceParent[at] = (int16_t)at;
         (*completedSlots)++;
     } else {
-        uint16_t cell = Surface_cell(b, cfg);
         uint16_t i, bestIdx = 0U;
-        uint8_t foundCell = 0U;
         float cx = 0.5f * (b->loX + b->hiX);
         float cy = 0.5f * (b->loY + b->hiY);
         float cz = 0.5f * (b->loZ + b->hiZ);
-        float bestDist = FLT_MAX;
+        float R = sqrtf(cx * cx + cy * cy + cz * cz);
+        float k_azim = Surface_getKAzim(cfg);
+        float dMerge = 2.0f * cfg->rangeStepMeters + k_azim * R;
+        float dMergeSq = dMerge * dMerge;
+        float bestDistSq = FLT_MAX;
         for (i = 0U; i < *completedSlots; i++) {
-            uint16_t c = Surface_cell(&gSurfaceBounds[i], cfg);
             float sx = 0.5f * (gSurfaceBounds[i].loX + gSurfaceBounds[i].hiX);
             float sy = 0.5f * (gSurfaceBounds[i].loY + gSurfaceBounds[i].hiY);
             float sz = 0.5f * (gSurfaceBounds[i].loZ + gSurfaceBounds[i].hiZ);
-            float dist = fabsf(cx - sx) + fabsf(cy - sy) + fabsf(cz - sz);
-            if (c == cell) {
-                if (!foundCell || dist < bestDist) {
-                    bestDist = dist;
-                    bestIdx = i;
-                    foundCell = 1U;
-                }
-            } else if (!foundCell && dist < bestDist) {
-                bestDist = dist;
+            float dx = cx - sx;
+            float dy = cy - sy;
+            float dz = cz - sz;
+            float distSq = dx * dx + dy * dy + dz * dz;
+            if (distSq < bestDistSq) {
+                bestDistSq = distSq;
                 bestIdx = i;
             }
         }
-        Surface_merge(&gSurfaceBounds[bestIdx], b);
+        if (bestDistSq <= dMergeSq) {
+            Surface_merge(&gSurfaceBounds[bestIdx], b);
+        }
         (*overflowClusters)++;
     }
 }

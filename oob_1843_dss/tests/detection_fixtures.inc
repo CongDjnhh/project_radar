@@ -62,6 +62,13 @@ uint32_t MmwDemo_SurfaceDetection_selfTest(void)
     cfg.minAzimuthDeg=-90.0f; cfg.maxAzimuthDeg=90.0f;
     cfg.minElevationDeg=-90.0f; cfg.maxElevationDeg=90.0f;
     cfg.minRangeBin=0U; cfg.maxRangeBin=255U;
+    /* The fixture supplies the same profile values through the config seam. */
+    cfg.regionGrow[0]=330U; cfg.regionGrow[1]=96U;
+    cfg.regionGrow[2]=340U; cfg.regionGrow[3]=256U;
+    cfg.regionGrow[4]=340U; cfg.regionGrow[5]=420U;
+    cfg.regionGrow[6]=15U; cfg.regionGrow[7]=3U;
+    cfg.regionGrow[8]=8U; cfg.regionGrow[9]=3U;
+    cfg.regionGrow[10]=2U; cfg.regionGrow[11]=1U;
     dc.radarCube=sf->dpuCfg.rangeCfg.hwRes.radarCube;
     dc.detMatrix=sf->dpuCfg.dopplerCfg.hwRes.detMatrix;
     dc.antDef=sf->staticCfg.antDef;

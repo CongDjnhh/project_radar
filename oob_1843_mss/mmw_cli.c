@@ -100,6 +100,7 @@ static int32_t MmwDemo_CLIAnalogMonitorCfg (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLILvdsStreamCfg (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLIConfigDataPort (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLISurfaceMotionCfg(int32_t argc, char* argv[]);
+static int32_t MmwDemo_CLIRegionGrowCfg(int32_t argc, char* argv[]);
 
 /**************************************************************************
  *************************** Extern Definitions *******************************
@@ -214,6 +215,21 @@ static int32_t MmwDemo_CLISensorStart (int32_t argc, char* argv[])
     {
         CLI_write ("Ignored: Sensor is already started\n");
         return 0;
+    }
+
+    /* Never start TLV20 processing with implicit region-growing thresholds. */
+    {
+        extern MmwDemo_HSRAM gHSRAM;
+        uint32_t sf;
+        for (sf = 0U; sf < gMmwMssMCB.objDetCommonCfg.preStartCommonCfg.numSubFrames; sf++)
+        {
+            if (gMmwMssMCB.subFrameCfg[sf].guiMonSel.customObstacles &&
+                (gHSRAM.navCfg.regionGrowValidMask & (1U << sf)) == 0U)
+            {
+                CLI_write("Error: regionGrowCfg required for each TLV20 subframe before sensorStart\n");
+                return -1;
+            }
+        }
     }
 
     if (doReconfig == false)
@@ -509,6 +525,64 @@ static int32_t MmwDemo_CLISurfaceMotionCfg(int32_t argc, char* argv[])
     MEM_BARRIER();
     Hwi_restore(key);
     return 0;
+}
+
+static int32_t MmwDemo_CLIRegionGrowCfg(int32_t argc, char* argv[])
+{
+    extern MmwDemo_HSRAM gHSRAM;
+    volatile MmwDemo_NavCliCfg *shared = &gHSRAM.navCfg;
+    uint16_t values[12];
+    int32_t sf, bin;
+    uint32_t i, first, last;
+    uint8_t generation;
+    UInt key;
+    if (gMmwMssMCB.sensorState == MmwDemo_SensorState_STARTED)
+    {
+        CLI_write("Error: regionGrowCfg requires sensorStop\n");
+        return -1;
+    }
+    if (argc != 14 || MmwDemo_CLIParseInt32(argv[1], -1, RL_MAX_SUBFRAMES - 1, &sf) != 0)
+        goto invalid;
+    for (i = 0U; i < 6U; i++)
+    {
+        char *end;
+        float db = strtof(argv[i + 2U], &end);
+        if (end == argv[i + 2U] || *end != '\0' || !isfinite(db) || db < 0.0f || db > 30.0f)
+            goto invalid;
+        values[i] = (uint16_t)(db * (256.0f / 6.0f) + 0.5f);
+    }
+    if (MmwDemo_CLIParseInt32(argv[8], 1, 64, &bin) != 0) goto invalid;
+    values[6] = (uint16_t)bin;
+    if (MmwDemo_CLIParseInt32(argv[9], 0, 16, &bin) != 0) goto invalid;
+    values[7] = (uint16_t)bin;
+    for (i = 8U; i < 12U; i++)
+    {
+        if (MmwDemo_CLIParseInt32(argv[i + 2U], 1, 16, &bin) != 0) goto invalid;
+        values[i] = (uint16_t)bin;
+    }
+    if (!(values[11] <= values[10] && values[10] < values[9] &&
+          values[9] <= values[8])) goto invalid;
+    first = (sf < 0) ? 0U : (uint32_t)sf;
+    last = (sf < 0) ? RL_MAX_SUBFRAMES - 1U : (uint32_t)sf;
+    key = Hwi_disable();
+    generation = shared->isValid + 1U;
+    if (generation == 0U) generation = 1U;
+    if (shared->isValid == 0U) MmwDemo_CLIInitNavDefaults(shared);
+    shared->isValid = 0U;
+    MEM_BARRIER();
+    for (i = first; i <= last; i++)
+    {
+        memcpy((void *)shared->regionGrow[i], values, sizeof(values));
+        shared->regionGrowValidMask |= (uint8_t)(1U << i);
+    }
+    MEM_BARRIER();
+    shared->isValid = generation;
+    MEM_BARRIER();
+    Hwi_restore(key);
+    return 0;
+invalid:
+    CLI_write("Error: regionGrowCfg <subFrameIdx|-1> <enterDb> <exitDb> <promDb> <riseDb> <auditCasoDb> <auditAnchorDb> <maxSpanBins> <maxBacktrackBins> <farOuter> <farInner> <nearOuter> <nearInner>\n");
+    return -1;
 }
 
 static uint8_t MmwDemo_CLIUpdateSubFrameMask(
@@ -1596,6 +1670,11 @@ void MmwDemo_CLIInit (uint8_t taskPriority)
     cliCfg.tableEntry[cnt].cmd = "surfaceMotionCfg";
     cliCfg.tableEntry[cnt].helpString = "<subFrameIdx> <0 mobile|1 fixed>";
     cliCfg.tableEntry[cnt].cmdHandlerFxn = MmwDemo_CLISurfaceMotionCfg;
+    cnt++;
+
+    cliCfg.tableEntry[cnt].cmd = "regionGrowCfg";
+    cliCfg.tableEntry[cnt].helpString = "<subFrameIdx|-1> <enterDb> <exitDb> <promDb> <riseDb> <auditCasoDb> <auditAnchorDb> <maxSpanBins> <maxBacktrackBins> <farOuter> <farInner> <nearOuter> <nearInner>";
+    cliCfg.tableEntry[cnt].cmdHandlerFxn = MmwDemo_CLIRegionGrowCfg;
     cnt++;
 
 

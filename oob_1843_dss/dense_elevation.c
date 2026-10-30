@@ -31,14 +31,7 @@
 #define DENSE_MIN_ELEVATION_ROW_RATIO    (0.025118864f)
 #define DENSE_MIN_AZIMUTH_WIDTH_U        (0.08f)
 #define DENSE_MIN_ELEVATION_WIDTH_V      (0.12f)
-#define DENSE_RG_DELTA_ENTER_RAW         (330U)
-#define DENSE_RG_DELTA_EXIT_RAW          (96U)
-#define DENSE_RG_DELTA_PROM_RAW          (340U)
-#define DENSE_RG_DELTA_RISE_RAW          (256U)
-#define DENSE_RG_AUDIT_CASO_MIN_RAW      (340U)
-#define DENSE_RG_AUDIT_ANC_MIN_RAW       (420U)
-#define DENSE_RG_MAX_SPAN                (15U)
-#define DENSE_RG_MAX_BACKTRACK           (3U)
+/* Region-growing thresholds come exclusively from regionGrowCfg. */
 
 /* DSP_fft16x16 is provided by dsplib.ae64P, already linked by the demo. */
 extern void DSP_fft16x16(const short * restrict ptrW,
@@ -1041,12 +1034,8 @@ static void MmwDemo_DenseElevation_processDoppler(
             int32_t signedRight = (right < 32) ? right : right - 64;
             float lo = fmaxf(-1.0f, (2.0f * (float)signedLeft - 1.0f) / 64.0f);
             float hi = fminf(1.0f, (2.0f * (float)signedRight + 1.0f) / 64.0f);
-            float halfWidth = fmaxf(u_cm - lo, hi - u_cm);
-            u_width = 2.0f * halfWidth;
-            if (u_width > 2.0f) {
-                u_cm = 0.5f * (lo + hi);
-                u_width = hi - lo;
-            }
+            u_cm = 0.5f * (lo + hi);
+            u_width = hi - lo;
         }
 
         /* Elevation weighted centroid and span across the region.
@@ -1057,13 +1046,8 @@ static void MmwDemo_DenseElevation_processDoppler(
          * back to the peak-bin estimate (safe, consistent with v6 behaviour). */
         if (sumVValid > 0.0f)
         {
-            v_cm    = sumVPower / sumVValid;
-            v_width = (v_max >= v_min) ?
-                2.0f * fmaxf(v_cm - v_min, v_max - v_cm) : 0.0f;
-            if (v_width > 2.0f) {
-                v_cm = 0.5f * (v_min + v_max);
-                v_width = v_max - v_min;
-            }
+            v_cm    = 0.5f * (v_min + v_max);
+            v_width = (v_max >= v_min) ? (v_max - v_min) : 0.0f;
         }
         else
         {
@@ -1086,7 +1070,7 @@ static void MmwDemo_DenseElevation_processDoppler(
         sample.azimuthIdx         = (int8_t)signedA;
         sample.reserved0          = 0U;
         sample.dopplerIdx         = (int16_t)signedD;
-        sample.azimuthUQ15        = (int16_t)(u_cm * 32767.0f);
+        sample.azimuthUQ15        = (int16_t)((u_cm >= 0.0f) ? (u_cm * 32767.0f + 0.5f) : (u_cm * 32767.0f - 0.5f));
         /* Round outward and cover center truncation, preserving support. */
         sample.azimuthWidthUQ15   = (uint16_t)fminf(65535.0f,
             ceilf(u_width * 32767.0f + 2.0f));
@@ -1239,17 +1223,18 @@ static uint16_t MmwDemo_DenseElevation_noiseAnchor(
     uint16_t minRange,
     uint16_t maxRange,
     uint16_t rSeed,
-    uint16_t dopIdx)
+    uint16_t dopIdx,
+    const MmwDemo_DenseElevation_Cfg *cfg)
 {
-    uint16_t farVals[6];
+    uint16_t farVals[16];
     uint16_t farCnt = 0U, nearCnt = 0U;
     uint32_t nearSum = 0U;
     uint16_t nFar = 0xFFFFU, nNear = 0xFFFFU;
     int32_t rStart, rEnd, r;
 
-    rStart = (int32_t)rSeed - 8;
+    rStart = (int32_t)rSeed - cfg->regionGrow[8];
     if (rStart < (int32_t)minRange) rStart = (int32_t)minRange;
-    rEnd = (int32_t)rSeed - 3;
+    rEnd = (int32_t)rSeed - cfg->regionGrow[9];
     for (r = rStart; r <= rEnd; r++)
     {
         uint16_t v = detMat[(uint32_t)r * numDopplerBins + dopIdx];
@@ -1269,9 +1254,9 @@ static uint16_t MmwDemo_DenseElevation_noiseAnchor(
                           (uint32_t)farVals[farCnt >> 1U]) >> 1U);
     }
 
-    rStart = (int32_t)rSeed - 2;
+    rStart = (int32_t)rSeed - cfg->regionGrow[10];
     if (rStart < (int32_t)minRange) rStart = (int32_t)minRange;
-    rEnd = (int32_t)rSeed - 1;
+    rEnd = (int32_t)rSeed - cfg->regionGrow[11];
     for (r = rStart; r <= rEnd; r++)
     {
         nearSum += detMat[(uint32_t)r * numDopplerBins + dopIdx];
@@ -1289,8 +1274,8 @@ static uint16_t MmwDemo_DenseElevation_noiseAnchor(
     if (nearCnt > 0U) return nNear;
     if (farCnt > 0U) return nFar;
 
-    rStart = (int32_t)rSeed + 3;
-    rEnd = (int32_t)rSeed + 8;
+    rStart = (int32_t)rSeed + cfg->regionGrow[9];
+    rEnd = (int32_t)rSeed + cfg->regionGrow[8];
     if (rEnd > (int32_t)maxRange) rEnd = (int32_t)maxRange;
     for (r = rStart; r <= rEnd; r++)
     {
@@ -1319,7 +1304,8 @@ static uint16_t MmwDemo_DenseElevation_growFromSeed(
     uint16_t minRange,
     uint16_t maxRange,
     uint16_t rSeed,
-    uint16_t dopIdx)
+    uint16_t dopIdx,
+    const MmwDemo_DenseElevation_Cfg *cfg)
 {
     uint16_t rStart = rSeed;
     uint16_t anchor;
@@ -1331,7 +1317,7 @@ static uint16_t MmwDemo_DenseElevation_growFromSeed(
     uint32_t dBit = 1UL << dopIdx;
 
     /* Operator 1: Leftward Edge Backtracking using candidate-local noise anchor */
-    for (k = 1U; k <= DENSE_RG_MAX_BACKTRACK; k++)
+    for (k = 1U; k <= cfg->regionGrow[7]; k++)
     {
         uint16_t rPrev;
         uint16_t localAnchor;
@@ -1341,9 +1327,9 @@ static uint16_t MmwDemo_DenseElevation_growFromSeed(
         }
         rPrev = (uint16_t)(rSeed - k);
         localAnchor = MmwDemo_DenseElevation_noiseAnchor(
-            detMat, numDopplerBins, minRange, maxRange, rPrev, dopIdx);
+            detMat, numDopplerBins, minRange, maxRange, rPrev, dopIdx, cfg);
         if ((uint32_t)detMat[(uint32_t)rPrev * numDopplerBins + dopIdx] >=
-            (uint32_t)localAnchor + DENSE_RG_DELTA_ENTER_RAW)
+            (uint32_t)localAnchor + cfg->regionGrow[0])
         {
             rStart = rPrev;
         }
@@ -1355,8 +1341,8 @@ static uint16_t MmwDemo_DenseElevation_growFromSeed(
 
     /* Operator 2: Frozen Noise Baseline N_anchor evaluated strictly left of rStart */
     anchor = MmwDemo_DenseElevation_noiseAnchor(
-        detMat, numDopplerBins, minRange, maxRange, rStart, dopIdx);
-    exitThr = (uint32_t)anchor + DENSE_RG_DELTA_EXIT_RAW;
+        detMat, numDopplerBins, minRange, maxRange, rStart, dopIdx, cfg);
+    exitThr = (uint32_t)anchor + cfg->regionGrow[1];
 
     if ((uint32_t)detMat[(uint32_t)rStart * numDopplerBins + dopIdx] < exitThr)
     {
@@ -1371,7 +1357,7 @@ static uint16_t MmwDemo_DenseElevation_growFromSeed(
     rCurr = (uint16_t)(rStart + 1U);
 
     while ((rCurr <= maxRange) &&
-           ((uint16_t)(rCurr - rStart) <= DENSE_RG_MAX_SPAN))
+           ((uint16_t)(rCurr - rStart) <= cfg->regionGrow[6]))
     {
         uint16_t e = detMat[(uint32_t)rCurr * numDopplerBins + dopIdx];
         if ((uint32_t)e < exitThr)
@@ -1384,7 +1370,7 @@ static uint16_t MmwDemo_DenseElevation_growFromSeed(
             {
                 peakVal = e;
             }
-            else if ((uint16_t)(peakVal - e) >= DENSE_RG_DELTA_PROM_RAW)
+            else if ((uint16_t)(peakVal - e) >= cfg->regionGrow[2])
             {
                 inValley = 1U;
                 valleyVal = e;
@@ -1398,7 +1384,7 @@ static uint16_t MmwDemo_DenseElevation_growFromSeed(
                 valleyVal = e;
                 valleyIdx = rCurr;
             }
-            else if ((uint16_t)(e - valleyVal) >= DENSE_RG_DELTA_RISE_RAW)
+            else if ((uint16_t)(e - valleyVal) >= cfg->regionGrow[3])
             {
                 splitAtValley = 1U;
                 break;
@@ -1410,7 +1396,7 @@ static uint16_t MmwDemo_DenseElevation_growFromSeed(
     if ((splitAtValley != 0U) ||
         ((inValley != 0U) &&
          (peakVal > detMat[(uint32_t)(rCurr - 1U) * numDopplerBins + dopIdx]) &&
-         ((uint16_t)(peakVal - detMat[(uint32_t)(rCurr - 1U) * numDopplerBins + dopIdx]) >= DENSE_RG_DELTA_PROM_RAW)))
+         ((uint16_t)(peakVal - detMat[(uint32_t)(rCurr - 1U) * numDopplerBins + dopIdx]) >= cfg->regionGrow[2])))
     {
         rEnd = (uint16_t)(valleyIdx - 1U);
         if ((splitAtValley != 0U) && (rCurr <= maxRange))
@@ -1600,12 +1586,12 @@ int32_t MmwDemo_DenseElevation_prepareFrame(
                             if ((r > rAuditMin) && (r < rAuditMax) &&
                                 (cut >= detMat[(uint32_t)(r - 1U) * staticCfg->numDopplerBins + d]) &&
                                 (cut >= detMat[(uint32_t)(r + 1U) * staticCfg->numDopplerBins + d]) &&
-                                ((uint32_t)cut >= (uint32_t)rngNoise + DENSE_RG_AUDIT_CASO_MIN_RAW))
+                                ((uint32_t)cut >= (uint32_t)rngNoise + cfg->regionGrow[4]))
                             {
                                 uint16_t rCand = r;
                                 uint16_t b;
                                 uint16_t anc;
-                                for (b = 1U; b <= DENSE_RG_MAX_BACKTRACK; b++)
+                                for (b = 1U; b <= cfg->regionGrow[7]; b++)
                                 {
                                     uint16_t rp;
                                     uint16_t locAnc;
@@ -1613,9 +1599,9 @@ int32_t MmwDemo_DenseElevation_prepareFrame(
                                     rp = (uint16_t)(r - b);
                                     locAnc = MmwDemo_DenseElevation_noiseAnchor(
                                         detMat, staticCfg->numDopplerBins,
-                                        minRange, maxRange, rp, d);
+                                        minRange, maxRange, rp, d, cfg);
                                     if ((uint32_t)detMat[(uint32_t)rp * staticCfg->numDopplerBins + d] >=
-                                        (uint32_t)locAnc + DENSE_RG_DELTA_ENTER_RAW)
+                                        (uint32_t)locAnc + cfg->regionGrow[0])
                                     {
                                         rCand = rp;
                                     }
@@ -1626,8 +1612,8 @@ int32_t MmwDemo_DenseElevation_prepareFrame(
                                 }
                                 anc = MmwDemo_DenseElevation_noiseAnchor(
                                     detMat, staticCfg->numDopplerBins,
-                                    minRange, maxRange, rCand, d);
-                                if ((uint32_t)cut < (uint32_t)anc + DENSE_RG_AUDIT_ANC_MIN_RAW)
+                                    minRange, maxRange, rCand, d, cfg);
+                                if ((uint32_t)cut < (uint32_t)anc + cfg->regionGrow[5])
                                 {
                                     continue;
                                 }
@@ -1675,7 +1661,7 @@ int32_t MmwDemo_DenseElevation_prepareFrame(
                     }
                     lastEnd = MmwDemo_DenseElevation_growFromSeed(
                         detMat, staticCfg->numDopplerBins,
-                        minRange, maxRange, r, d);
+                        minRange, maxRange, r, d, cfg);
                     hasLast = 1U;
                 }
             }
@@ -1686,13 +1672,13 @@ int32_t MmwDemo_DenseElevation_prepareFrame(
                 {
                     uint16_t anchor = MmwDemo_DenseElevation_noiseAnchor(
                         detMat, staticCfg->numDopplerBins,
-                        minRange, maxRange, r, 0U);
+                        minRange, maxRange, r, 0U, cfg);
                     if ((uint32_t)detMat[(uint32_t)r * staticCfg->numDopplerBins] >=
-                        (uint32_t)anchor + DENSE_RG_DELTA_ENTER_RAW)
+                        (uint32_t)anchor + cfg->regionGrow[0])
                     {
                         r = MmwDemo_DenseElevation_growFromSeed(
                             detMat, staticCfg->numDopplerBins,
-                            minRange, maxRange, r, 0U);
+                            minRange, maxRange, r, 0U, cfg);
                     }
                 }
             }
@@ -1956,6 +1942,19 @@ int32_t MmwDemo_DenseElevation_process(
                          ((uint32_t)processedRanges << 16U);
     *outSize = sizeof(*header) + outputCount * sizeof(*output);
     return 0;
+}
+
+uint8_t MmwDemo_DenseElevation_getAzimAntCount(void)
+{
+    if (gDenseGeometryValid && gDenseReferenceRow < MMWDEMO_DENSE_ELEV_MAX_ROWS)
+    {
+        uint8_t count = gDenseRowAntCount[gDenseReferenceRow];
+        if (count > 0U)
+        {
+            return count;
+        }
+    }
+    return 8U;
 }
 
 void MmwDemo_DenseElevation_reset(void)

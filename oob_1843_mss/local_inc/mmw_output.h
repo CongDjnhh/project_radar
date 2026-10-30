@@ -137,6 +137,9 @@ typedef struct MmwDemo_output_message_header_t
     uint32_t    subFrameNumber;
 } MmwDemo_output_message_header;
 
+typedef char MmwDemo_OutputMessageHeaderSizeCheck[
+    (sizeof(MmwDemo_output_message_header) == 40U) ? 1 : -1];
+
 /*!
  * @brief
  * Structure holds message stats information from data path.
@@ -239,11 +242,16 @@ typedef char MmwDemo_SurfaceStatusSizeCheck[
 #define MMWDEMO_OBSTACLE_CLASS_DRONE        (1U)
 #define MMWDEMO_OBSTACLE_CLASS_PEDESTRIAN   (2U)
 #define MMWDEMO_OBSTACLE_CLASS_VEHICLE      (3U)
+#define MMWDEMO_OBSTACLE_CLASS_MOVING       (4U)
+
+#define MMWDEMO_OBSTACLE_DYNAMIC_FLAG       (0x8000U)
 
 #define MMWDEMO_PACK_OBSTACLE_BOX_ID(classType, rawId) \
     ((int16_t)((((uint16_t)(classType) & 0x00FFU) << 8U) | ((uint16_t)(rawId) & 0x00FFU)))
+#define MMWDEMO_OBSTACLE_IS_DYNAMIC(boxId) \
+    (((uint16_t)(boxId) & 0x8000U) != 0U)
 #define MMWDEMO_UNPACK_OBSTACLE_CLASS(boxId) \
-    ((uint8_t)(((uint16_t)(boxId) >> 8U) & 0x00FFU))
+    ((uint8_t)(((uint16_t)(boxId) >> 8U) & 0x007FU))
 #define MMWDEMO_UNPACK_OBSTACLE_FRAME_RANK(boxId) \
     ((uint8_t)((uint16_t)(boxId) & 0x00FFU))
 /* Compatibility name; the value is a frame rank, not a persistent track ID. */
@@ -274,6 +282,9 @@ typedef struct MmwDemo_NavCliCfg_t {
     uint8_t  isValid;
     uint8_t  enabledSurfaceMask;
     uint8_t  reserved[50];
+    uint16_t regionGrow[MMWDEMO_NAV_SHARED_MAX_SUBFRAMES][12];
+    uint8_t  regionGrowValidMask;
+    uint8_t  regionGrowReserved[3];
     /* Timing contract published by MSS after RF parsing.  Values are kept in
      * microseconds so both cores use the configured frame/subframe period and
      * never depend on a wrapping 32-bit cycle-to-cycle interval. */
@@ -283,7 +294,7 @@ typedef struct MmwDemo_NavCliCfg_t {
 } MmwDemo_NavCliCfg;
 
 typedef char MmwDemo_NavCliCfgSizeCheck[
-    (sizeof(MmwDemo_NavCliCfg) == 136U) ? 1 : -1];
+    (sizeof(MmwDemo_NavCliCfg) == 236U) ? 1 : -1];
 
 /**
  * @brief

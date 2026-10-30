@@ -89,6 +89,9 @@ typedef struct MmwDemo_DenseElevation_Cfg_t
     float maxAzimuthDeg;
     uint16_t minRangeBin;
     uint16_t maxRangeBin;
+    /* Six Q8 log2-magnitude deltas followed by span/backtrack in range bins.
+     * Supplied by regionGrowCfg; zero-initialized values are never defaults. */
+    uint16_t regionGrow[12];
 } MmwDemo_DenseElevation_Cfg;
 
 /** One navigation source. sourceVQ15 is the continuous v=sin(elevation)
@@ -195,6 +198,7 @@ uint8_t MmwDemo_DenseElevation_processRange(
     uint8_t *rangeLimitedOut);
 
 void MmwDemo_DenseElevation_reset(void);
+uint8_t MmwDemo_DenseElevation_getAzimAntCount(void);
 
 /* Wire ABI checks: ARM (MSS) and C674x (DSS) must agree exactly.
  * Protocol version 8: OutputSample is 20 bytes. Any mismatch is a

@@ -1,0 +1,27 @@
+# PROGRESS LOG - TI MMWAVE FIRMWARE (CCS THEIA)
+
+=== INITIAL STATE ===
+- Date: 2026-10-30
+- Status: Initialized Ralph Loop configuration.
+- Pending: Task 1.1 (Verify packet header layout 40 bytes).
+
+=== MILESTONE 1 VERIFIED ===
+- Task 1.1: Completed. Verified sizeof(MmwDemo_output_message_header) == 40U with compile-time assertions and exact 8-byte magic word {0x0102, 0x0304, 0x0506, 0x0708}.
+- Task 1.2: Completed. Verified DPIF_PointCloudCartesian is exactly 16 bytes (float x, y, z, velocity) and DPIF_PointCloudSideInfo is exactly 4 bytes (int16_t snr, int16_t noise). Wire alignment verified.
+
+=== MILESTONE 2 VERIFIED ===
+- Task 2.1: Completed. Audited dense_elevation.c and dense_elevation.h against antenna geometry. Implemented exact geometric midpoint centroiding (u_cm = 0.5*(lo+hi), v_cm = 0.5*(vmin+vmax)) with symmetric Q15 rounding. Virtual antenna scaling k_azim = 0.64 / numVirtualAntAzim connected cleanly to MmwDemo_DenseElevation_getAzimAntCount().
+- Task 2.2: Completed. Audited CLI parser in mmw_cli.c. Verified CLI responses emit 'Done\n' and prompt 'mmwDemo:/>' synchronously with radar-pipeline controller.
+
+=== CLUSTERING & CLASSIFICATION REFACTORING ===
+- Dynamic virtual aperture scaling implemented in surface_gen.c (D_merge(R) = 2*rangeStep + k_azim * R).
+- Range-slab Doppler velocity separation implemented in Surface_connected (static |d|<=1 isolated from dynamic |d|>1).
+- Dynamic velocity preservation implemented in Surface_merge (dynamic Doppler preserved over static, closing velocity prioritized).
+- Velocity-first box classification with Bit 15 dynamic flag (0x8000) and uncorrupted 7-bit class mask (0x007F) implemented.
+- DSS compiled cleanly (gmake -C oob_1843_dss/isk -j4 all -> exit code 0).
+- MSS multicore appimage packaged cleanly (gmake -C oob_1843_mss/isk post-build -> CRC32 0x87A25799).
+- Deliverable binary deployed to D:\Dinh\CT_Verse\Dev_code\radar-pipeline\binaries\algo_classified_bbox32.bin.
+- All unit and integration test suites passed (47 passed, 0 failed).
+
+=== RALPH MISSION COMPLETE ===
+- All items in PRD.md marked [x].
