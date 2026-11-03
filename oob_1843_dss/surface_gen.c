@@ -60,6 +60,10 @@ static far SurfaceWinSlot gSurfaceWin[3];
 #pragma DATA_SECTION(gSurfaceActive, ".l3ram")
 #pragma DATA_ALIGN(gSurfaceActive, 8)
 static far SurfaceActiveNode gSurfaceActive[SURFACE_ACTIVE_CAP];
+#pragma DATA_SECTION(gSurfacePartitionScratch, ".l3ram")
+#pragma DATA_ALIGN(gSurfacePartitionScratch, 8)
+static far ObstacleBox gSurfacePartitionScratch[MMWDEMO_SURFACE_MAX_BOXES];
+extern MmwDemo_HSRAM gHSRAM;
 static uint16_t gSurfaceWinCount;
 static uint8_t gSurfaceMotion[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
 volatile uint32_t gSurfaceInvalidGeometryCount[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES];
@@ -417,6 +421,9 @@ static void Surface_selectAndEmit(
                 float bestDistSq = FLT_MAX;
                 for (k = 0U; k < current; k++) {
                     uint16_t sel = selected[k];
+                    uint8_t cStatic = ((gSurfaceBounds[i].doppler >= -1) && (gSurfaceBounds[i].doppler <= 1)) ? 1U : 0U;
+                    uint8_t sStatic = ((gSurfaceBounds[sel].doppler >= -1) && (gSurfaceBounds[sel].doppler <= 1)) ? 1U : 0U;
+                    if (cStatic != sStatic) continue;
                     float sx = 0.5f * (gSurfaceBounds[sel].loX + gSurfaceBounds[sel].hiX);
                     float sy = 0.5f * (gSurfaceBounds[sel].loY + gSurfaceBounds[sel].hiY);
                     float sz = 0.5f * (gSurfaceBounds[sel].loZ + gSurfaceBounds[sel].hiZ);
@@ -470,6 +477,44 @@ static void Surface_selectAndEmit(
             }
             b->boxId = (int16_t)(MMWDEMO_PACK_OBSTACLE_BOX_ID(type, i + 1U) | 0x8000);
         }
+    }
+    {
+        uint16_t numDynamic = 0U;
+        uint16_t numStatic = 0U;
+        uint16_t dynIdx = 0U;
+        uint16_t statIdx;
+
+        for (i = 0U; i < current; i++) {
+            uint8_t isStatic = ((out[i].velocity >= -0.25f) && (out[i].velocity <= 0.25f)) ? 1U : 0U;
+            if (!isStatic) {
+                numDynamic++;
+            } else {
+                numStatic++;
+            }
+        }
+
+        statIdx = numDynamic;
+        for (i = 0U; i < current; i++) {
+            uint8_t isStatic = ((out[i].velocity >= -0.25f) && (out[i].velocity <= 0.25f)) ? 1U : 0U;
+            if (!isStatic) {
+                gSurfacePartitionScratch[dynIdx++] = out[i];
+            } else {
+                gSurfacePartitionScratch[statIdx++] = out[i];
+            }
+        }
+        for (i = 0U; i < current; i++) {
+            uint8_t type;
+            uint8_t isDyn;
+            out[i] = gSurfacePartitionScratch[i];
+            type = MMWDEMO_UNPACK_OBSTACLE_CLASS(out[i].boxId);
+            isDyn = MMWDEMO_OBSTACLE_IS_DYNAMIC(out[i].boxId);
+            if (isDyn) {
+                out[i].boxId = (int16_t)(MMWDEMO_PACK_OBSTACLE_BOX_ID(type, i + 1U) | 0x8000);
+            } else {
+                out[i].boxId = MMWDEMO_PACK_OBSTACLE_BOX_ID(type, i + 1U);
+            }
+        }
+        current = numDynamic + numStatic;
     }
     cfg->status->boxCount = current;
     *count = current;
@@ -833,6 +878,22 @@ int32_t MmwDemo_SurfaceGen_process(
     if (cap>MMWDEMO_SURFACE_MAX_BOXES) cap=MMWDEMO_SURFACE_MAX_BOXES;
     gNavDbgDenseSamples=staticCfg->status->denseProduced;
     Surface_selectAndEmit(completedSlots, overflowClusters, staticCfg, out, cap, count);
+    {
+        uint16_t numDynamic = 0U;
+        uint16_t numStatic = 0U;
+        uint16_t totalBoxes = (uint16_t)(*count);
+        for (k = 0U; k < totalBoxes; k++) {
+            if (MMWDEMO_OBSTACLE_IS_DYNAMIC(out[k].boxId)) {
+                numDynamic++;
+            } else {
+                numStatic++;
+            }
+        }
+        gHSRAM.numDynamicObstacles = (uint16_t)numDynamic;
+        gHSRAM.numStaticObstacles = (uint16_t)numStatic;
+        staticCfg->status->boxCount = (uint16_t)(numDynamic + numStatic);
+        *count = (uint32_t)(numDynamic + numStatic);
+    }
     elapsed=Cycleprofiler_getTimeStamp()-start;
     header->processingCycles = elapsed;
     gNavEmitSurfaceCycles[sf]=elapsed;

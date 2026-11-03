@@ -112,7 +112,7 @@ extern MmwDemo_MSS_MCB    gMmwMssMCB;
  *************************** Local Definitions ****************************
  **************************************************************************/
 
-#define MMWDEMO_DATAUART_MAX_BAUDRATE_SUPPORTED 3125000
+#define MMWDEMO_DATAUART_MAX_BAUDRATE_SUPPORTED 921600
 
 static int32_t MmwDemo_CLIParseInt32(
     const char *text,

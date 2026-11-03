@@ -21,6 +21,10 @@ TLV = struct.Struct("<II")
 BOX = struct.Struct("<7f2h")
 STATUS = struct.Struct("<HHI8H6I")
 LIMIT_FLAGS = 0x1FF | (1 << 11) | (1 << 12)
+TLV_DETECTED_POINTS = 1
+TLV_CUSTOM_OBSTACLES = 20
+TLV_STATUS = 21
+TLV_STATIC_OBSTACLES = 22
 
 
 def crc64_iso(raw: bytes) -> int:
@@ -130,18 +134,45 @@ def validate_capture(raw: bytes, baud: int = 921600, mode: str = "mobile"):
         expected_uart = (size * 10_000_000 + baud - 1) // baud
         if uart != expected_uart:
             raise ValueError("UART estimate does not describe the actual padded packet")
-        payload = tlvs.get(20, b"")
-        if len(payload) != boxes * BOX.size:
+        payload20 = tlvs.get(TLV_CUSTOM_OBSTACLES, b"")
+        payload22 = tlvs.get(TLV_STATIC_OBSTACLES, b"")
+        if len(payload20) % BOX.size != 0:
             raise ValueError("TLV20 count/length mismatch")
+
+        if len(payload22) % BOX.size != 0:
+            raise ValueError("TLV22 count/length mismatch")
+        total_boxes = (len(payload20) + len(payload22)) // BOX.size
+        if total_boxes != boxes:
+            raise ValueError("Obstacle TLV box count mismatch with status")
         if 1 not in tlvs and num_objects != boxes:
-            raise ValueError("Header object count differs from TLV20")
-        for rank, values in enumerate(BOX.iter_unpack(payload), 1):
-            if not all(math.isfinite(v) for v in values[:7]):
-                raise ValueError("Non-finite box")
-            if min(values[3:6]) <= 0 or values[1] < 0:
-                raise ValueError("Invalid box geometry")
-            if values[8] & 255 != rank:
-                raise ValueError("Duplicate or unstable frame rank encoding")
+            raise ValueError("Header object count differs from obstacle count")
+        total_rank = 1
+        for payload, is_dyn in ((payload20, True), (payload22, False)):
+            for values in BOX.iter_unpack(payload):
+                if not all(math.isfinite(v) for v in values[:7]):
+                    raise ValueError("Non-finite box")
+    
+    
+    
+    
+                if min(values[3:6]) <= 0 or values[1] < 0:
+                    raise ValueError("Invalid box geometry")
+                if values[8] & 255 != total_rank:
+                    raise ValueError("Duplicate or unstable frame rank encoding")
+    
+                total_rank += 1
+
+
+
+
+
+
+
+
+
+
+
+
         if mode == "mobile" and held:
             raise ValueError("Mobile mode emitted held coordinates")
         if previous_export:
@@ -166,11 +197,19 @@ def validate_capture(raw: bytes, baud: int = 921600, mode: str = "mobile"):
     }
 
 
-def fixture_packet(frame=2, boxes=(), previous_export=20_000, flags=0,
+def fixture_packet(frame=2, boxes=(), static_boxes=(), previous_export=20_000, flags=0,
                    previous_frame=1, held=0, extra=()):
-    payload = b"".join(BOX.pack(*b) for b in boxes)
-    entries = ([(20, payload)] if payload else []) + list(extra)
-    count = len(boxes)
+    payload20 = b"".join(BOX.pack(*b) for b in boxes)
+    payload22 = b"".join(BOX.pack(*b) for b in static_boxes)
+    entries = []
+    if payload20:
+        entries.append((TLV_CUSTOM_OBSTACLES, payload20))
+    if payload22:
+        entries.append((TLV_STATIC_OBSTACLES, payload22))
+    entries.extend(extra)
+    count = len(boxes) + len(static_boxes)
+
+
     size = (HEADER.size + sum(TLV.size + len(p) for _, p in entries)
             + TLV.size + STATUS.size + 31) & ~31
     st = STATUS.pack(1, STATUS.size, flags, count, count, count, count,
@@ -182,6 +221,31 @@ def fixture_packet(frame=2, boxes=(), previous_export=20_000, flags=0,
                          0, count, len(entries), 0)
     raw = header + b"".join(TLV.pack(k, len(p)) + p for k, p in entries)
     return raw + bytes(size - len(raw))
+
+
+def unpack_obstacle_boxes(tlvs: dict[int, bytes]) -> list[dict]:
+    """Unpack obstacle bounding boxes from TLV 20 (dynamic) and TLV 22 (static)."""
+    boxes = []
+    for tlv_type, is_dynamic in ((TLV_CUSTOM_OBSTACLES, True), (TLV_STATIC_OBSTACLES, False)):
+        payload = tlvs.get(tlv_type, b"")
+        for chunk in [payload[i:i + BOX.size] for i in range(0, len(payload), BOX.size)]:
+            if len(chunk) == BOX.size:
+                x, y, z, w, d, h, dop, snr, box_id = BOX.unpack(chunk)
+                u16_id = int(box_id) & 0xFFFF
+                class_type = (u16_id >> 8) & 0x7F
+                boxes.append({
+                    "type": "bbox_3d",
+                    "x": float(x), "y": float(y), "z": float(z),
+                    "width": float(w), "depth": float(d), "height": float(h),
+                    "velocity": float(dop),
+                    "snr_db": float(snr) / 10.0,
+                    "box_id": u16_id,
+                    "rank": u16_id & 0xFF,
+                    "class_type": class_type,
+                    "is_dynamic": is_dynamic,
+                    "tlv_type": tlv_type,
+                })
+    return boxes
 
 
 class WireFixtures(unittest.TestCase):
@@ -252,6 +316,33 @@ class WireFixtures(unittest.TestCase):
         report = validate_capture(raw, mode="fixed")[0]
         self.assertEqual(report["recommended_period_us"], 52_000)
         self.assertEqual(recommended_period_us(89_584), 112_000)
+
+    def test_partitioned_dynamic_and_static_obstacles(self):
+        dyn_box = (0.1, 2.0, 0.2, 0.5, 0.1, 0.4, 0.5, 250, 0x8101)
+        stat_box = (0.2, 3.0, 0.1, 0.8, 0.2, 0.6, 0.0, 200, 2)
+        raw = fixture_packet(frame=2, boxes=[dyn_box], static_boxes=[stat_box])
+        report = validate_capture(raw)[0]
+        self.assertEqual(report["frames"], 1)
+
+        for _, _, _, _, tlvs in packets(raw):
+            unpacked = unpack_obstacle_boxes(tlvs)
+            self.assertEqual(len(unpacked), 2)
+            self.assertTrue(unpacked[0]["is_dynamic"])
+            self.assertEqual(unpacked[0]["tlv_type"], 20)
+            self.assertEqual(unpacked[0]["rank"], 1)
+            self.assertFalse(unpacked[1]["is_dynamic"])
+            self.assertEqual(unpacked[1]["tlv_type"], 22)
+            self.assertEqual(unpacked[1]["rank"], 2)
+
+        raw_static = fixture_packet(frame=3, static_boxes=[(0.2, 3.0, 0.1, 0.8, 0.2, 0.6, 0.0, 200, 1)])
+        report_static = validate_capture(raw_static)[0]
+        self.assertEqual(report_static["frames"], 1)
+        for _, _, _, _, tlvs in packets(raw_static):
+            unpacked = unpack_obstacle_boxes(tlvs)
+            self.assertEqual(len(unpacked), 1)
+            self.assertFalse(unpacked[0]["is_dynamic"])
+            self.assertEqual(unpacked[0]["tlv_type"], 22)
+            self.assertEqual(unpacked[0]["rank"], 1)
 
 
 if __name__ == "__main__":

@@ -94,6 +94,7 @@ typedef enum MmwDemo_output_message_type_e
     /*! @brief   Custom obstacle point cloud (x, y, z, v, snr, width) */
     MMWDEMO_OUTPUT_MSG_CUSTOM_OBSTACLES = 20,
     MMWDEMO_OUTPUT_MSG_SURFACE_STATUS = 21,
+    MMWDEMO_OUTPUT_MSG_STATIC_OBSTACLES = 22,
 
     MMWDEMO_OUTPUT_MSG_MAX
 } MmwDemo_output_message_type;
@@ -312,7 +313,8 @@ typedef struct MmwDemo_HSRAM_t
     MmwDemo_output_message_stats   outStats;
 
     /*! @brief   Custom obstacles payload */
-    uint16_t                       numCustomObstacles;
+    uint16_t                       numDynamicObstacles;
+    uint16_t                       numStaticObstacles;
     MmwDemo_CustomObstacle         customObstacles[256U];
     MmwDemo_SurfaceStatus          surfaceStatus;
 

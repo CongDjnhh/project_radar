@@ -967,7 +967,8 @@ int32_t DPC_ObjectDetection_execute
      * solely because the returned list fits. */
     gHSRAM.surfaceStatus.flags = MMWDEMO_SURFACE_COVERAGE_UNVERIFIED |
                                 MMWDEMO_SURFACE_TIMING_UNVALIDATED;
-    gHSRAM.numCustomObstacles = 0U;
+    gHSRAM.numDynamicObstacles = 0U;
+    gHSRAM.numStaticObstacles = 0U;
 
     retVal = DPU_RangeProcHWA_process(subFrmObj->dpuRangeObj, &outRangeProc);
     if (retVal != 0)
@@ -1415,6 +1416,8 @@ int32_t DPC_ObjectDetection_execute
         {
             gNavProcessErrorCount++;
             navOutputPoints = 0U;
+            gHSRAM.numDynamicObstacles = 0U;
+            gHSRAM.numStaticObstacles = 0U;
             retVal = 0;
         }
     }
@@ -1424,7 +1427,11 @@ int32_t DPC_ObjectDetection_execute
         navOutputPoints = 0U;
     }
     gNavLastOutputSize = navOutputPoints;
-    gHSRAM.numCustomObstacles = (uint16_t)navOutputPoints;
+    if (navEnabled == 0U)
+    {
+        gHSRAM.numDynamicObstacles = 0U;
+        gHSRAM.numStaticObstacles = 0U;
+    }
 
     /* Set DPM result with measure (bias, phase) and detection info */
 

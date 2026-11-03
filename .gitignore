@@ -80,7 +80,7 @@ compile_commands.json
 dual_agent*
 run_dual_agent.bat
 FINAL_DUAL_AGENT_OUTPUT.md
-
+.superpowers/
 # ==========================================================
 # 6. File rác của Hệ điều hành
 # ==========================================================
@@ -96,3 +96,4 @@ Desktop.ini
 # ==========================================================
 docs/**/*.*
 graphify-out/
+scripts/

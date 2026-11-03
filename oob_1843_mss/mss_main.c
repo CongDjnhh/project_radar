@@ -1330,11 +1330,12 @@ static void MmwDemo_transmitProcessedOutput
      * must not change a condition between the TLV-table and UART-write phases. */
     guiMonSel = subFrameCfg->guiMonSel;
     pGuiMonSel = &guiMonSel;
-    if (gHSRAM.numCustomObstacles > MMWDEMO_SURFACE_MAX_BOXES) {
-        gHSRAM.numCustomObstacles = 0U;
+    if ((gHSRAM.numDynamicObstacles + gHSRAM.numStaticObstacles) > MMWDEMO_SURFACE_MAX_BOXES) {
+        gHSRAM.numDynamicObstacles = 0U;
+        gHSRAM.numStaticObstacles = 0U;
         surfaceStatus.flags |= MMWDEMO_SURFACE_PROCESS_ERROR;
     }
-    surfaceStatus.boxCount = gHSRAM.numCustomObstacles;
+    surfaceStatus.boxCount = gHSRAM.numDynamicObstacles + gHSRAM.numStaticObstacles;
 
     /* Clear message header and padding. */
     memset((void *)&header, 0, sizeof(MmwDemo_output_message_header));
@@ -1389,7 +1390,7 @@ static void MmwDemo_transmitProcessedOutput
     header.magicWord[3] = 0x0708;
     if ((pGuiMonSel->customObstacles == 1) && (result->numObjOut == 0U))
     {
-        header.numDetectedObj = gHSRAM.numCustomObstacles;
+        header.numDetectedObj = (uint32_t)(gHSRAM.numDynamicObstacles + gHSRAM.numStaticObstacles);
     }
     else
     {
@@ -1420,14 +1421,25 @@ static void MmwDemo_transmitProcessedOutput
         tlvIdx++;
     }
 
-    /* Custom point cloud (TLV 20) with x,y,z,v,snr,width */
-    if ((pGuiMonSel->customObstacles == 1) && (gHSRAM.numCustomObstacles > 0U))
+    /* Custom Dynamic Obstacles TLV 20 */
+    if ((pGuiMonSel->customObstacles == 1) && (gHSRAM.numDynamicObstacles > 0U))
     {
         tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_CUSTOM_OBSTACLES;
-        tl[tlvIdx].length = sizeof(MmwDemo_CustomObstacle) * gHSRAM.numCustomObstacles;
+        tl[tlvIdx].length = sizeof(MmwDemo_CustomObstacle) * gHSRAM.numDynamicObstacles;
         packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
         tlvIdx++;
     }
+    /* Custom Static Obstacles TLV 22 */
+    if ((pGuiMonSel->customObstacles == 1) && (gHSRAM.numStaticObstacles > 0U))
+    {
+        tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_STATIC_OBSTACLES;
+        tl[tlvIdx].length = sizeof(MmwDemo_CustomObstacle) * gHSRAM.numStaticObstacles;
+
+        packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
+        tlvIdx++;
+    }
+
+
 
 
 
@@ -1538,16 +1550,26 @@ static void MmwDemo_transmitProcessedOutput
         tlvIdx++;
     }
 
-    /* Send Custom Obstacles TLV 20. */
-    if ((pGuiMonSel->customObstacles == 1) && (gHSRAM.numCustomObstacles > 0U))
+    /* Send Custom Dynamic Obstacles TLV 20 */
+    if ((pGuiMonSel->customObstacles == 1) && (gHSRAM.numDynamicObstacles > 0U))
     {
         UART_writePolling(
             &tl[tlvIdx], sizeof(MmwDemo_output_message_tl));
         UART_writePolling(
-            gHSRAM.customObstacles,
-            sizeof(MmwDemo_CustomObstacle) * gHSRAM.numCustomObstacles);
+            &gHSRAM.customObstacles[0],
+            sizeof(MmwDemo_CustomObstacle) * gHSRAM.numDynamicObstacles);
         tlvIdx++;
     }
+    /* Send Custom Static Obstacles TLV 22 */
+    if ((pGuiMonSel->customObstacles == 1) && (gHSRAM.numStaticObstacles > 0U))
+    {
+        UART_writePolling(&tl[tlvIdx], sizeof(MmwDemo_output_message_tl));
+        UART_writePolling(&gHSRAM.customObstacles[gHSRAM.numDynamicObstacles],
+                          sizeof(MmwDemo_CustomObstacle) * gHSRAM.numStaticObstacles);
+        tlvIdx++;
+    }
+
+
 
 
 
