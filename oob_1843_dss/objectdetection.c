@@ -120,6 +120,7 @@ volatile uint32_t gSurfaceAvailableProcessingUs[MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES
  * valid navigation stream off for one frame. */
 static uint8_t gNavSurfaceEnabledSubFrameMask = 0xFF;
 static uint8_t gNavRegionGrowValidMask = 0U;
+static uint8_t gNavDetectedPointsEnabledSubFrameMask = 0U;
 
 
 MmwDemo_SurfaceGen_Cfg gNavPointCfg = {
@@ -132,6 +133,8 @@ MmwDemo_SurfaceGen_Cfg gNavPointCfg = {
         .maxRangeBin = 32767U
     },
     .minMovingSpeedMps = 0.0f,
+    .clusterVelSpreadMps = 0.0f,
+    .clusterRangeTolM = 0.0f,
     .maxSurfacePoints = MMWDEMO_SURFACE_MAX_BOXES,
     .uartMaxSurfacePoints = MMWDEMO_SURFACE_MAX_BOXES
 };
@@ -1000,12 +1003,15 @@ int32_t DPC_ObjectDetection_execute
         navSharedCfg.minAzimuthDeg = navShared->minAzimuthDeg;
         navSharedCfg.maxAzimuthDeg = navShared->maxAzimuthDeg;
         navSharedCfg.minMovingSpeedMps = navShared->minMovingSpeedMps;
+        navSharedCfg.clusterVelSpreadMps = navShared->clusterVelSpreadMps;
+        navSharedCfg.clusterRangeTolM = navShared->clusterRangeTolM;
         navSharedCfg.minRangeBin = navShared->minRangeBin;
         navSharedCfg.maxRangeBin = navShared->maxRangeBin;
         navSharedCfg.maxSurfacePoints = navShared->maxSurfacePoints;
         navSharedCfg.uartMaxSurfacePoints =
             navShared->uartMaxSurfacePoints;
         navSharedCfg.enabledSurfaceMask = navShared->enabledSurfaceMask;
+        navSharedCfg.enabledDetectedPointsMask = navShared->enabledDetectedPointsMask;
         navSharedCfg.regionGrowValidMask = navShared->regionGrowValidMask;
         for (timingIdx = 0U;
              timingIdx < MMWDEMO_DENSE_ELEV_MAX_SUBFRAMES;
@@ -1042,6 +1048,10 @@ int32_t DPC_ObjectDetection_execute
                 (navSharedCfg.maxRangeBin > 0) ? (uint16_t)navSharedCfg.maxRangeBin : 0U;
             gNavPointCfg.minMovingSpeedMps =
                 navSharedCfg.minMovingSpeedMps;
+            gNavPointCfg.clusterVelSpreadMps =
+                navSharedCfg.clusterVelSpreadMps;
+            gNavPointCfg.clusterRangeTolM =
+                navSharedCfg.clusterRangeTolM;
             gNavPointCfg.maxSurfacePoints =
                 navSharedCfg.maxSurfacePoints;
             gNavPointCfg.uartMaxSurfacePoints =
@@ -1053,6 +1063,8 @@ int32_t DPC_ObjectDetection_execute
             }
             gNavSurfaceEnabledSubFrameMask =
                 navSharedCfg.enabledSurfaceMask;
+            gNavDetectedPointsEnabledSubFrameMask =
+                navSharedCfg.enabledDetectedPointsMask;
             gNavRegionGrowValidMask = navSharedCfg.regionGrowValidMask;
 
             for (timingIdx = 0U;
@@ -1348,6 +1360,9 @@ int32_t DPC_ObjectDetection_execute
         navStaticCfg.rangeBiasMeters = denseCompRxCfg.rangeBias;
         navStaticCfg.minRangeMeters = fovMinRange;
         navStaticCfg.maxRangeMeters = fovMaxRange;
+        navStaticCfg.minMovingSpeedMps = navCfg.minMovingSpeedMps;
+        navStaticCfg.clusterVelSpreadMps = navCfg.clusterVelSpreadMps;
+        navStaticCfg.clusterRangeTolM = navCfg.clusterRangeTolM;
         navStaticCfg.motionMode = gSurfaceMotionMode[objDetObj->subFrameIndx];
         navStaticCfg.numVirtualAntAzim = (uint8_t)subFrmObj->staticCfg.numVirtualAntAzim;
         navStaticCfg.status = &gHSRAM.surfaceStatus;
@@ -1431,6 +1446,70 @@ int32_t DPC_ObjectDetection_execute
     {
         gHSRAM.numDynamicObstacles = 0U;
         gHSRAM.numStaticObstacles = 0U;
+    }
+
+    /* Convert dense elevation 3D samples to standard Cartesian detected points when enabled */
+    {
+        uint8_t pointsEnabled =
+            ((gNavDetectedPointsEnabledSubFrameMask & (1U << objDetObj->subFrameIndx)) != 0U);
+
+        if ((pointsEnabled != 0U) && (navEnabled != 0U) && (retVal == 0))
+        {
+            const MmwDemo_DenseElevation_OutputHeader *dHeader =
+                (const MmwDemo_DenseElevation_OutputHeader *)gNavCandidateScratch;
+            const MmwDemo_DenseElevation_OutputSample *nSamples =
+                (const MmwDemo_DenseElevation_OutputSample *)(gNavCandidateScratch + sizeof(*dHeader));
+            uint16_t numSamples = dHeader->numSamples;
+            uint16_t maxPoints = (uint16_t)subFrmObj->dpuCfg.aoaCfg.res.detObjOutMaxSize;
+            uint16_t maxHsramPoints = (uint16_t)(MMWDEMO_HSRAM_PAYLOAD_SIZE /
+                (sizeof(DPIF_PointCloudCartesian) + sizeof(DPIF_PointCloudSideInfo)));
+            uint16_t numPoints = numSamples;
+            DPIF_PointCloudCartesian *outPoints = subFrmObj->dpuCfg.aoaCfg.res.detObjOut;
+            DPIF_PointCloudSideInfo *outSideInfo = subFrmObj->dpuCfg.aoaCfg.res.detObjOutSideInfo;
+            uint16_t pIdx;
+            float rStep = subFrmObj->staticCfg.rangeStep;
+            float rBias = objDetObj->commonCfg.compRxChanCfg.rangeBias;
+            float dStep = subFrmObj->staticCfg.dopplerStep;
+
+            if (numPoints > maxPoints)
+            {
+                numPoints = maxPoints;
+            }
+            if (numPoints > maxHsramPoints)
+            {
+                numPoints = maxHsramPoints;
+            }
+
+            for (pIdx = 0U; pIdx < numPoints; pIdx++)
+            {
+                const MmwDemo_DenseElevation_OutputSample *s = &nSamples[pIdx];
+                float r = (float)s->rangeIdx * rStep - rBias;
+                if (r < 0.0f)
+                {
+                    r = 0.0f;
+                }
+                float u = (float)s->azimuthUQ15 * (1.0f / 32768.0f);
+                float v = (float)s->sourceVQ15 * (1.0f / 32768.0f);
+                float cosSq = 1.0f - u * u - v * v;
+                if (cosSq < 0.0f)
+                {
+                    cosSq = 0.0f;
+                }
+                outPoints[pIdx].x = r * u;
+                outPoints[pIdx].y = r * sqrtf(cosSq);
+                outPoints[pIdx].z = r * v;
+                outPoints[pIdx].velocity = (float)s->dopplerIdx * dStep;
+
+                outSideInfo[pIdx].snr = (int16_t)s->snrDb10;
+                int32_t noiseEst = (int32_t)s->powerDb10 - (int32_t)s->snrDb10;
+                outSideInfo[pIdx].noise = (noiseEst > 0) ? (int16_t)noiseEst : 0;
+            }
+            result->numObjOut = (uint32_t)numPoints;
+        }
+        else
+        {
+            result->numObjOut = 0U;
+        }
     }
 
     /* Set DPM result with measure (bias, phase) and detection info */
