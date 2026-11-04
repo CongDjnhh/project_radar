@@ -482,6 +482,8 @@ static void MmwDemo_CLIInitNavDefaults(
     sharedCfg->minAzimuthDeg = -90.0f;
     sharedCfg->maxAzimuthDeg = 90.0f;
     sharedCfg->minMovingSpeedMps = 0.00f;
+    sharedCfg->clusterVelSpreadMps = 0.00f;
+    sharedCfg->clusterRangeTolM = 0.00f;
     sharedCfg->minRangeBin = 0;
     sharedCfg->maxRangeBin = 256;
     sharedCfg->maxSurfacePoints = MMWDEMO_SURFACE_MAX_BOXES;
@@ -491,6 +493,7 @@ static void MmwDemo_CLIInitNavDefaults(
     sharedCfg->reservedNav[2] = 0U;
     sharedCfg->reservedNav[3] = 0U;
     sharedCfg->enabledSurfaceMask = 0U;
+    sharedCfg->enabledDetectedPointsMask = 0U;
 }
 
 static int32_t MmwDemo_CLISurfaceMotionCfg(int32_t argc, char* argv[])
@@ -498,6 +501,8 @@ static int32_t MmwDemo_CLISurfaceMotionCfg(int32_t argc, char* argv[])
     extern MmwDemo_HSRAM gHSRAM;
     volatile MmwDemo_NavCliCfg *shared = &gHSRAM.navCfg;
     int32_t sf, mode;
+    float minSpeed = 0.0f, velSpread = 0.0f, rangeTol = 0.0f;
+    char *end = NULL;
     uint32_t first, last, i;
     uint8_t generation;
     UInt key;
@@ -505,12 +510,17 @@ static int32_t MmwDemo_CLISurfaceMotionCfg(int32_t argc, char* argv[])
         CLI_write("Error: surfaceMotionCfg requires sensorStop\n");
         return -1;
     }
-    if (argc != 3 ||
+    if ((argc < 3) || (argc > 6) ||
         MmwDemo_CLIParseInt32(argv[1], -1, RL_MAX_SUBFRAMES - 1, &sf) != 0 ||
-        MmwDemo_CLIParseInt32(argv[2], 0, 1, &mode) != 0) {
-        CLI_write("Error: surfaceMotionCfg <subFrameIdx|-1> <0 mobile|1 fixed>\n");
+        MmwDemo_CLIParseInt32(argv[2], 0, 1, &mode) != 0 ||
+        ((argc >= 4) && ((minSpeed = strtof(argv[3], &end)) < 0.0f || (end == argv[3]) || (*end != '\0') || !isfinite(minSpeed))) ||
+        ((argc >= 5) && ((velSpread = strtof(argv[4], &end)) < 0.0f || (end == argv[4]) || (*end != '\0') || !isfinite(velSpread))) ||
+        ((argc == 6) && ((rangeTol = strtof(argv[5], &end)) < 0.0f || (end == argv[5]) || (*end != '\0') || !isfinite(rangeTol)))) {
+        CLI_write("Error: surfaceMotionCfg <subFrameIdx|-1> <0 mobile|1 fixed> [minMovingSpeedMps] [clusterVelSpreadMps] [clusterRangeTolM]\n");
+
         return -1;
     }
+
     first = (sf < 0) ? 0U : (uint32_t)sf;
     last = (sf < 0) ? RL_MAX_SUBFRAMES - 1U : (uint32_t)sf;
     key = Hwi_disable();
@@ -520,6 +530,9 @@ static int32_t MmwDemo_CLISurfaceMotionCfg(int32_t argc, char* argv[])
     shared->isValid = 0U;
     MEM_BARRIER();
     for (i = first; i <= last; i++) shared->surfaceMotionMode[i] = (uint8_t)mode;
+    shared->minMovingSpeedMps = minSpeed;
+    shared->clusterVelSpreadMps = velSpread;
+    shared->clusterRangeTolM = rangeTol;
     MEM_BARRIER();
     shared->isValid = generation;
     MEM_BARRIER();
@@ -562,6 +575,7 @@ static int32_t MmwDemo_CLIRegionGrowCfg(int32_t argc, char* argv[])
     }
     if (!(values[11] <= values[10] && values[10] < values[9] &&
           values[9] <= values[8])) goto invalid;
+
     first = (sf < 0) ? 0U : (uint32_t)sf;
     last = (sf < 0) ? RL_MAX_SUBFRAMES - 1U : (uint32_t)sf;
     key = Hwi_disable();
@@ -690,15 +704,21 @@ static int32_t MmwDemo_CLIGuiMonSel (int32_t argc, char* argv[])
             nextGeneration = 1U;
         }
         uint8_t nextSurfaceMask;
+        uint8_t nextPointsMask;
         if (initializeDefaults != 0U)
         {
             nextSurfaceMask = 0U;
+            nextPointsMask = 0U;
         }
         else
         {
             nextSurfaceMask = sharedCfg->enabledSurfaceMask;
+            nextPointsMask = sharedCfg->enabledDetectedPointsMask;
         }
-        uint8_t surfaceEnabled = (guiMonSel.customObstacles != 0U) ? 1U : 0U;
+        uint8_t pointsEnabled = (guiMonSel.detectedObjects != 0U) ? 1U : 0U;
+        uint8_t surfaceEnabled = ((guiMonSel.customObstacles != 0U) || (guiMonSel.detectedObjects != 0U)) ? 1U : 0U;
+        nextPointsMask = MmwDemo_CLIUpdateSubFrameMask(
+            nextPointsMask, subFrameNum, pointsEnabled);
         nextSurfaceMask = MmwDemo_CLIUpdateSubFrameMask(
             nextSurfaceMask, subFrameNum, surfaceEnabled);
 
@@ -709,6 +729,7 @@ static int32_t MmwDemo_CLIGuiMonSel (int32_t argc, char* argv[])
             MmwDemo_CLIInitNavDefaults(sharedCfg);
         }
         sharedCfg->enabledSurfaceMask = nextSurfaceMask;
+        sharedCfg->enabledDetectedPointsMask = nextPointsMask;
 
         uint16_t maxSurfacePoints = sharedCfg->uartMaxSurfacePoints;
         if ((maxSurfacePoints == 0U) ||
@@ -1668,7 +1689,7 @@ void MmwDemo_CLIInit (uint8_t taskPriority)
     cnt++;
 
     cliCfg.tableEntry[cnt].cmd = "surfaceMotionCfg";
-    cliCfg.tableEntry[cnt].helpString = "<subFrameIdx> <0 mobile|1 fixed>";
+    cliCfg.tableEntry[cnt].helpString = "<subFrameIdx> <0 mobile|1 fixed> [minMovingSpeedMps] [clusterVelSpreadMps] [clusterRangeTolM]";
     cliCfg.tableEntry[cnt].cmdHandlerFxn = MmwDemo_CLISurfaceMotionCfg;
     cnt++;
 

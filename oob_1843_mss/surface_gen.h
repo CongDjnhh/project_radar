@@ -24,11 +24,21 @@ extern "C" {
 #define MMWDEMO_NAV_EINVAL                   (-101)
 #define MMWDEMO_NAV_ECANDIDATE_PAYLOAD       (-103)
 
+typedef struct MmwDemo_SurfaceClusterThresh_t
+{
+    int16_t  dopplerThreshBins;
+    uint16_t rangeThreshBins;
+    float    azimMargin;
+    float    elevMargin;
+} MmwDemo_SurfaceClusterThresh;
+
 /** Configuration is fully runtime supplied. Range bounds use [min,max]. */
 typedef struct MmwDemo_SurfaceGen_Cfg_t
 {
     MmwDemo_DenseElevation_Cfg sourceCfg;
     float    minMovingSpeedMps;
+    float    clusterVelSpreadMps;
+    float    clusterRangeTolM;
     uint16_t maxSurfacePoints;
     uint16_t uartMaxSurfacePoints;
 } MmwDemo_SurfaceGen_Cfg;
@@ -42,8 +52,13 @@ typedef struct MmwDemo_SurfaceGen_StaticCfg_t
     float rangeBiasMeters;
     float minRangeMeters;
     float maxRangeMeters;
+    float minMovingSpeedMps;
+    float clusterVelSpreadMps;
+    float clusterRangeTolM;
     uint32_t elapsedUsec;
     uint8_t motionMode;
+    uint8_t numVirtualAntAzim;
+    uint8_t reservedPad[2];
     MmwDemo_SurfaceStatus *status;
 } MmwDemo_SurfaceGen_StaticCfg;
 

@@ -1957,6 +1957,15 @@ uint8_t MmwDemo_DenseElevation_getAzimAntCount(void)
     return 8U;
 }
 
+uint8_t MmwDemo_DenseElevation_getElevRowCount(void)
+{
+    if (gDenseGeometryValid && (gDenseNumRows > 0U))
+    {
+        return gDenseNumRows;
+    }
+    return 2U;
+}
+
 void MmwDemo_DenseElevation_reset(void)
 {
     gDenseGeometrySignature = 0U;

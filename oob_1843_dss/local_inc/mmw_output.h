@@ -263,7 +263,7 @@ typedef char MmwDemo_SurfaceStatusSizeCheck[
  * @brief
  *  Size of HSRAM Payload data array.
  */
-#define MMWDEMO_HSRAM_PAYLOAD_SIZE (1024)
+#define MMWDEMO_HSRAM_PAYLOAD_SIZE (4096)
 
 /** Runtime navigation configuration shared atomically from MSS to DSS. */
 typedef struct MmwDemo_NavCliCfg_t {
@@ -282,7 +282,10 @@ typedef struct MmwDemo_NavCliCfg_t {
     uint8_t  reservedNav[4];
     uint8_t  isValid;
     uint8_t  enabledSurfaceMask;
-    uint8_t  reserved[50];
+    uint8_t  enabledDetectedPointsMask;
+    uint8_t  reserved[41];
+    float    clusterVelSpreadMps;
+    float    clusterRangeTolM;
     uint16_t regionGrow[MMWDEMO_NAV_SHARED_MAX_SUBFRAMES][12];
     uint8_t  regionGrowValidMask;
     uint8_t  regionGrowReserved[3];

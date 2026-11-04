@@ -199,6 +199,7 @@ uint8_t MmwDemo_DenseElevation_processRange(
 
 void MmwDemo_DenseElevation_reset(void);
 uint8_t MmwDemo_DenseElevation_getAzimAntCount(void);
+uint8_t MmwDemo_DenseElevation_getElevRowCount(void);
 
 /* Wire ABI checks: ARM (MSS) and C674x (DSS) must agree exactly.
  * Protocol version 8: OutputSample is 20 bytes. Any mismatch is a
