@@ -1461,8 +1461,12 @@ int32_t DPC_ObjectDetection_execute
                 (const MmwDemo_DenseElevation_OutputSample *)(gNavCandidateScratch + sizeof(*dHeader));
             uint16_t numSamples = dHeader->numSamples;
             uint16_t maxPoints = (uint16_t)subFrmObj->dpuCfg.aoaCfg.res.detObjOutMaxSize;
-            uint16_t maxHsramPoints = (uint16_t)(MMWDEMO_HSRAM_PAYLOAD_SIZE /
-                (sizeof(DPIF_PointCloudCartesian) + sizeof(DPIF_PointCloudSideInfo)));
+            /* Reserve room in HSRAM payload for stats and rxChannelBias calibration structures */
+            uint32_t hsramReserve = sizeof(DPC_ObjectDetection_Stats) +
+                                    sizeof(DPU_AoAProc_compRxChannelBiasCfg) + 64U;
+            uint16_t maxHsramPoints = (uint16_t)((MMWDEMO_HSRAM_PAYLOAD_SIZE > hsramReserve) ?
+                ((MMWDEMO_HSRAM_PAYLOAD_SIZE - hsramReserve) /
+                 (sizeof(DPIF_PointCloudCartesian) + sizeof(DPIF_PointCloudSideInfo))) : 0U);
             uint16_t numPoints = numSamples;
             DPIF_PointCloudCartesian *outPoints = subFrmObj->dpuCfg.aoaCfg.res.detObjOut;
             DPIF_PointCloudSideInfo *outSideInfo = subFrmObj->dpuCfg.aoaCfg.res.detObjOutSideInfo;

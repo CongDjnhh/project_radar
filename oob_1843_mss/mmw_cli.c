@@ -217,16 +217,16 @@ static int32_t MmwDemo_CLISensorStart (int32_t argc, char* argv[])
         return 0;
     }
 
-    /* Never start TLV20 processing with implicit region-growing thresholds. */
+    /* Never start processing with implicit region-growing thresholds. */
     {
         extern MmwDemo_HSRAM gHSRAM;
         uint32_t sf;
         for (sf = 0U; sf < gMmwMssMCB.objDetCommonCfg.preStartCommonCfg.numSubFrames; sf++)
         {
-            if (gMmwMssMCB.subFrameCfg[sf].guiMonSel.customObstacles &&
+            if ((gMmwMssMCB.subFrameCfg[sf].guiMonSel.customObstacles || gMmwMssMCB.subFrameCfg[sf].guiMonSel.detectedObjects) &&
                 (gHSRAM.navCfg.regionGrowValidMask & (1U << sf)) == 0U)
             {
-                CLI_write("Error: regionGrowCfg required for each TLV20 subframe before sensorStart\n");
+                CLI_write("Error: regionGrowCfg required for each active subframe before sensorStart\n");
                 return -1;
             }
         }
@@ -297,7 +297,7 @@ static int32_t MmwDemo_CLISensorStart (int32_t argc, char* argv[])
     {
         uint32_t sf;
         for (sf = 0U; sf < gMmwMssMCB.objDetCommonCfg.preStartCommonCfg.numSubFrames; sf++) {
-            if (gMmwMssMCB.subFrameCfg[sf].guiMonSel.customObstacles &&
+            if ((gMmwMssMCB.subFrameCfg[sf].guiMonSel.customObstacles || gMmwMssMCB.subFrameCfg[sf].guiMonSel.detectedObjects) &&
                 MmwDemo_getNavPostProcReserveUsecForState((uint8_t)sf,
                     MMWDEMO_SURFACE_MAX_BOXES, 1U, 0U) == 0xFFFFFFFFU) {
                 CLI_write("Error: custom obstacles require bounded UART output; disable LVDS\n");
