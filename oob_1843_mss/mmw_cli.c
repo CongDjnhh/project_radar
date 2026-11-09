@@ -544,7 +544,7 @@ static int32_t MmwDemo_CLIRegionGrowCfg(int32_t argc, char* argv[])
 {
     extern MmwDemo_HSRAM gHSRAM;
     volatile MmwDemo_NavCliCfg *shared = &gHSRAM.navCfg;
-    uint16_t values[12];
+    uint16_t values[14];
     int32_t sf, bin;
     uint32_t i, first, last;
     uint8_t generation;
@@ -554,7 +554,7 @@ static int32_t MmwDemo_CLIRegionGrowCfg(int32_t argc, char* argv[])
         CLI_write("Error: regionGrowCfg requires sensorStop\n");
         return -1;
     }
-    if (argc != 14 || MmwDemo_CLIParseInt32(argv[1], -1, RL_MAX_SUBFRAMES - 1, &sf) != 0)
+    if (argc != 16 || MmwDemo_CLIParseInt32(argv[1], -1, RL_MAX_SUBFRAMES - 1, &sf) != 0)
         goto invalid;
     for (i = 0U; i < 6U; i++)
     {
@@ -575,6 +575,15 @@ static int32_t MmwDemo_CLIRegionGrowCfg(int32_t argc, char* argv[])
     }
     if (!(values[11] <= values[10] && values[10] < values[9] &&
           values[9] <= values[8])) goto invalid;
+    if (MmwDemo_CLIParseInt32(argv[14], 0, 8, &bin) != 0) goto invalid;
+    values[12] = (uint16_t)bin;
+    {
+        char *end;
+        float sdb = strtof(argv[15], &end);
+        if (end == argv[15] || *end != '\0' || !isfinite(sdb) || sdb < 0.0f || sdb > 30.0f)
+            goto invalid;
+        values[13] = (uint16_t)(sdb * (256.0f / 6.0f) + 0.5f);
+    }
 
     first = (sf < 0) ? 0U : (uint32_t)sf;
     last = (sf < 0) ? RL_MAX_SUBFRAMES - 1U : (uint32_t)sf;
@@ -595,7 +604,7 @@ static int32_t MmwDemo_CLIRegionGrowCfg(int32_t argc, char* argv[])
     Hwi_restore(key);
     return 0;
 invalid:
-    CLI_write("Error: regionGrowCfg <subFrameIdx|-1> <enterDb> <exitDb> <promDb> <riseDb> <auditCasoDb> <auditAnchorDb> <maxSpanBins> <maxBacktrackBins> <farOuter> <farInner> <nearOuter> <nearInner>\n");
+    CLI_write("Error: regionGrowCfg <subFrameIdx|-1> <enterDb> <exitDb> <promDb> <riseDb> <auditCasoDb> <auditAnchorDb> <maxSpanBins> <maxBacktrackBins> <farOuter> <farInner> <nearOuter> <nearInner> <maxDopplerSpanBins> <sidelobeGuardDb>\n");
     return -1;
 }
 
@@ -1694,7 +1703,7 @@ void MmwDemo_CLIInit (uint8_t taskPriority)
     cnt++;
 
     cliCfg.tableEntry[cnt].cmd = "regionGrowCfg";
-    cliCfg.tableEntry[cnt].helpString = "<subFrameIdx|-1> <enterDb> <exitDb> <promDb> <riseDb> <auditCasoDb> <auditAnchorDb> <maxSpanBins> <maxBacktrackBins> <farOuter> <farInner> <nearOuter> <nearInner>";
+    cliCfg.tableEntry[cnt].helpString = "<subFrameIdx|-1> <enterDb> <exitDb> <promDb> <riseDb> <auditCasoDb> <auditAnchorDb> <maxSpanBins> <maxBacktrackBins> <farOuter> <farInner> <nearOuter> <nearInner> <maxDopplerSpanBins> <sidelobeGuardDb>";
     cliCfg.tableEntry[cnt].cmdHandlerFxn = MmwDemo_CLIRegionGrowCfg;
     cnt++;
 

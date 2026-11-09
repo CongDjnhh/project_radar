@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file dense_elevation.h
  *
  * @brief Frame-synchronous navigation source cloud seeded by the TI CFAR
@@ -80,7 +80,10 @@ typedef struct MmwDemo_DenseElevation_Cfg_t
     float maxAzimuthDeg;
     uint16_t minRangeBin;
     uint16_t maxRangeBin;
-    uint16_t regionGrow[12];
+    /* Six Q8 log2-magnitude deltas, six range span/backtrack/window bin offsets,
+     * maxDopplerSpanBins, and sidelobeGuardQ8.
+     * Supplied by regionGrowCfg; zero-initialized values are never defaults. */
+    uint16_t regionGrow[14];
 } MmwDemo_DenseElevation_Cfg;
 
 /** One navigation source. sourceVQ15 is the continuous v=sin(elevation)

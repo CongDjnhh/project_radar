@@ -15,6 +15,7 @@
 #include <ti/mathlib/src/atan2sp/c674/atan2sp.h>
 
 #include "dense_elevation.h"
+#include "region_grow_2d.h"
 
 #define DENSE_PI                         (3.14159265358979323846f)
 #define DENSE_Q15_SCALE                  (32768.0f)
@@ -121,6 +122,11 @@ static far uint16_t gDenseCellSnr[MMWDEMO_DENSE_ELEV_MAX_STREAM_RANGE_BINS]
                                  [MMWDEMO_DENSE_ELEV_MAX_STREAM_DOPPLER_BINS];
 
 static uint8_t gDenseUseBitmap;
+
+#define MMWDEMO_DENSE_ELEV_BFS_QUEUE_CAP (512U)
+#pragma DATA_SECTION(gDenseRg2dQueue, ".l1dscratch");
+#pragma DATA_ALIGN(gDenseRg2dQueue, 8);
+static Alg_RegionGrow2D_QueueNode gDenseRg2dQueue[MMWDEMO_DENSE_ELEV_BFS_QUEUE_CAP];
 
 #pragma DATA_SECTION(gDenseTdmComp, ".l3ram");
 #pragma DATA_ALIGN(gDenseTdmComp, 8);
@@ -1217,221 +1223,7 @@ static uint8_t MmwDemo_DenseElevation_evalCfar1D(
     return 1U;
 }
 
-static uint16_t MmwDemo_DenseElevation_noiseAnchor(
-    const uint16_t *detMat,
-    uint16_t numDopplerBins,
-    uint16_t minRange,
-    uint16_t maxRange,
-    uint16_t rSeed,
-    uint16_t dopIdx,
-    const MmwDemo_DenseElevation_Cfg *cfg)
-{
-    uint16_t farVals[16];
-    uint16_t farCnt = 0U, nearCnt = 0U;
-    uint32_t nearSum = 0U;
-    uint16_t nFar = 0xFFFFU, nNear = 0xFFFFU;
-    int32_t rStart, rEnd, r;
-
-    rStart = (int32_t)rSeed - cfg->regionGrow[8];
-    if (rStart < (int32_t)minRange) rStart = (int32_t)minRange;
-    rEnd = (int32_t)rSeed - cfg->regionGrow[9];
-    for (r = rStart; r <= rEnd; r++)
-    {
-        uint16_t v = detMat[(uint32_t)r * numDopplerBins + dopIdx];
-        uint16_t pos = farCnt++;
-        while ((pos > 0U) && (farVals[pos - 1U] > v))
-        {
-            farVals[pos] = farVals[pos - 1U];
-            pos--;
-        }
-        farVals[pos] = v;
-    }
-    if (farCnt > 0U)
-    {
-        nFar = ((farCnt & 1U) != 0U)
-            ? farVals[farCnt >> 1U]
-            : (uint16_t)(((uint32_t)farVals[(farCnt >> 1U) - 1U] +
-                          (uint32_t)farVals[farCnt >> 1U]) >> 1U);
-    }
-
-    rStart = (int32_t)rSeed - cfg->regionGrow[10];
-    if (rStart < (int32_t)minRange) rStart = (int32_t)minRange;
-    rEnd = (int32_t)rSeed - cfg->regionGrow[11];
-    for (r = rStart; r <= rEnd; r++)
-    {
-        nearSum += detMat[(uint32_t)r * numDopplerBins + dopIdx];
-        nearCnt++;
-    }
-    if (nearCnt > 0U)
-    {
-        nNear = (uint16_t)(nearSum / nearCnt);
-    }
-
-    if ((farCnt > 0U) && (nearCnt > 0U))
-    {
-        return (nFar < nNear) ? nFar : nNear;
-    }
-    if (nearCnt > 0U) return nNear;
-    if (farCnt > 0U) return nFar;
-
-    rStart = (int32_t)rSeed + cfg->regionGrow[9];
-    rEnd = (int32_t)rSeed + cfg->regionGrow[8];
-    if (rEnd > (int32_t)maxRange) rEnd = (int32_t)maxRange;
-    for (r = rStart; r <= rEnd; r++)
-    {
-        uint16_t v = detMat[(uint32_t)r * numDopplerBins + dopIdx];
-        uint16_t pos = farCnt++;
-        while ((pos > 0U) && (farVals[pos - 1U] > v))
-        {
-            farVals[pos] = farVals[pos - 1U];
-            pos--;
-        }
-        farVals[pos] = v;
-    }
-    if (farCnt > 0U)
-    {
-        return ((farCnt & 1U) != 0U)
-            ? farVals[farCnt >> 1U]
-            : (uint16_t)(((uint32_t)farVals[(farCnt >> 1U) - 1U] +
-                          (uint32_t)farVals[farCnt >> 1U]) >> 1U);
-    }
-    return detMat[(uint32_t)rSeed * numDopplerBins + dopIdx];
-}
-
-static uint16_t MmwDemo_DenseElevation_growFromSeed(
-    const uint16_t *detMat,
-    uint16_t numDopplerBins,
-    uint16_t minRange,
-    uint16_t maxRange,
-    uint16_t rSeed,
-    uint16_t dopIdx,
-    const MmwDemo_DenseElevation_Cfg *cfg)
-{
-    uint16_t rStart = rSeed;
-    uint16_t anchor;
-    uint32_t exitThr;
-    uint16_t k, r, rCurr, rEnd;
-    uint16_t peakVal, valleyVal, valleyIdx;
-    uint8_t inValley = 0U;
-    uint8_t splitAtValley = 0U;
-    uint32_t dBit = 1UL << dopIdx;
-
-    /* Operator 1: Leftward Edge Backtracking using candidate-local noise anchor */
-    for (k = 1U; k <= cfg->regionGrow[7]; k++)
-    {
-        uint16_t rPrev;
-        uint16_t localAnchor;
-        if (rSeed < (uint16_t)(minRange + k))
-        {
-            break;
-        }
-        rPrev = (uint16_t)(rSeed - k);
-        localAnchor = MmwDemo_DenseElevation_noiseAnchor(
-            detMat, numDopplerBins, minRange, maxRange, rPrev, dopIdx, cfg);
-        if ((uint32_t)detMat[(uint32_t)rPrev * numDopplerBins + dopIdx] >=
-            (uint32_t)localAnchor + cfg->regionGrow[0])
-        {
-            rStart = rPrev;
-        }
-        else
-        {
-            break;
-        }
-    }
-
-    /* Operator 2: Frozen Noise Baseline N_anchor evaluated strictly left of rStart */
-    anchor = MmwDemo_DenseElevation_noiseAnchor(
-        detMat, numDopplerBins, minRange, maxRange, rStart, dopIdx, cfg);
-    exitThr = (uint32_t)anchor + cfg->regionGrow[1];
-
-    if ((uint32_t)detMat[(uint32_t)rStart * numDopplerBins + dopIdx] < exitThr)
-    {
-        gDenseGrownMask[rSeed] |= dBit;
-        return rSeed;
-    }
-
-    /* Operators 3 & 4: Rightward Marching with Topographic Prominence Valley Split */
-    peakVal = detMat[(uint32_t)rStart * numDopplerBins + dopIdx];
-    valleyVal = peakVal;
-    valleyIdx = rStart;
-    rCurr = (uint16_t)(rStart + 1U);
-
-    while ((rCurr <= maxRange) &&
-           ((uint16_t)(rCurr - rStart) <= cfg->regionGrow[6]))
-    {
-        uint16_t e = detMat[(uint32_t)rCurr * numDopplerBins + dopIdx];
-        if ((uint32_t)e < exitThr)
-        {
-            break;
-        }
-        if (inValley == 0U)
-        {
-            if (e >= peakVal)
-            {
-                peakVal = e;
-            }
-            else if ((uint16_t)(peakVal - e) >= cfg->regionGrow[2])
-            {
-                inValley = 1U;
-                valleyVal = e;
-                valleyIdx = rCurr;
-            }
-        }
-        else
-        {
-            if (e < valleyVal)
-            {
-                valleyVal = e;
-                valleyIdx = rCurr;
-            }
-            else if ((uint16_t)(e - valleyVal) >= cfg->regionGrow[3])
-            {
-                splitAtValley = 1U;
-                break;
-            }
-        }
-        rCurr++;
-    }
-
-    if ((splitAtValley != 0U) ||
-        ((inValley != 0U) &&
-         (peakVal > detMat[(uint32_t)(rCurr - 1U) * numDopplerBins + dopIdx]) &&
-         ((uint16_t)(peakVal - detMat[(uint32_t)(rCurr - 1U) * numDopplerBins + dopIdx]) >= cfg->regionGrow[2])))
-    {
-        rEnd = (uint16_t)(valleyIdx - 1U);
-        if ((splitAtValley != 0U) && (rCurr <= maxRange))
-        {
-            gDenseSeedMask[rCurr] |= dBit;
-        }
-    }
-    else
-    {
-        rEnd = (uint16_t)(rCurr - 1U);
-    }
-
-    if (rEnd < rStart)
-    {
-        rEnd = rStart;
-    }
-    if ((splitAtValley == 0U) && (rEnd < rSeed))
-    {
-        rEnd = rSeed;
-    }
-
-    for (r = rStart; r <= rEnd; r++)
-    {
-        uint16_t e = detMat[(uint32_t)r * numDopplerBins + dopIdx];
-        uint16_t snr = (e > anchor)
-            ? (uint16_t)(((uint32_t)(e - anchor) * 15U + 32U) >> 6U) : 1U;
-        gDenseGrownMask[r] |= dBit;
-        if (snr > gDenseCellSnr[r][dopIdx])
-        {
-            gDenseCellSnr[r][dopIdx] = snr;
-        }
-    }
-    return rEnd;
-}
-
+#pragma CODE_SECTION(MmwDemo_DenseElevation_prepareFrame, ".surfaceCode");
 int32_t MmwDemo_DenseElevation_prepareFrame(
     const MmwDemo_DenseElevation_Cfg *cfg,
     const MmwDemo_DenseElevation_StaticCfg *staticCfg,
@@ -1497,6 +1289,14 @@ int32_t MmwDemo_DenseElevation_prepareFrame(
         const uint16_t *detMat = (const uint16_t *)staticCfg->detMatrix.data;
         uint32_t p, totalSeeds = 0U;
         uint16_t r, d;
+        Alg_RegionGrow2D_Workspace rgWs;
+
+        rgWs.seedMask = gDenseSeedMask;
+        rgWs.grownMask = gDenseGrownMask;
+        rgWs.cellSnr = &gDenseCellSnr[0][0];
+        rgWs.maxDopplerStride = MMWDEMO_DENSE_ELEV_MAX_STREAM_DOPPLER_BINS;
+        rgWs.bfsQueue = gDenseRg2dQueue;
+        rgWs.queueCapacity = MMWDEMO_DENSE_ELEV_BFS_QUEUE_CAP;
 
         gDenseUseBitmap = 1U;
         memset(gDenseSeedMask, 0, staticCfg->numRangeBins * sizeof(uint32_t));
@@ -1597,9 +1397,9 @@ int32_t MmwDemo_DenseElevation_prepareFrame(
                                     uint16_t locAnc;
                                     if (r < (uint16_t)(minRange + b)) break;
                                     rp = (uint16_t)(r - b);
-                                    locAnc = MmwDemo_DenseElevation_noiseAnchor(
+                                    locAnc = Alg_RegionGrow2D_noiseAnchor(
                                         detMat, staticCfg->numDopplerBins,
-                                        minRange, maxRange, rp, d, cfg);
+                                        minRange, maxRange, rp, d, cfg->regionGrow);
                                     if ((uint32_t)detMat[(uint32_t)rp * staticCfg->numDopplerBins + d] >=
                                         (uint32_t)locAnc + cfg->regionGrow[0])
                                     {
@@ -1610,9 +1410,9 @@ int32_t MmwDemo_DenseElevation_prepareFrame(
                                         break;
                                     }
                                 }
-                                anc = MmwDemo_DenseElevation_noiseAnchor(
+                                anc = Alg_RegionGrow2D_noiseAnchor(
                                     detMat, staticCfg->numDopplerBins,
-                                    minRange, maxRange, rCand, d, cfg);
+                                    minRange, maxRange, rCand, d, cfg->regionGrow);
                                 if ((uint32_t)cut < (uint32_t)anc + cfg->regionGrow[5])
                                 {
                                     continue;
@@ -1659,9 +1459,11 @@ int32_t MmwDemo_DenseElevation_prepareFrame(
                     {
                         continue;
                     }
-                    lastEnd = MmwDemo_DenseElevation_growFromSeed(
+                    lastEnd = Alg_RegionGrow2D_growFromSeed2D(
                         detMat, staticCfg->numDopplerBins,
-                        minRange, maxRange, r, d, cfg);
+                        minRange, maxRange, r, d,
+                        staticCfg->staticClutterRemovalEnabled,
+                        cfg->regionGrow, &rgWs);
                     hasLast = 1U;
                 }
             }
@@ -1670,18 +1472,24 @@ int32_t MmwDemo_DenseElevation_prepareFrame(
             {
                 for (r = minRange; r <= maxRange; r++)
                 {
-                    uint16_t anchor = MmwDemo_DenseElevation_noiseAnchor(
+                    uint16_t anchor = Alg_RegionGrow2D_noiseAnchor(
                         detMat, staticCfg->numDopplerBins,
-                        minRange, maxRange, r, 0U, cfg);
+                        minRange, maxRange, r, 0U, cfg->regionGrow);
                     if ((uint32_t)detMat[(uint32_t)r * staticCfg->numDopplerBins] >=
                         (uint32_t)anchor + cfg->regionGrow[0])
                     {
-                        r = MmwDemo_DenseElevation_growFromSeed(
+                        r = Alg_RegionGrow2D_growFromSeed2D(
                             detMat, staticCfg->numDopplerBins,
-                            minRange, maxRange, r, 0U, cfg);
+                            minRange, maxRange, r, 0U,
+                            staticCfg->staticClutterRemovalEnabled,
+                            cfg->regionGrow, &rgWs);
                     }
                 }
             }
+            Alg_RegionGrow2D_condenseDopplerRidges(
+                detMat, staticCfg->numDopplerBins,
+                minRange, maxRange,
+                cfg->regionGrow, &rgWs);
         }
     }
     else
