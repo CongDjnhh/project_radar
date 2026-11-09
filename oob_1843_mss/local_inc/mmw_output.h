@@ -283,10 +283,10 @@ typedef struct MmwDemo_NavCliCfg_t {
     uint8_t  isValid;
     uint8_t  enabledSurfaceMask;
     uint8_t  enabledDetectedPointsMask;
-    uint8_t  reserved[41];
+    uint8_t  reserved[25];
     float    clusterVelSpreadMps;
     float    clusterRangeTolM;
-    uint16_t regionGrow[MMWDEMO_NAV_SHARED_MAX_SUBFRAMES][12];
+    uint16_t regionGrow[MMWDEMO_NAV_SHARED_MAX_SUBFRAMES][14];
     uint8_t  regionGrowValidMask;
     uint8_t  regionGrowReserved[3];
     /* Timing contract published by MSS after RF parsing.  Values are kept in

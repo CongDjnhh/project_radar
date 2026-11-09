@@ -1024,7 +1024,7 @@ int32_t DPC_ObjectDetection_execute
             navSharedCfg.surfaceMotionMode[timingIdx] = navShared->surfaceMotionMode[timingIdx];
             {
                 uint32_t rg;
-                for (rg = 0U; rg < 12U; rg++)
+                for (rg = 0U; rg < 14U; rg++)
                     navSharedCfg.regionGrow[timingIdx][rg] = navShared->regionGrow[timingIdx][rg];
             }
         }
@@ -1080,7 +1080,7 @@ int32_t DPC_ObjectDetection_execute
             if (navSharedCfg.regionGrowValidMask & (1U << objDetObj->subFrameIndx))
             {
                 uint32_t rg;
-                for (rg = 0U; rg < 12U; rg++)
+                for (rg = 0U; rg < 14U; rg++)
                     gNavPointCfg.sourceCfg.regionGrow[rg] =
                         navSharedCfg.regionGrow[objDetObj->subFrameIndx][rg];
             }
