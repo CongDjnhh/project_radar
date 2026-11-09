@@ -50,7 +50,15 @@ typedef struct Alg_RegionGrow2D_Workspace_t
     uint16_t maxDopplerStride;
     Alg_RegionGrow2D_QueueNode *bfsQueue;
     uint16_t queueCapacity;
+    uint16_t hwaAntScaleQ8;
+    uint8_t  queueSaturated;
+    uint8_t  reservedPad;
 } Alg_RegionGrow2D_Workspace;
+
+uint16_t Alg_RegionGrow2D_snrDb10FromQ8(
+    uint16_t energyQ8,
+    uint16_t anchorQ8,
+    uint16_t antScaleQ8);
 
 uint16_t Alg_RegionGrow2D_noiseAnchor(
     const uint16_t *detMat,

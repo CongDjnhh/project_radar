@@ -103,7 +103,7 @@ typedef struct MmwDemo_DenseElevation_OutputSample_t
     int8_t   azimuthIdx;         /*!< Integer peak bin, -32..+31, sector limiter.   Offset 2  */
     uint8_t  reserved0;          /*!< Pad â€” must be zero on transmit.               Offset 3  */
     int16_t  dopplerIdx;         /*!< Signed Doppler bin.                           Offset 4  */
-    int16_t  azimuthUQ15;        /*!< Weighted CoM u=sin(azimuth), Q15.             Offset 6  */
+    int16_t  azimuthUQ15;        /*!< Weighted CoM horizontal direction cosine u=sin(az)*cos(el), Q15. Offset 6 */
     uint16_t azimuthWidthUQ15;   /*!< Angular width in u-space (6-dB region), Q15. Offset 8  */
     uint16_t snrDb10;            /*!< Peak minus median noise, 0.1 dB units.        Offset 10 */
     int16_t  sourceVQ15;         /*!< Weighted CoM v=sin(elevation), Q15.           Offset 12 */

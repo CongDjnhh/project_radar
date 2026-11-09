@@ -11,11 +11,17 @@
 #pragma CODE_SECTION(Alg_RegionGrow2D_condenseDopplerRidges, ".surfaceCode");
 #endif
 
-static uint16_t Alg_RegionGrow2D_snrDb10FromQ8(uint16_t energyQ8, uint16_t anchorQ8)
+uint16_t Alg_RegionGrow2D_snrDb10FromQ8(
+    uint16_t energyQ8,
+    uint16_t anchorQ8,
+    uint16_t antScaleQ8)
 {
     if (energyQ8 > anchorQ8)
     {
-        return (uint16_t)(((uint32_t)(energyQ8 - anchorQ8) * 15U + 32U) >> 6U);
+        uint32_t scale = (antScaleQ8 > 0U) ? (uint32_t)antScaleQ8 : 256U;
+        uint32_t num = (uint32_t)(energyQ8 - anchorQ8) * 60U + (scale >> 1U);
+        uint32_t snr = num / scale;
+        return (snr > 0U) ? ((snr > 65535U) ? 65535U : (uint16_t)snr) : 1U;
     }
     return 1U;
 }
@@ -358,7 +364,7 @@ uint16_t Alg_RegionGrow2D_growFromSeed2D(
     for (r = rStart; r <= rEnd; r++)
     {
         uint16_t e = detMat[(uint32_t)r * numDopplerBins + dopIdx];
-        uint16_t snr = Alg_RegionGrow2D_snrDb10FromQ8(e, anchor);
+        uint16_t snr = Alg_RegionGrow2D_snrDb10FromQ8(e, anchor, ws->hwaAntScaleQ8);
         uint32_t snrIdx = (uint32_t)r * ws->maxDopplerStride + dopIdx;
         ws->grownMask[r] |= dBit;
         if (snr > ws->cellSnr[snrIdx])
@@ -382,6 +388,10 @@ uint16_t Alg_RegionGrow2D_growFromSeed2D(
                 ws->bfsQueue[qTail].rangeIdx = r;
                 ws->bfsQueue[qTail].dopplerIdx = dopIdx;
                 qTail++;
+            }
+            else
+            {
+                ws->queueSaturated = 1U;
             }
         }
 
@@ -431,7 +441,7 @@ uint16_t Alg_RegionGrow2D_growFromSeed2D(
                     ((params[ALG_RG2D_PARAM_SIDELOBE_GUARD_Q8] == 0U) ||
                      (((uint32_t)eDop + params[ALG_RG2D_PARAM_SIDELOBE_GUARD_Q8]) >= (uint32_t)clusterPeakVal)))
                 {
-                    uint16_t snr = Alg_RegionGrow2D_snrDb10FromQ8(eDop, dopAnchor);
+                    uint16_t snr = Alg_RegionGrow2D_snrDb10FromQ8(eDop, dopAnchor, ws->hwaAntScaleQ8);
                     uint32_t snrIdx = (uint32_t)curr.rangeIdx * ws->maxDopplerStride + dNbr;
                     ws->grownMask[curr.rangeIdx] |= (1UL << dNbr);
                     if (snr > ws->cellSnr[snrIdx])
@@ -443,6 +453,10 @@ uint16_t Alg_RegionGrow2D_growFromSeed2D(
                         ws->bfsQueue[qTail].rangeIdx = curr.rangeIdx;
                         ws->bfsQueue[qTail].dopplerIdx = dNbr;
                         qTail++;
+                    }
+                    else
+                    {
+                        ws->queueSaturated = 1U;
                     }
                 }
             }
@@ -492,7 +506,7 @@ uint16_t Alg_RegionGrow2D_growFromSeed2D(
                          (distFromPeak < 2U) ||
                          (((uint32_t)eRng + params[ALG_RG2D_PARAM_SIDELOBE_GUARD_Q8]) >= (uint32_t)clusterPeakVal)))
                     {
-                        uint16_t snr = Alg_RegionGrow2D_snrDb10FromQ8(eRng, rngAnchor);
+                        uint16_t snr = Alg_RegionGrow2D_snrDb10FromQ8(eRng, rngAnchor, ws->hwaAntScaleQ8);
                         uint32_t snrIdx = (uint32_t)rNbr * ws->maxDopplerStride + curr.dopplerIdx;
                         ws->grownMask[rNbr] |= (1UL << curr.dopplerIdx);
                         if (snr > ws->cellSnr[snrIdx])
@@ -504,6 +518,10 @@ uint16_t Alg_RegionGrow2D_growFromSeed2D(
                             ws->bfsQueue[qTail].rangeIdx = rNbr;
                             ws->bfsQueue[qTail].dopplerIdx = curr.dopplerIdx;
                             qTail++;
+                        }
+                        else
+                        {
+                            ws->queueSaturated = 1U;
                         }
                     }
                 }
@@ -596,39 +614,7 @@ void Alg_RegionGrow2D_condenseDopplerRidges(
 
             if ((domPrev == 0U) && (domNext == 0U))
             {
-                uint16_t maxSkirtSnr = 0U;
                 condensed |= dBit;
-
-                if (hasPrev != 0U)
-                {
-                    uint16_t prevSnr = ws->cellSnr[(uint32_t)r * ws->maxDopplerStride + dPrev];
-                    if (prevSnr > maxSkirtSnr)
-                    {
-                        maxSkirtSnr = prevSnr;
-                    }
-                }
-                if (hasNext != 0U)
-                {
-                    uint16_t nextSnr = ws->cellSnr[(uint32_t)r * ws->maxDopplerStride + dNext];
-                    if (nextSnr > maxSkirtSnr)
-                    {
-                        maxSkirtSnr = nextSnr;
-                    }
-                }
-                if (maxSkirtSnr > 0U)
-                {
-                    uint16_t boost = (uint16_t)(maxSkirtSnr >> 2U);
-                    if (boost > 15U)
-                    {
-                        boost = 15U;
-                    }
-                    if (boost == 0U)
-                    {
-                        boost = 1U;
-                    }
-                    ws->cellSnr[(uint32_t)r * ws->maxDopplerStride + d] =
-                        (uint16_t)(ws->cellSnr[(uint32_t)r * ws->maxDopplerStride + d] + boost);
-                }
             }
         }
 

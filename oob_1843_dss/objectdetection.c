@@ -1492,8 +1492,8 @@ int32_t DPC_ObjectDetection_execute
                 {
                     r = 0.0f;
                 }
-                float u = (float)s->azimuthUQ15 * (1.0f / 32768.0f);
-                float v = (float)s->sourceVQ15 * (1.0f / 32768.0f);
+                float u = (float)s->azimuthUQ15 * (1.0f / 32767.0f);
+                float v = (float)s->sourceVQ15 * (1.0f / 32767.0f);
                 float cosSq = 1.0f - u * u - v * v;
                 if (cosSq < 0.0f)
                 {
