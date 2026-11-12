@@ -621,20 +621,33 @@ int32_t MmwDemo_SurfaceGen_cluster(
             }
         }
     }
-    numStaticBoxes = outIdx - numDynamicBoxes;
-
     /* Apply temporal tracking if configured for fixed motion */
     if (cfg->motionMode == MMWDEMO_SURFACE_MOTION_FIXED)
     {
         outIdx = Surface_history(out, outIdx, cap, cfg);
     }
+    numStaticBoxes = outIdx - numDynamicBoxes;
 
-    /* Sort boxes by distance y ascending */
-    for (i = 1U; i < outIdx; i++)
+    /* Sort dynamic boxes by distance y ascending */
+    for (i = 1U; i < numDynamicBoxes; i++)
     {
         ObstacleBox key = out[i];
         uint16_t at = i;
         while ((at > 0U) && ((out[at - 1U].y > key.y) ||
+               ((out[at - 1U].y == key.y) && (out[at - 1U].x > key.x))))
+        {
+            out[at] = out[at - 1U];
+            at--;
+        }
+        out[at] = key;
+    }
+
+    /* Sort static boxes by distance y ascending */
+    for (i = numDynamicBoxes + 1U; i < outIdx; i++)
+    {
+        ObstacleBox key = out[i];
+        uint16_t at = i;
+        while ((at > numDynamicBoxes) && ((out[at - 1U].y > key.y) ||
                ((out[at - 1U].y == key.y) && (out[at - 1U].x > key.x))))
         {
             out[at] = out[at - 1U];

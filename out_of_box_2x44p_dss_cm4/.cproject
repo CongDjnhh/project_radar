@@ -29,20 +29,17 @@
                                 <listOptionValue value="CCS_MBS_VERSION=70.0.0"/>
                                 <listOptionValue value="RUNTIME_SUPPORT_LIBRARY="/>
                                 <listOptionValue value="OUTPUT_TYPE=executable"/>
-                                <listOptionValue value="PRODUCTS=sysconfig:1.28.1;com.ti.MCU_PLUS_SDK_AWR2X44P:10.2.0.04;com.ti.MMWAVE_MCUPLUS_SDK:4.7.1.04;"/>
-                                <listOptionValue value="PRODUCT_MACRO_IMPORTS={&quot;sysconfig&quot;:[&quot;${SYSCONFIG_TOOL_INCLUDE_PATH}&quot;,&quot;${SYSCONFIG_TOOL_LIBRARY_PATH}&quot;,&quot;${SYSCONFIG_TOOL_LIBRARIES}&quot;,&quot;${SYSCONFIG_TOOL_SYMBOLS}&quot;,&quot;${SYSCONFIG_TOOL_SYSCONFIG_MANIFEST}&quot;],&quot;com.ti.MCU_PLUS_SDK_AWR2X44P&quot;:[&quot;${COM_TI_MCU_PLUS_SDK_AWR2X44P_INCLUDE_PATH}&quot;,&quot;${COM_TI_MCU_PLUS_SDK_AWR2X44P_LIBRARY_PATH}&quot;,&quot;${COM_TI_MCU_PLUS_SDK_AWR2X44P_LIBRARIES}&quot;,&quot;${COM_TI_MCU_PLUS_SDK_AWR2X44P_SYMBOLS}&quot;,&quot;${COM_TI_MCU_PLUS_SDK_AWR2X44P_SYSCONFIG_MANIFEST}&quot;],&quot;com.ti.MMWAVE_MCUPLUS_SDK&quot;:[&quot;${COM_TI_MMWAVE_MCUPLUS_SDK_INCLUDE_PATH}&quot;,&quot;${COM_TI_MMWAVE_MCUPLUS_SDK_LIBRARY_PATH}&quot;,&quot;${COM_TI_MMWAVE_MCUPLUS_SDK_LIBRARIES}&quot;,&quot;${COM_TI_MMWAVE_MCUPLUS_SDK_SYMBOLS}&quot;,&quot;${COM_TI_MMWAVE_MCUPLUS_SDK_SYSCONFIG_MANIFEST}&quot;],&quot;${INHERITED}&quot;:[&quot;${INHERITED_INCLUDE_PATH}&quot;,&quot;${INHERITED_LIBRARY_PATH}&quot;,&quot;${INHERITED_LIBRARIES}&quot;,&quot;${INHERITED_SYMBOLS}&quot;,&quot;${INHERITED_SYSCONFIG_MANIFESTS}&quot;]}"/>
+                                <listOptionValue value="PRODUCTS=${INHERITED}:0.0;"/>
+                                <listOptionValue value="PRODUCT_MACRO_IMPORTS={&quot;${INHERITED}&quot;:[&quot;${INHERITED_INCLUDE_PATH}&quot;,&quot;${INHERITED_LIBRARY_PATH}&quot;,&quot;${INHERITED_LIBRARIES}&quot;,&quot;${INHERITED_SYMBOLS}&quot;,&quot;${INHERITED_SYSCONFIG_MANIFESTS}&quot;]}"/>
                             </option>
                             <option id="com.ti.ccstudio.buildDefinitions.core.OPT_CODEGEN_VERSION.1730501011" superClass="com.ti.ccstudio.buildDefinitions.core.OPT_CODEGEN_VERSION" value="TICLANG_5.1.1.LTS" valueType="string"/>
                             <targetPlatform id="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.exe.targetPlatformDebug.1866964561" name="Platform" superClass="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.exe.targetPlatformDebug"/>
-                            <builder buildPath="${BuildDirectory}" id="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.exe.builderDebug.98951426" name="GNU Make.Debug" parallelBuildOn="true" parallelizationNumber="optimal" superClass="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.exe.builderDebug"/>
+                            <builder buildPath="${BuildDirectory}" id="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.exe.builderDebug.98951426" keepEnvironmentInBuildfile="false" name="GNU Make" parallelBuildOn="true" parallelizationNumber="optimal" superClass="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.exe.builderDebug"/>
                             <tool id="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.exe.compilerDebug.1824185237" name="Arm Compiler" superClass="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.exe.compilerDebug">
                                 <option id="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.GENERATE_DWARF_DEBUG.24858490" superClass="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.GENERATE_DWARF_DEBUG" value="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.GENERATE_DWARF_DEBUG.G_LOWERCASE" valueType="enumerated"/>
                                 <option id="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.ENDIAN_NESS__BIG_LITTLE.296618240" superClass="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.ENDIAN_NESS__BIG_LITTLE" value="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.ENDIAN_NESS__BIG_LITTLE.MLITTLE_ENDIAN" valueType="enumerated"/>
                                 <option id="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.INCLUDE_PATH.1351781649" superClass="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.INCLUDE_PATH" valueType="includePath">
                                     <listOptionValue value="${INHERITED_INCLUDE_PATH}"/>
-                                    <listOptionValue value="${SYSCONFIG_TOOL_INCLUDE_PATH}"/>
-                                    <listOptionValue value="${COM_TI_MCU_PLUS_SDK_AWR2X44P_INCLUDE_PATH}"/>
-                                    <listOptionValue value="${COM_TI_MMWAVE_MCUPLUS_SDK_INCLUDE_PATH}"/>
                                     <listOptionValue value="${CG_TOOL_ROOT}/include/c"/>
                                     <listOptionValue value="${MCU_PLUS_SDK_PATH}/source"/>
                                     <listOptionValue value="${MMWAVE_SDK_INSTALL_PATH}"/>
@@ -54,9 +51,6 @@
                                 </option>
                                 <option id="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.DEFINE.29367220" superClass="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.DEFINE" valueType="definedSymbols">
                                     <listOptionValue value="${INHERITED_SYMBOLS}"/>
-                                    <listOptionValue value="${SYSCONFIG_TOOL_SYMBOLS}"/>
-                                    <listOptionValue value="${COM_TI_MCU_PLUS_SDK_AWR2X44P_SYMBOLS}"/>
-                                    <listOptionValue value="${COM_TI_MMWAVE_MCUPLUS_SDK_SYMBOLS}"/>
                                     <listOptionValue value="DebugP_LOG_ENABLED"/>
                                     <listOptionValue value="SOC_AWR2X44P"/>
                                     <listOptionValue value="MMWAVE_SDK_DEVICE=awr2x44P"/>
@@ -86,9 +80,6 @@
                                 <option id="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.linkerID.REREAD_LIBS.502784170" superClass="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.linkerID.REREAD_LIBS" value="true" valueType="boolean"/>
                                 <option id="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.linkerID.SEARCH_PATH.1367548186" superClass="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.linkerID.SEARCH_PATH" valueType="libPaths">
                                     <listOptionValue value="${INHERITED_LIBRARY_PATH}"/>
-                                    <listOptionValue value="${SYSCONFIG_TOOL_LIBRARY_PATH}"/>
-                                    <listOptionValue value="${COM_TI_MCU_PLUS_SDK_AWR2X44P_LIBRARY_PATH}"/>
-                                    <listOptionValue value="${COM_TI_MMWAVE_MCUPLUS_SDK_LIBRARY_PATH}"/>
                                     <listOptionValue value="${MCU_PLUS_SDK_PATH}/source/kernel/nortos/lib"/>
                                     <listOptionValue value="${MCU_PLUS_SDK_PATH}/source/drivers/lib"/>
                                     <listOptionValue value="${CG_TOOL_ROOT}/lib"/>
@@ -102,9 +93,6 @@
                                 </option>
                                 <option id="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.linkerID.LIBRARY.695481690" superClass="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.linkerID.LIBRARY" valueType="libs">
                                     <listOptionValue value="${INHERITED_LIBRARIES}"/>
-                                    <listOptionValue value="${SYSCONFIG_TOOL_LIBRARIES}"/>
-                                    <listOptionValue value="${COM_TI_MCU_PLUS_SDK_AWR2X44P_LIBRARIES}"/>
-                                    <listOptionValue value="${COM_TI_MMWAVE_MCUPLUS_SDK_LIBRARIES}"/>
                                     <listOptionValue value="libmathutils.aem4"/>
                                     <listOptionValue value="librangeproc_hwa_ddma_awr2x44P.aem4"/>
                                     <listOptionValue value="libdopplerproc_hwa_ddma_awr2x44P.aem4"/>
@@ -131,9 +119,6 @@
                             <tool id="com.ti.ccstudio.buildDefinitions.sysConfig.29728333" name="SysConfig" superClass="com.ti.ccstudio.buildDefinitions.sysConfig">
                                 <option id="com.ti.ccstudio.buildDefinitions.sysConfig.PRODUCTS.1520508074" superClass="com.ti.ccstudio.buildDefinitions.sysConfig.PRODUCTS" valueType="stringList">
                                     <listOptionValue value="${INHERITED_SYSCONFIG_MANIFESTS}"/>
-                                    <listOptionValue value="${SYSCONFIG_TOOL_SYSCONFIG_MANIFEST}"/>
-                                    <listOptionValue value="${COM_TI_MCU_PLUS_SDK_AWR2X44P_SYSCONFIG_MANIFEST}"/>
-                                    <listOptionValue value="${COM_TI_MMWAVE_MCUPLUS_SDK_SYSCONFIG_MANIFEST}"/>
                                 </option>
                                 <option id="com.ti.ccstudio.buildDefinitions.sysConfig.CONTEXT.1196624275" superClass="com.ti.ccstudio.buildDefinitions.sysConfig.CONTEXT" value="m4ss0-1" valueType="string"/>
                                 <option id="com.ti.ccstudio.buildDefinitions.sysConfig.PART.1080763756" superClass="com.ti.ccstudio.buildDefinitions.sysConfig.PART" value="Default" valueType="string"/>
