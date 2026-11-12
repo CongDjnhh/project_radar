@@ -892,6 +892,7 @@ static int32_t MmwDemo_RFParser_parseCtrlConfig
             slope                           =   (float)profileCfg.freqSlopeConst * ((rfFreqScaleFactor*1e3*900.f)/(float)(1U << 26)) * 1e12;
             bandwidth                       =   (slope * outParams->numAdcSamples)/(profileCfg.digOutSampleRate * 1e3);            
             centerFreq                      =   startFreq + bandwidth * 0.5f + adcStart * slope;            
+            outParams->centerFreq           =   centerFreq;
             outParams->chirpInterval        =   (float)(profileCfg.idleTimeConst + profileCfg.rampEndTime)/1000.*10*1.e-6;
 
             outParams->rangeStep            =   (MMWDEMO_RFPARSER_SPEED_OF_LIGHT_IN_METERS_PER_SEC * profileCfg.digOutSampleRate * 1e3) /

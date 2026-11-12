@@ -1320,6 +1320,14 @@ int32_t DPC_ObjectDetection_execute
                 }
             }
         }
+        {
+            const MmwDemo_DerivedPhysicsParams *phys = &gHSRAM.physics[objDetObj->subFrameIndx];
+            DebugP_assert((phys->rangeStep > 0.0f) && 
+                          (phys->dopplerStep > 0.0f) && 
+                          (phys->wavelength > 0.0f) && 
+                          (phys->framePeriodSec > 0.0f));
+            denseStaticCfg.physics = phys;
+        }
         denseStaticCfg.cfarRngDopSnrList = subFrmObj->dpuCfg.cfarCfg.res.cfarRngDopSnrList;
         denseStaticCfg.numCfarPeaks = outCfarcaProc.numCfarDetectedPoints;
         denseStaticCfg.subFrameNum = objDetObj->subFrameIndx;
@@ -1355,6 +1363,7 @@ int32_t DPC_ObjectDetection_execute
     {
         memset(&navStaticCfg, 0, sizeof(navStaticCfg));
         navStaticCfg.sourceStaticCfg = denseStaticCfg;
+        navStaticCfg.physics = denseStaticCfg.physics;
         navStaticCfg.rangeStepMeters = subFrmObj->staticCfg.rangeStep;
         navStaticCfg.dopplerStepMps = subFrmObj->staticCfg.dopplerStep;
         navStaticCfg.rangeBiasMeters = denseCompRxCfg.rangeBias;

@@ -46,6 +46,7 @@ typedef struct MmwDemo_SurfaceGen_Cfg_t
 typedef struct MmwDemo_SurfaceGen_StaticCfg_t
 {
     MmwDemo_DenseElevation_StaticCfg sourceStaticCfg;
+    const MmwDemo_DerivedPhysicsParams *physics;
     float rangeStepMeters;
     float dopplerStepMps;
     float framePeriodSec;

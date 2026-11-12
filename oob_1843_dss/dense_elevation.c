@@ -31,8 +31,7 @@
  * than 16 dB below the reference row. This is a phase-quality check, not an
  * elevation-angle or occupancy threshold. */
 #define DENSE_MIN_ELEVATION_ROW_RATIO    (0.025118864f)
-#define DENSE_MIN_AZIMUTH_WIDTH_U        (0.08f)
-#define DENSE_MIN_ELEVATION_WIDTH_V      (0.12f)
+/* Note: Minimum azimuth & elevation beamwidths are derived dynamically from physics contract (Rayleigh resolution) */
 /* Region-growing thresholds come exclusively from regionGrowCfg. */
 
 /* DSP_fft16x16 is provided by dsplib.ae64P, already linked by the demo. */
@@ -744,6 +743,14 @@ static void MmwDemo_DenseElevation_processDoppler(
     uint16_t peakIndex[DENSE_MAX_AZIMUTH_PEAKS];
     float peakPower[DENSE_MAX_AZIMUTH_PEAKS];
     uint16_t peakCount = 0U;
+    float minAzWidthU = (staticCfg->physics != NULL && staticCfg->physics->azimuthBeamwidthRad > 0.0f) ?
+        staticCfg->physics->azimuthBeamwidthRad :
+        ((gDenseRowAntCount[gDenseReferenceRow] > 0U) ? (2.0f / (float)gDenseRowAntCount[gDenseReferenceRow]) : 0.25f);
+    float minElevWidthV = (staticCfg->physics != NULL && staticCfg->physics->elevationBeamwidthRad > 0.0f) ?
+        staticCfg->physics->elevationBeamwidthRad :
+        ((gDenseVerticalBaseline != 0) ? (2.0f / (float)((gDenseVerticalBaseline < 0) ? -gDenseVerticalBaseline : gDenseVerticalBaseline)) : 2.0f);
+    uint32_t refAnts = (gDenseRowAntCount[gDenseReferenceRow] > 0U) ? (uint32_t)gDenseRowAntCount[gDenseReferenceRow] : 8U;
+    uint16_t maxAzimSpanBins = (uint16_t)(((float)MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS / (float)refAnts) * 1.5f + 0.5f);
 
     memset(gDenseAzPower, 0, sizeof(gDenseAzPower));
     memset(gDenseAzValid, 0, sizeof(gDenseAzValid));
@@ -941,6 +948,8 @@ static void MmwDemo_DenseElevation_processDoppler(
         float v_cm, v_width;
         int32_t i;
         MmwDemo_DenseElevation_OutputSample sample;
+        const int32_t halfBins = (int32_t)(MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS / 2U);
+        const int32_t prevHalf = halfBins - 1;
 
         while (1)
         {
@@ -949,10 +958,10 @@ static void MmwDemo_DenseElevation_processDoppler(
             {
                 nextLeft += MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
             }
-            if (((left == 32) && (nextLeft == 31)) ||
+            if (((left == halfBins) && (nextLeft == prevHalf)) ||
                 (gDenseAzValid[nextLeft] == 0U) ||
                 (gDenseAzPower[nextLeft] < powerDropThreshold) ||
-                (MmwDemo_DenseElevation_circularDistance((uint16_t)azimuth, (uint16_t)nextLeft, MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS) > 12U))
+                (MmwDemo_DenseElevation_circularDistance((uint16_t)azimuth, (uint16_t)nextLeft, MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS) > maxAzimSpanBins))
             {
                 break;
             }
@@ -966,10 +975,10 @@ static void MmwDemo_DenseElevation_processDoppler(
             {
                 nextRight -= MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
             }
-            if (((right == 31) && (nextRight == 32)) ||
+            if (((right == prevHalf) && (nextRight == halfBins)) ||
                 (gDenseAzValid[nextRight] == 0U) ||
                 (gDenseAzPower[nextRight] < powerDropThreshold) ||
-                (MmwDemo_DenseElevation_circularDistance((uint16_t)azimuth, (uint16_t)nextRight, MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS) > 12U))
+                (MmwDemo_DenseElevation_circularDistance((uint16_t)azimuth, (uint16_t)nextRight, MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS) > maxAzimSpanBins))
             {
                 break;
             }
@@ -1023,10 +1032,10 @@ static void MmwDemo_DenseElevation_processDoppler(
             u_cm = 2.0f * (float)signedA / (float)MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
         }
         {
-            int32_t signedLeft = (left < 32) ? left : left - 64;
-            int32_t signedRight = (right < 32) ? right : right - 64;
-            float lo = fmaxf(-1.0f, (2.0f * (float)signedLeft - 1.0f) / 64.0f);
-            float hi = fminf(1.0f, (2.0f * (float)signedRight + 1.0f) / 64.0f);
+            int32_t signedLeft = (left < halfBins) ? left : left - (int32_t)MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
+            int32_t signedRight = (right < halfBins) ? right : right - (int32_t)MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS;
+            float lo = fmaxf(-1.0f, (2.0f * (float)signedLeft - 1.0f) / (float)MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS);
+            float hi = fminf(1.0f, (2.0f * (float)signedRight + 1.0f) / (float)MMWDEMO_DENSE_ELEV_NUM_AZIMUTH_BINS);
             /* Preserve true weighted centroid u_cm; do not overwrite with midpoint 0.5 * (lo + hi)! */
             u_width = hi - lo;
         }
@@ -1063,9 +1072,9 @@ static void MmwDemo_DenseElevation_processDoppler(
             }
         }
 
-        if (u_width < DENSE_MIN_AZIMUTH_WIDTH_U) { u_width = DENSE_MIN_AZIMUTH_WIDTH_U; }
+        if (u_width < minAzWidthU) { u_width = minAzWidthU; }
         if (u_width > 2.0f) { u_width = 2.0f; }
-        if (v_width < DENSE_MIN_ELEVATION_WIDTH_V) { v_width = DENSE_MIN_ELEVATION_WIDTH_V; }
+        if (v_width < minElevWidthV) { v_width = minElevWidthV; }
         if (v_width > 2.0f)  { v_width = 2.0f; }
 
         sample.rangeIdx           = rangeIdx;

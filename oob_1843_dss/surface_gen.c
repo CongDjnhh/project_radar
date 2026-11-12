@@ -16,7 +16,7 @@
 
 #define SURFACE_SAMPLES                 MMWDEMO_DENSE_ELEV_MAX_OUTPUT_SAMPLES
 #define SURFACE_HISTORY                 64U
-#define SURFACE_HOLD_US                 100000UL
+/* Note: Temporal hold duration is dynamically computed as an integer multiple of frame periods */
 #define SURFACE_MAX_ROW_SAMPLES         MMWDEMO_DENSE_ELEV_MAX_RANGE_SAMPLES
 #define SURFACE_BUFFER_SIZE             (sizeof(MmwDemo_DenseElevation_OutputHeader) + \
                                          SURFACE_SAMPLES * sizeof(MmwDemo_DenseElevation_OutputSample))
@@ -86,12 +86,11 @@ static int16_t Surface_calcDopplerGuardBins(const MmwDemo_SurfaceGen_StaticCfg *
     float vRes = cfg->dopplerStepMps;
     float vUser = cfg->minMovingSpeedMps;
 
-    if (!isfinite(vRes) || (vRes <= 0.0f)) {
-        vRes = 0.25f;
-    }
-    if (vUser > 0.0f) {
-        int32_t bins = (int32_t)((vUser / vRes) + 0.5f);
-        return (bins < 1) ? 1 : (int16_t)bins;
+    if (vRes > 0.0f) {
+        if (vUser > 0.0f) {
+            int32_t bins = (int32_t)((vUser / vRes) + 0.5f);
+            return (bins < 1) ? 1 : (int16_t)bins;
+        }
     }
     return 1;
 }
@@ -122,6 +121,16 @@ static uint16_t Surface_history(ObstacleBox *out, uint16_t current, uint16_t cap
     SurfaceHistory *h = gSurfaceHistory[sf];
     uint8_t matched[SURFACE_HISTORY], matchedCurr[MMWDEMO_SURFACE_MAX_BOXES];
     uint16_t c, p, count = current, held = 0U;
+    float dt = (cfg->framePeriodSec > 0.0f) ? cfg->framePeriodSec : ((float)cfg->elapsedUsec * 1e-6f);
+    float rStep = cfg->rangeStepMeters;
+    float azimBeam = (cfg->physics != NULL && cfg->physics->azimuthBeamwidthRad > 0.0f) ?
+        cfg->physics->azimuthBeamwidthRad : ((cfg->numVirtualAntAzim > 0U) ? (2.0f / (float)cfg->numVirtualAntAzim) : 0.25f);
+    float elevBeam = (cfg->physics != NULL && cfg->physics->elevationBeamwidthRad > 0.0f) ?
+        cfg->physics->elevationBeamwidthRad : 2.0f;
+    uint32_t holdUs = (cfg->framePeriodSec > 0.0f) ?
+        (uint32_t)(ceilf(0.10f / cfg->framePeriodSec) * cfg->framePeriodSec * 1e6f + 0.5f) :
+        (uint32_t)(cfg->elapsedUsec * 2U);
+    if (holdUs < 100000UL) { holdUs = 100000UL; }
 
     memset(matched, 0, sizeof(matched));
     memset(matchedCurr, 0, sizeof(matchedCurr));
@@ -131,8 +140,8 @@ static uint16_t Surface_history(ObstacleBox *out, uint16_t current, uint16_t cap
     }
     for (p = 0U; p < SURFACE_HISTORY; p++) {
         if (h[p].valid) {
-            if (cfg->elapsedUsec > SURFACE_HOLD_US ||
-                h[p].ageUs > SURFACE_HOLD_US - cfg->elapsedUsec) {
+            if (cfg->elapsedUsec > holdUs ||
+                h[p].ageUs > holdUs - cfg->elapsedUsec) {
                 h[p].valid = 0U;
             } else {
                 h[p].ageUs += cfg->elapsedUsec;
@@ -144,12 +153,21 @@ static uint16_t Surface_history(ObstacleBox *out, uint16_t current, uint16_t cap
         float bestDist = 1e9f;
         for (p = 0U; p < SURFACE_HISTORY; p++) {
             float dx, dy, dz, dist;
+            float gate_x, gate_y, gate_z;
             if (!h[p].valid || matched[p]) continue;
             dx = fabsf(out[c].x - h[p].box.x);
             dy = fabsf(out[c].y - h[p].box.y);
             dz = fabsf(out[c].z - h[p].box.z);
             dist = dx + dy + dz;
-            if (dx <= 0.45f && dy <= 0.35f && dz <= 0.60f && dist < bestDist) {
+
+            gate_y = fabsf(h[p].box.velocity) * dt + 2.0f * rStep;
+            gate_x = h[p].box.y * azimBeam + 2.0f * rStep;
+            gate_z = h[p].box.y * elevBeam + 2.0f * rStep;
+            if (gate_x < 2.0f * rStep) gate_x = 2.0f * rStep;
+            if (gate_y < 2.0f * rStep) gate_y = 2.0f * rStep;
+            if (gate_z < 2.0f * rStep) gate_z = 2.0f * rStep;
+
+            if (dx <= gate_x && dy <= gate_y && dz <= gate_z && dist < bestDist) {
                 bestDist = dist;
                 best = (int16_t)p;
             }
@@ -205,10 +223,16 @@ static uint16_t Surface_runDbscan(
     const DbscanPoint *points,
     uint16_t numPoints,
     DbscanCluster *clusters,
-    uint16_t maxClusters)
+    uint16_t maxClusters,
+    const MmwDemo_SurfaceGen_StaticCfg *cfg)
 {
     uint16_t numClusters = 0U;
     uint16_t i, j, k;
+    float baseTolM = (cfg->clusterRangeTolM > 0.0f) ? cfg->clusterRangeTolM : (1.5f * cfg->rangeStepMeters);
+    float kAzim = (cfg->physics != NULL && cfg->physics->azimuthBeamwidthRad > 0.0f) ?
+        cfg->physics->azimuthBeamwidthRad :
+        ((cfg->numVirtualAntAzim > 0U) ? (2.0f / (float)cfg->numVirtualAntAzim) : 0.25f);
+    float baseTolSq = baseTolM * baseTolM;
 
     if ((numPoints == 0U) || (maxClusters == 0U))
     {
@@ -232,19 +256,13 @@ static uint16_t Surface_runDbscan(
             continue;
         }
 
-        /* Find neighbors of point i: eps(R) = min(1.0, 0.25 + 0.08*R_avg) */
+        /* Find neighbors of point i with range-adaptive beam divergence: epsSq(R) = baseTolSq + (kAzim*R)^2 */
         for (j = 0U; j < numPoints; j++)
         {
             float rAvg = 0.5f * (r_i + points[j].r);
-            float eps = 0.25f + 0.08f * rAvg;
-            float epsSq;
+            float xSpread = kAzim * rAvg;
+            float epsSq = baseTolSq + xSpread * xSpread;
             float dx, dy, dz, distSq;
-
-            if (eps > 1.0f)
-            {
-                eps = 1.0f;
-            }
-            epsSq = eps * eps;
 
             dx = points[i].x - points[j].x;
             dy = points[i].y - points[j].y;
@@ -296,15 +314,9 @@ static uint16_t Surface_runDbscan(
                 for (k = 0U; k < numPoints; k++)
                 {
                     float rAvgK = 0.5f * (points[curr].r + points[k].r);
-                    float epsK = 0.25f + 0.08f * rAvgK;
-                    float epsSqK;
+                    float xSpreadK = kAzim * rAvgK;
+                    float epsSqK = baseTolSq + xSpreadK * xSpreadK;
                     float dxK, dyK, dzK, distSqK;
-
-                    if (epsK > 1.0f)
-                    {
-                        epsK = 1.0f;
-                    }
-                    epsSqK = epsK * epsK;
 
                     dxK = points[curr].x - points[k].x;
                     dyK = points[curr].y - points[k].y;
@@ -325,15 +337,9 @@ static uint16_t Surface_runDbscan(
                         if (gDbscanLabels[k] <= -1)
                         {
                             float rAvgK = 0.5f * (points[curr].r + points[k].r);
-                            float epsK = 0.25f + 0.08f * rAvgK;
-                            float epsSqK;
+                            float xSpreadK = kAzim * rAvgK;
+                            float epsSqK = baseTolSq + xSpreadK * xSpreadK;
                             float dxK, dyK, dzK, distSqK;
-
-                            if (epsK > 1.0f)
-                            {
-                                epsK = 1.0f;
-                            }
-                            epsSqK = epsK * epsK;
 
                             dxK = points[curr].x - points[k].x;
                             dyK = points[curr].y - points[k].y;
@@ -499,10 +505,6 @@ int32_t MmwDemo_SurfaceGen_cluster(
     }
 
     vRes = cfg->dopplerStepMps;
-    if (!isfinite(vRes) || (vRes <= 0.0f))
-    {
-        vRes = 0.25f;
-    }
     vThresh = (float)gSurfaceDopplerGuardBins * vRes;
 
     /* Extract discrete 3D points from samples without aperture beamwidth elongation */
@@ -594,7 +596,7 @@ int32_t MmwDemo_SurfaceGen_cluster(
 
     /* 1. Run 3D Adaptive DBSCAN on Dynamic points */
     numDynClusters = Surface_runDbscan(
-        gDbscanDynPoints, numDyn, gDbscanClusters, cap);
+        gDbscanDynPoints, numDyn, gDbscanClusters, cap, cfg);
 
     for (c = 0U; (c < numDynClusters) && (outIdx < cap); c++)
     {
@@ -610,7 +612,7 @@ int32_t MmwDemo_SurfaceGen_cluster(
     if (outIdx < cap)
     {
         numStatClusters = Surface_runDbscan(
-            gDbscanStatPoints, numStat, gDbscanClusters, cap - outIdx);
+            gDbscanStatPoints, numStat, gDbscanClusters, cap - outIdx, cfg);
 
         for (c = 0U; (c < numStatClusters) && (outIdx < cap); c++)
         {
@@ -621,20 +623,33 @@ int32_t MmwDemo_SurfaceGen_cluster(
             }
         }
     }
-    numStaticBoxes = outIdx - numDynamicBoxes;
-
     /* Apply temporal tracking if configured for fixed motion */
     if (cfg->motionMode == MMWDEMO_SURFACE_MOTION_FIXED)
     {
         outIdx = Surface_history(out, outIdx, cap, cfg);
     }
+    numStaticBoxes = outIdx - numDynamicBoxes;
 
-    /* Sort boxes by distance y ascending */
-    for (i = 1U; i < outIdx; i++)
+    /* Sort dynamic boxes by distance y ascending */
+    for (i = 1U; i < numDynamicBoxes; i++)
     {
         ObstacleBox key = out[i];
         uint16_t at = i;
         while ((at > 0U) && ((out[at - 1U].y > key.y) ||
+               ((out[at - 1U].y == key.y) && (out[at - 1U].x > key.x))))
+        {
+            out[at] = out[at - 1U];
+            at--;
+        }
+        out[at] = key;
+    }
+
+    /* Sort static boxes by distance y ascending */
+    for (i = numDynamicBoxes + 1U; i < outIdx; i++)
+    {
+        ObstacleBox key = out[i];
+        uint16_t at = i;
+        while ((at > numDynamicBoxes) && ((out[at - 1U].y > key.y) ||
                ((out[at - 1U].y == key.y) && (out[at - 1U].x > key.x))))
         {
             out[at] = out[at - 1U];

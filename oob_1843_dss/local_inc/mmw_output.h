@@ -300,6 +300,30 @@ typedef struct MmwDemo_NavCliCfg_t {
 typedef char MmwDemo_NavCliCfgSizeCheck[
     (sizeof(MmwDemo_NavCliCfg) == 236U) ? 1 : -1];
 
+/** Derived mmWave physical parameters calculated dynamically by MSS RF Parser.
+ * Single Source of Truth (SSoT) shared atomically across cores via HSRAM. */
+typedef struct MmwDemo_DerivedPhysicsParams_t {
+    float    rangeStep;            /* [m/bin] Kích thước bin cự ly FFT: (c * Fs) / (2 * S * N_rfft) */
+    float    dopplerStep;          /* [m/s/bin] Kích thước bin Doppler FFT: lambda / (2 * N_tx * N_dfft * Tc) */
+    float    rangeResolution;      /* [m] Độ phân giải cự ly vật lý: c / (2 * B) */
+    float    dopplerResolution;    /* [m/s] Độ phân giải vận tốc vật lý: lambda / (2 * N_chirps * Tc) */
+    float    wavelength;           /* [m] Bước sóng thực tế: lambda = c / fc */
+    float    centerFreq;           /* [Hz] Tần số trung tâm: f0 + B/2 + T_adcStart * S */
+    float    bandwidth;            /* [Hz] Băng thông quét hiệu dụng: S * (N_adc / Fs) */
+    float    chirpInterval;        /* [s] Chu kỳ chirp: (idleTime + rampEndTime) * 1e-8 */
+    float    framePeriodSec;       /* [s] Chu kỳ frame: framePeriodicity * 5e-6 */
+    float    vMax;                 /* [m/s] Vận tốc tối đa không mập mờ: lambda / (4 * N_tx * Tc) */
+    float    rMax;                 /* [m] Cự ly tối đa không mập mờ: (Fs * c) / (2 * S) */
+    float    azimuthBeamwidthRad;  /* [rad] Búp sóng Rayleigh Azimuth: 2.0f / N_vAzim */
+    float    elevationBeamwidthRad;/* [rad] Búp sóng Rayleigh Elevation: 2.0f / baseline */
+    uint16_t numVirtualAntAzim;     /* Số ăng-ten ảo Azimuth */
+    uint16_t numVirtualAntElev;     /* Số ăng-ten ảo Elevation */
+    uint16_t reserved[2];          /* Padding 32-bit đảm bảo sizeof == 60 */
+} MmwDemo_DerivedPhysicsParams;
+
+typedef char MmwDemo_DerivedPhysicsParamsSizeCheck[
+    (sizeof(MmwDemo_DerivedPhysicsParams) == 60U) ? 1 : -1];
+
 /**
  * @brief
  *  DSS stores demo output and stats in HSRAM.
@@ -311,6 +335,9 @@ typedef struct MmwDemo_HSRAM_t
     
     /*! @brief   Navigation surface/tracker configuration */
     MmwDemo_NavCliCfg navCfg;
+
+    /*! @brief   Derived physical parameters computed dynamically by MSS RF Parser */
+    MmwDemo_DerivedPhysicsParams physics[MMWDEMO_NAV_SHARED_MAX_SUBFRAMES];
 
     /*! @brief   Output message stats reported by DSS */
     MmwDemo_output_message_stats   outStats;
