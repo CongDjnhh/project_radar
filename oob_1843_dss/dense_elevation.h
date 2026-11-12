@@ -17,6 +17,7 @@
 #include <ti/datapath/dpif/dpif_detmatrix.h>
 #include <ti/datapath/dpc/dpu/cfarcaproc/cfarcaproccommon.h>
 #include <ti/board/antenna_geometry.h>
+#include "local_inc/mmw_output.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -168,6 +169,7 @@ typedef struct MmwDemo_DenseElevation_StaticCfg_t
     int16_t  cfarFovDopplerMinBin;
     int16_t  cfarFovDopplerMaxBin;
     uint8_t  enableDspCfarAudit;
+    const MmwDemo_DerivedPhysicsParams *physics;
 } MmwDemo_DenseElevation_StaticCfg;
 
 /** Process every supplied CFAR detection in the configured range this frame.

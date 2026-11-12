@@ -25,3 +25,15 @@
 
 === RALPH MISSION COMPLETE ===
 - All items in PRD.md marked [x].
+
+
+=== DYNAMIC RADAR PHYSICS DERIVATION & ZERO HARDCODING VERIFIED ===
+- Date: 2026-11-12
+- Task: Elimination of hardcoded parameters & heuristic magic numbers; dynamic derivation from profileCfg.
+- Upgraded governance in AGENTS.md (Section 7: Dynamic Radar Parameter Derivation & Zero Hardcoding Policy).
+- Added SSoT inter-core ABI contract `MmwDemo_DerivedPhysicsParams` (60 bytes) in mmw_output.h with compile-time assertions.
+- Fixed RF Parser missing centerFreq propagation in mmwdemo_rfparser.c and mss_main.c.
+- Fixed chirpInterval unit scaling in mss_main.c.
+- Eliminated heuristic magic numbers (0.25f, 0.08f*R, 1.0f, 12U, 100000UL, vRes fallback) in dense_elevation.c, surface_gen.c, objectdetection.c.
+- Built oob_1843_dss (isk): 0 errors, generated oob_1843_dss_isk.xe674 and oob_1843_dss_isk.bin.
+- Built oob_1843_mss (isk): 0 errors, generated oob_1843_mss_isk.xer4f and multicore image oob_1843_isk.bin (358,532 bytes, CRC32: 0x237BFF8E).

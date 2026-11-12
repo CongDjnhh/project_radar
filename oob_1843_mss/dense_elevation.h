@@ -16,6 +16,7 @@
 #include <ti/datapath/dpif/dpif_radarcube.h>
 #include <ti/datapath/dpif/dpif_detmatrix.h>
 #include <ti/board/antenna_geometry.h>
+#include "local_inc/mmw_output.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -152,6 +153,7 @@ typedef struct MmwDemo_DenseElevation_StaticCfg_t
     uint8_t  subFrameNum;
     DPIF_CFARDetList *cfarRngDopSnrList;
     uint32_t numCfarPeaks; uint32_t frameNumber;
+    const MmwDemo_DerivedPhysicsParams *physics;
 } MmwDemo_DenseElevation_StaticCfg;
 
 /** Process every supplied CFAR detection in the configured range this frame.

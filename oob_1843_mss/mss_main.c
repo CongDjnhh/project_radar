@@ -2084,6 +2084,50 @@ static uint32_t MmwDemo_getNavPostProcReserveUsec(uint8_t subFrameIdx)
         subFrameIdx, maxSurfacePoints, surfaceEnabled, targetEnabled);
 }
 
+/** Publish derived mmWave physics parameters calculated dynamically by RF parser. */
+static void MmwDemo_publishDerivedPhysics(
+    uint8_t subFrameIdx,
+    const MmwDemo_RFParserOutParams *rfParams,
+    uint32_t framePeriodUsec)
+{
+    MmwDemo_DerivedPhysicsParams phys;
+    float c = 299792458.0f;
+    float fc = rfParams->centerFreq;
+    float lambda = (fc > 0.0f) ? (c / fc) : 0.0039f;
+    float bw = 0.0f;
+    float chirpIntSec = rfParams->chirpInterval; /* rfParams->chirpInterval is already in seconds */
+    float frameSec = (float)framePeriodUsec * 1e-6f;
+
+    /* Compute effective swept bandwidth: c / (2 * rangeResolution) */
+    if (rfParams->rangeResolution > 0.0f)
+    {
+        bw = c / (2.0f * rfParams->rangeResolution);
+    }
+
+    memset(&phys, 0, sizeof(phys));
+    phys.rangeStep = rfParams->rangeStep;
+    phys.dopplerStep = rfParams->dopplerStep;
+    phys.rangeResolution = rfParams->rangeResolution;
+    phys.dopplerResolution = rfParams->dopplerResolution;
+    phys.wavelength = lambda;
+    phys.centerFreq = fc;
+    phys.bandwidth = bw;
+    phys.chirpInterval = chirpIntSec;
+    phys.framePeriodSec = frameSec;
+    phys.vMax = rfParams->dopplerStep * ((float)rfParams->numDopplerBins * 0.5f);
+    phys.rMax = rfParams->rangeStep * (float)rfParams->numRangeBins;
+    phys.azimuthBeamwidthRad = (rfParams->numVirtualAntAzim > 0U) ?
+        (2.0f / (float)rfParams->numVirtualAntAzim) : 0.25f;
+    phys.elevationBeamwidthRad = 2.0f; /* 1 lambda/2 baseline -> 2 / dz = 2.0 rad */
+    phys.numVirtualAntAzim = (uint16_t)rfParams->numVirtualAntAzim;
+    phys.numVirtualAntElev = (uint16_t)rfParams->numVirtualAntElev;
+
+    UInt key = Hwi_disable();
+    gHSRAM.physics[subFrameIdx] = phys;
+    MEM_BARRIER();
+    Hwi_restore(key);
+}
+
 /** Publish one subframe timing contract without exposing a torn array update
  * to DSS. A zero generation remains zero, so timing alone never enables Nav. */
 static void MmwDemo_publishNavTiming(
@@ -2316,6 +2360,7 @@ static int32_t MmwDemo_dataPathConfig (void)
             staticCfg->ADCBufData.dataProperty.numChirpsPerChirpEvent = RFparserOutParams.numChirpsPerChirpEvent;
             staticCfg->ADCBufData.dataProperty.numRxAntennas = RFparserOutParams.numRxAntennas;
             staticCfg->ADCBufData.dataSize = RFparserOutParams.numRxAntennas * RFparserOutParams.numAdcSamples * sizeof(cmplx16ImRe_t);
+            staticCfg->centerFreq = RFparserOutParams.centerFreq;
             staticCfg->dopplerStep = RFparserOutParams.dopplerStep;
             staticCfg->isValidProfileHasOneTxPerChirp = RFparserOutParams.validProfileHasOneTxPerChirp;
             staticCfg->numChirpsPerFrame = RFparserOutParams.numChirpsPerFrame;
@@ -2327,6 +2372,7 @@ static int32_t MmwDemo_dataPathConfig (void)
             staticCfg->numVirtualAntElev = RFparserOutParams.numVirtualAntElev;
             staticCfg->numVirtualAntennas = RFparserOutParams.numVirtualAntennas;
             staticCfg->rangeStep = RFparserOutParams.rangeStep;
+            MmwDemo_publishDerivedPhysics(subFrameIndx, &RFparserOutParams, subFrameCfg->framePeriodUsec);
 
             if (RFparserOutParams.numRangeBins >= 1022) 
             {        
