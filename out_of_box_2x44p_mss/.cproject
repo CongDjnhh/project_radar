@@ -47,9 +47,10 @@
                                     <listOptionValue value="${MCU_PLUS_SDK_PATH}/source/kernel/freertos/portable/TI_ARM_CLANG/ARM_CR5F"/>
                                     <listOptionValue value="${MCU_PLUS_SDK_PATH}/source/kernel/freertos/config/awr2x44p/r5f"/>
                                     <listOptionValue value="${MMWAVE_AWR294X_DFP_INSTALL_PATH}"/>
-                                    <listOptionValue value="${MMWAVE_SDK_INSTALL_PATH}"/>
                                     <listOptionValue value="${PROJECT_LOC}"/>
+                                    <listOptionValue value="${PROJECT_LOC}/include"/>
                                     <listOptionValue value="${PROJECT_LOC}/mss"/>
+                                    <listOptionValue value="${MMWAVE_SDK_INSTALL_PATH}"/>
                                     <listOptionValue value="${PROJECT_ROOT}\mss\mssgenerated"/>
                                 </option>
                                 <option id="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.DEFINE.420503122" superClass="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.DEFINE" valueType="definedSymbols">
@@ -190,7 +191,6 @@
                                     <listOptionValue value="${INHERITED_INCLUDE_PATH}"/>
                                     <listOptionValue value="${SYSCONFIG_TOOL_INCLUDE_PATH}"/>
                                     <listOptionValue value="${COM_TI_MCU_PLUS_SDK_AWR2X44P_INCLUDE_PATH}"/>
-                                    <listOptionValue value="${COM_TI_MMWAVE_MCUPLUS_SDK_INCLUDE_PATH}"/>
                                     <listOptionValue value="${CG_TOOL_ROOT}/include/c"/>
                                     <listOptionValue value="${MCU_PLUS_SDK_PATH}"/>
                                     <listOptionValue value="${MCU_PLUS_SDK_PATH}/source"/>
@@ -198,9 +198,11 @@
                                     <listOptionValue value="${MCU_PLUS_SDK_PATH}/source/kernel/freertos/portable/TI_ARM_CLANG/ARM_CR5F"/>
                                     <listOptionValue value="${MCU_PLUS_SDK_PATH}/source/kernel/freertos/config/awr2x44p/r5f"/>
                                     <listOptionValue value="${MMWAVE_AWR294X_DFP_INSTALL_PATH}"/>
-                                    <listOptionValue value="${MMWAVE_SDK_INSTALL_PATH}"/>
                                     <listOptionValue value="${PROJECT_LOC}"/>
+                                    <listOptionValue value="${PROJECT_LOC}/include"/>
                                     <listOptionValue value="${PROJECT_LOC}/mss"/>
+                                    <listOptionValue value="${COM_TI_MMWAVE_MCUPLUS_SDK_INCLUDE_PATH}"/>
+                                    <listOptionValue value="${MMWAVE_SDK_INSTALL_PATH}"/>
                                     <listOptionValue value="${PROJECT_ROOT}\mss\mssgenerated"/>
                                 </option>
                                 <option id="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.DEFINE.15799297" superClass="com.ti.ccstudio.buildDefinitions.TMS470_TICLANG_5.1.compilerID.DEFINE" valueType="definedSymbols">

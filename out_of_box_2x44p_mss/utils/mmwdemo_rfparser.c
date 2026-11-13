@@ -54,7 +54,7 @@
 
 /* mmWave SDK Include files */
 #include <ti/common/syscommon.h>
-#include <ti/demo/utils/mmwdemo_rfparser.h>
+#include "include/mmwdemo_rfparser.h"
 /* MATH utils library Include files */
 #include <ti/utils/mathutils/mathutils.h>
 
@@ -88,8 +88,10 @@
  *
  @{ */
 
-/*! Speed of light in m/s expressed in float */
+/*! Speed of light in m/s defined canonically in include/mmwdemo_rfparser.h */
+#ifndef MMWDEMO_RFPARSER_SPEED_OF_LIGHT_IN_METERS_PER_SEC
 #define MMWDEMO_RFPARSER_SPEED_OF_LIGHT_IN_METERS_PER_SEC (3.0e8)
+#endif
 
 /** @} */
 
@@ -98,7 +100,7 @@
  ================================================================*/
 #if defined (SOC_AWR2X44P)
 #ifdef MMWDEMO_DDM
-#include <ti/demo/awr2x44P/mmw_ddm/mss/mmw_mss.h>
+#include "mss/mmw_mss.h"
 #elif defined(MMWDEMO_TDM)
 #include <ti/demo/awr2x44P/mmw_tdm/mss/mmw_mss.h>
 #endif
@@ -891,6 +893,8 @@ static int32_t MmwDemo_RFParser_parseCtrlConfigTDM
                 slope                           =   (float)profileCfg.freqSlopeConst * ((rfFreqScaleFactor*1e3*900.f)/(float)(1U << 26)) * 1e12;
                 bandwidth                       =   (slope * outParams->numAdcSamples)/(profileCfg.digOutSampleRate * 1e3);
                 centerFreq                      =   startFreq + bandwidth * 0.5f + adcStart * slope;
+                outParams->bandwidth            =   bandwidth;
+                outParams->centerFreq           =   centerFreq;
                 outParams->chirpInterval        =   (float)(profileCfg.idleTimeConst + profileCfg.rampEndTime)/1000.*10*1.e-6;
 
                 outParams->rangeStep            =   (MMWDEMO_RFPARSER_SPEED_OF_LIGHT_IN_METERS_PER_SEC * profileCfg.digOutSampleRate * 1e3) /
@@ -1198,6 +1202,8 @@ static int32_t MmwDemo_RFParser_parseCtrlConfigTDM
 
             bandwidth                       =   (slope * outParams->numAdcSamples)/(profileCfg.digOutSampleRate * 1e3);
             centerFreq                      =   startFreq + bandwidth * 0.5f + adcStart * slope;
+            outParams->bandwidth            =   bandwidth;
+            outParams->centerFreq           =   centerFreq;
             outParams->chirpInterval        =   (float)idleTime + (float)((float)profileCfg.rampEndTime/1000.*10*1.e-6);
 
             outParams->rangeStep            =   (MMWDEMO_RFPARSER_SPEED_OF_LIGHT_IN_METERS_PER_SEC * profileCfg.digOutSampleRate * 1e3) /
@@ -1470,6 +1476,8 @@ static int32_t MmwDemo_RFParser_parseCtrlConfigDDM
                 slope                           =   (float)profileCfg.freqSlopeConst * ((rfFreqScaleFactor*1e3*900.f)/(float)(1U << 26)) * 1e12;
                 bandwidth                       =   (slope * outParams->numAdcSamples)/(profileCfg.digOutSampleRate * 1e3);
                 centerFreq                      =   startFreq + bandwidth * 0.5f + adcStart * slope;
+                outParams->bandwidth            =   bandwidth;
+                outParams->centerFreq           =   centerFreq;
                 outParams->chirpInterval        =   (float)(profileCfg.idleTimeConst + profileCfg.rampEndTime)/1000.*10*1.e-6;
 
                 outParams->rangeStep            =   (MMWDEMO_RFPARSER_SPEED_OF_LIGHT_IN_METERS_PER_SEC * profileCfg.digOutSampleRate * 1e3) /
@@ -1781,6 +1789,8 @@ static int32_t MmwDemo_RFParser_parseCtrlConfigDDM
 
             bandwidth                       =   (slope * outParams->numAdcSamples)/(profileCfg.digOutSampleRate * 1e3);
             centerFreq                      =   startFreq + bandwidth * 0.5f + adcStart * slope;
+            outParams->bandwidth            =   bandwidth;
+            outParams->centerFreq           =   centerFreq;
             outParams->chirpInterval        =   (float)idleTime + (float)((float)profileCfg.rampEndTime/1000.*10*1.e-6);
 
             outParams->rangeStep            =   (MMWDEMO_RFPARSER_SPEED_OF_LIGHT_IN_METERS_PER_SEC * profileCfg.digOutSampleRate * 1e3) /

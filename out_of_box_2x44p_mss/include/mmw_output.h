@@ -87,6 +87,15 @@ typedef enum MmwDemo_output_message_type_e
     /*! @brief   temperature stats from Radar front end */
     MMWDEMO_OUTPUT_MSG_TEMPERATURE_STATS,
 
+    /*! @brief   Dynamic 3D obstacle bounding boxes (ObstacleBox[]) */
+    MMWDEMO_OUTPUT_MSG_CUSTOM_OBSTACLES = 20,
+
+    /*! @brief   3D surface clustering telemetry status (MmwDemo_SurfaceStatus) */
+    MMWDEMO_OUTPUT_MSG_SURFACE_STATUS = 21,
+
+    /*! @brief   Static 3D obstacle bounding boxes (ObstacleBox[]) */
+    MMWDEMO_OUTPUT_MSG_STATIC_OBSTACLES = 22,
+
     MMWDEMO_OUTPUT_MSG_MAX
 } MmwDemo_output_message_type;
 
@@ -197,6 +206,126 @@ typedef struct MmwDemo_output_message_tl_t
     uint32_t    length;
 
 } MmwDemo_output_message_tl;
+
+_Static_assert(sizeof(MmwDemo_output_message_header) == 40U, "Header ABI size mismatch");
+_Static_assert(sizeof(MmwDemo_output_message_stats) == 24U, "Stats ABI size mismatch");
+_Static_assert(sizeof(MmwDemo_output_message_tl) == 8U, "TL ABI size mismatch");
+
+/**
+ * @brief
+ *  Obstacle Bounding Box structure (Wire ABI - 32 bytes).
+ *  Compact bounding box descriptor for UAV obstacle avoidance (TLV 20 / TLV 22).
+ */
+typedef struct ObstacleBox_t
+{
+    float   x;        /*!< Lateral center coordinate [m]             - 4 bytes */
+    float   y;        /*!< Forward range center coordinate [m]       - 4 bytes */
+    float   z;        /*!< Vertical elevation center coordinate [m]  - 4 bytes */
+    float   width_x;  /*!< Lateral extent along X [m]                - 4 bytes */
+    float   depth_y;  /*!< Depth extent along Y [m]                  - 4 bytes */
+    float   height_z; /*!< Height extent along Z [m]                 - 4 bytes */
+    float   velocity; /*!< Radial Doppler velocity [m/s]             - 4 bytes */
+    int16_t snr;      /*!< Peak SNR (0.1 dB units matching SDK)      - 2 bytes */
+    int16_t boxId;    /*!< Packed dynamic flag + class + frame rank  - 2 bytes */
+} ObstacleBox;
+
+typedef struct ObstacleBox_t MmwDemo_CustomObstacle;
+
+_Static_assert(sizeof(ObstacleBox) == 32U, "ObstacleBox ABI size mismatch");
+
+#define MMWDEMO_SURFACE_STATUS_VERSION       (1U)
+#define MMWDEMO_SURFACE_MAX_POINTS           (793U)
+#define MMWDEMO_SURFACE_MAX_BOXES            (255U)
+#define MMWDEMO_SURFACE_MOTION_MOBILE        (0U)
+#define MMWDEMO_SURFACE_MOTION_FIXED         (1U)
+#define MMWDEMO_SURFACE_CFAR_LIMIT           (1UL << 0)
+#define MMWDEMO_SURFACE_DENSE_LIMIT          (1UL << 1)
+#define MMWDEMO_SURFACE_CLUSTER_LIMIT        (1UL << 2)
+#define MMWDEMO_SURFACE_BOX_LIMIT            (1UL << 3)
+#define MMWDEMO_SURFACE_UART_LIMIT           (1UL << 4)
+#define MMWDEMO_SURFACE_INVALID_GEOMETRY     (1UL << 5)
+#define MMWDEMO_SURFACE_PROCESS_ERROR        (1UL << 6)
+#define MMWDEMO_SURFACE_COVERAGE_UNVERIFIED  (1UL << 7)
+#define MMWDEMO_SURFACE_PREVIOUS_DEADLINE    (1UL << 8)
+#define MMWDEMO_SURFACE_TIMING_UNVALIDATED   (1UL << 9)
+#define MMWDEMO_SURFACE_HOLD_ACTIVE          (1UL << 10)
+#define MMWDEMO_SURFACE_HISTORY_LIMIT        (1UL << 11)
+#define MMWDEMO_SURFACE_BUDGET_EXCEEDED      (1UL << 12)
+
+/*! @brief TLV21 v1, little endian <HHI8H6I>. */
+typedef struct MmwDemo_SurfaceStatus_t
+{
+    uint16_t version;
+    uint16_t size;
+    uint32_t flags;
+    uint16_t cfarReturned;
+    uint16_t cfarProcessed;
+    uint16_t denseProduced;
+    uint16_t denseClustered;
+    uint16_t clusterCount;
+    uint16_t boxCount;
+    uint16_t heldCount;
+    uint16_t rangeCount;
+    uint32_t processingUs;
+    uint32_t maxProcessingUs;
+    uint32_t previousExportUs;
+    uint32_t framePeriodUs;
+    uint32_t uartEstimatedUs;
+    uint32_t previousExportFrameNumber;
+} MmwDemo_SurfaceStatus;
+
+_Static_assert(sizeof(MmwDemo_SurfaceStatus) == 48U, "MmwDemo_SurfaceStatus ABI size mismatch");
+
+/**
+ * @brief
+ *  Post-clustering obstacle target classification codes encoded in bits [14:8]
+ *  of ObstacleBox.boxId; bit 15 carries MMWDEMO_OBSTACLE_DYNAMIC_FLAG.
+ */
+#define MMWDEMO_OBSTACLE_CLASS_UNKNOWN       (0U)
+#define MMWDEMO_OBSTACLE_CLASS_DRONE         (1U)
+#define MMWDEMO_OBSTACLE_CLASS_PEDESTRIAN    (2U)
+#define MMWDEMO_OBSTACLE_CLASS_VEHICLE       (3U)
+#define MMWDEMO_OBSTACLE_CLASS_MOVING        (4U)
+
+#define MMWDEMO_OBSTACLE_DYNAMIC_FLAG        (0x8000U)
+
+#define MMWDEMO_PACK_OBSTACLE_BOX_ID(classType, rawId) \
+    ((int16_t)((((uint16_t)(classType) & 0x00FFU) << 8U) | ((uint16_t)(rawId) & 0x00FFU)))
+#define MMWDEMO_OBSTACLE_IS_DYNAMIC(boxId) \
+    (((uint16_t)(boxId) & 0x8000U) != 0U)
+#define MMWDEMO_UNPACK_OBSTACLE_CLASS(boxId) \
+    ((uint8_t)(((uint16_t)(boxId) >> 8U) & 0x007FU))
+#define MMWDEMO_UNPACK_OBSTACLE_FRAME_RANK(boxId) \
+    ((uint8_t)((uint16_t)(boxId) & 0x00FFU))
+#define MMWDEMO_UNPACK_OBSTACLE_TRACK_ID(boxId) \
+    MMWDEMO_UNPACK_OBSTACLE_FRAME_RANK(boxId)
+
+/**
+ * @brief
+ *  Derived mmWave physical parameters calculated dynamically by MSS RF Parser
+ *  and active antenna geometry (Single Source of Truth, 60 bytes).
+ */
+typedef struct MmwDemo_DerivedPhysicsParams_t
+{
+    float    rangeStep;             /*!< [m/bin] FFT range bin spacing */
+    float    dopplerStep;           /*!< [m/s/bin] FFT Doppler bin spacing */
+    float    rangeResolution;       /*!< [m] Physical range resolution c / (2 * B) */
+    float    dopplerResolution;     /*!< [m/s] Physical velocity resolution */
+    float    wavelength;            /*!< [m] Carrier wavelength c / fc */
+    float    centerFreq;            /*!< [Hz] Effective RF center frequency fc */
+    float    bandwidth;             /*!< [Hz] Effective sweep bandwidth B */
+    float    chirpInterval;         /*!< [s] Chirp repetition interval Tc */
+    float    framePeriodSec;        /*!< [s] Configured frame/subframe period */
+    float    vMax;                  /*!< [m/s] Maximum unambiguous velocity */
+    float    rMax;                  /*!< [m] Maximum unambiguous range */
+    float    azimuthBeamwidthRad;   /*!< [rad] Rayleigh azimuth aperture 1 / L_eff_x */
+    float    elevationBeamwidthRad; /*!< [rad] Rayleigh elevation aperture 1 / L_eff_z */
+    uint16_t numVirtualAntAzim;     /*!< Active azimuth virtual antenna count */
+    uint16_t numVirtualAntElev;     /*!< Active elevation virtual antenna count */
+    uint16_t reserved[2];           /*!< 32-bit padding ensuring sizeof == 60U */
+} MmwDemo_DerivedPhysicsParams;
+
+_Static_assert(sizeof(MmwDemo_DerivedPhysicsParams) == 60U, "MmwDemo_DerivedPhysicsParams ABI size mismatch");
 
 #ifdef __cplusplus
 }

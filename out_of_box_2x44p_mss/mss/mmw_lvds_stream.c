@@ -49,8 +49,8 @@
 #include <ti/utils/hsiheader/hsiheader.h>
 
 /* MMWAVE Demo Include Files */
-#include <ti/demo/awr2x44P/mmw_ddm/mss/mmw_mss.h>
-#include <ti/demo/awr2x44P/mmw_ddm/mmw_resDDM.h>
+#include "mss/mmw_mss.h"
+#include "mmw_ddm/mmw_resDDM.h"
 
 extern MmwDemo_MSS_MCB    gMmwMssMCB;
 uint8_t gUserDataHeader[8] __attribute__((aligned(32)));

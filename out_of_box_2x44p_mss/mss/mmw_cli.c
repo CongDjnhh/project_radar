@@ -47,6 +47,7 @@
 #include <stddef.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 
 /* MCU + SDK Include Files: */
 #include <drivers/uart.h>
@@ -60,10 +61,11 @@
 #include <ti/utils/mathutils/mathutils.h>
 
 /* Demo Include Files */
-#include <ti/demo/awr2x44P/mmw_ddm/include/mmw_config.h>
-#include <ti/demo/awr2x44P/mmw_ddm/mss/mmw_mss.h>
+#include "include/mmw_config.h"
+#include "include/mmw_output.h"
+#include "mss/mmw_mss.h"
 #include <ti/demo/utils/mmwdemo_adcconfig.h>
-#include <ti/demo/utils/mmwdemo_rfparser.h>
+#include "include/mmwdemo_rfparser.h"
 #include <ti/demo/utils/mmwdemo_board.h>
 
 typedef struct Element_t {
@@ -80,6 +82,7 @@ static int32_t MmwDemo_CLICfarCfg (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLISensorStart (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLISensorStop (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLIGuiMonSel (int32_t argc, char* argv[]);
+static int32_t MmwDemo_CLISurfaceMotionCfg (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLIADCBufCfg (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLIAoAFovCfg (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLICompressionCfg (int32_t argc, char* argv[]);
@@ -131,6 +134,60 @@ static int compare(const void *a, const void *b) {
     Element *element1 = (Element *)a;
     Element *element2 = (Element *)b;
     return element1->value - element2->value;
+}
+
+/**
+ *  @b Description
+ *  @n
+ *      Strict signed integer parser with full-token consumption and bounds check.
+ */
+static int32_t MmwDemo_CLIParseInt32(
+    const char *text,
+    int32_t minimum,
+    int32_t maximum,
+    int32_t *value)
+{
+    char *end = NULL;
+    long parsed;
+
+    if ((text == NULL) || (value == NULL) || (minimum > maximum))
+    {
+        return -1;
+    }
+    parsed = strtol(text, &end, 10);
+    if ((end == text) || (*end != '\0') ||
+        (parsed < (long)minimum) || (parsed > (long)maximum))
+    {
+        return -1;
+    }
+    *value = (int32_t)parsed;
+    return 0;
+}
+
+/**
+ *  @b Description
+ *  @n
+ *      Strict floating-point parser requiring finite value >= minVal.
+ */
+static int32_t MmwDemo_CLIParseFloat(
+    const char *text,
+    float minVal,
+    float *value)
+{
+    char *end = NULL;
+    float parsed;
+
+    if ((text == NULL) || (value == NULL))
+    {
+        return -1;
+    }
+    parsed = strtof(text, &end);
+    if ((end == text) || (*end != '\0') || !isfinite(parsed) || (parsed < minVal))
+    {
+        return -1;
+    }
+    *value = parsed;
+    return 0;
 }
 
 /**
@@ -393,25 +450,121 @@ static int32_t MmwDemo_CLIGuiMonSel (int32_t argc, char* argv[])
 {
     MmwDemo_GuiMonSel   guiMonSel;
     int8_t              subFrameNum;
+    int32_t             detectedObjects = 0;
+    int32_t             logMagRange = 0;
+    int32_t             noiseProfile = 0;
+    int32_t             rangeAzimuthHeatMap = 0;
+    int32_t             rangeDopplerHeatMap = 0;
+    int32_t             statsInfo = 0;
+    int32_t             radarCube = 0;
+    int32_t             customObstacles = 0;
 
-    if(MmwDemo_CLIGetSubframe(argc, argv, 8, &subFrameNum) < 0)
+    if ((argc < 8) || (argc > 10))
+    {
+        CLI_write ("Error: Invalid usage of the CLI command\n");
+        return -1;
+    }
+
+    if(MmwDemo_CLIGetSubframe(argc, argv, argc, &subFrameNum) < 0)
     {
         return -1;
+    }
+
+    if ((MmwDemo_CLIParseInt32(argv[2], 0, 2, &detectedObjects) != 0) ||
+        (MmwDemo_CLIParseInt32(argv[3], 0, 1, &logMagRange) != 0) ||
+        (MmwDemo_CLIParseInt32(argv[4], 0, 1, &noiseProfile) != 0) ||
+        (MmwDemo_CLIParseInt32(argv[5], 0, 1, &rangeAzimuthHeatMap) != 0) ||
+        (MmwDemo_CLIParseInt32(argv[6], 0, 1, &rangeDopplerHeatMap) != 0) ||
+        (MmwDemo_CLIParseInt32(argv[7], 0, 1, &statsInfo) != 0))
+    {
+        CLI_write ("Error: guiMonitor flags must be 0/1; detectedObjects may also be 2\n");
+        return -1;
+    }
+
+    if (argc >= 9)
+    {
+        if (MmwDemo_CLIParseInt32(argv[8], 0, 1, &radarCube) != 0)
+        {
+            CLI_write ("Error: radarCube must be 0 or 1\n");
+            return -1;
+        }
+    }
+
+    if (argc >= 10)
+    {
+        if (MmwDemo_CLIParseInt32(argv[9], 0, 1, &customObstacles) != 0)
+        {
+            CLI_write ("Error: customObstacles must be 0 or 1\n");
+            return -1;
+        }
     }
 
     /* Initialize the guiMonSel configuration: */
     memset ((void *)&guiMonSel, 0, sizeof(MmwDemo_GuiMonSel));
 
     /* Populate configuration: */
-    guiMonSel.detectedObjects           = atoi (argv[2]);
-    guiMonSel.logMagRange               = atoi (argv[3]);
-    guiMonSel.noiseProfile              = atoi (argv[4]);
-    guiMonSel.rangeAzimuthHeatMap       = atoi (argv[5]);
-    guiMonSel.rangeDopplerHeatMap       = atoi (argv[6]);
-    guiMonSel.statsInfo                 = atoi (argv[7]);
+    guiMonSel.detectedObjects           = (uint8_t)detectedObjects;
+    guiMonSel.logMagRange               = (uint8_t)logMagRange;
+    guiMonSel.noiseProfile              = (uint8_t)noiseProfile;
+    guiMonSel.rangeAzimuthHeatMap       = (uint8_t)rangeAzimuthHeatMap;
+    guiMonSel.rangeDopplerHeatMap       = (uint8_t)rangeDopplerHeatMap;
+    guiMonSel.statsInfo                 = (uint8_t)statsInfo;
+    guiMonSel.radarCube                 = (uint8_t)radarCube;
+    guiMonSel.customObstacles           = (uint8_t)customObstacles;
 
     MmwDemo_CfgUpdate((void *)&guiMonSel, MMWDEMO_GUIMONSEL_OFFSET,
         sizeof(MmwDemo_GuiMonSel), subFrameNum);
+
+    return 0;
+}
+
+/**
+ *  @b Description
+ *  @n
+ *      CLI handler for 3D obstacle clustering motion mode, adaptive thresholds,
+ *      and temporal hold duration:
+ *      surfaceMotionCfg <subFrameIdx|-1> <0 mobile|1 fixed> [minMovingSpeedMps]
+ *                       [clusterVelSpreadMps] [clusterRangeTolM] [holdDurationSec]
+ */
+static int32_t MmwDemo_CLISurfaceMotionCfg (int32_t argc, char* argv[])
+{
+    MmwDemo_SurfaceMotionCfg surfaceCfg;
+    int32_t sf = 0;
+    int32_t mode = 0;
+    float minSpeed = 0.0f;
+    float velSpread = 0.0f;
+    float rangeTol = 0.0f;
+    float holdDurationSec = 0.2f;
+
+    if (gMmwMssMCB.sensorState == MmwDemo_SensorState_STARTED)
+    {
+        CLI_write("Error: surfaceMotionCfg requires sensorStop\n");
+        return -1;
+    }
+
+    if ((argc < 3) || (argc > 7) ||
+        (MmwDemo_CLIParseInt32(argv[1], MMWDEMO_SUBFRAME_NUM_FRAME_LEVEL_CONFIG, (int32_t)RL_MAX_SUBFRAMES - 1, &sf) != 0) ||
+        (MmwDemo_CLIParseInt32(argv[2], 0, 1, &mode) != 0) ||
+        ((argc >= 4) && (MmwDemo_CLIParseFloat(argv[3], 0.0f, &minSpeed) != 0)) ||
+        ((argc >= 5) && (MmwDemo_CLIParseFloat(argv[4], 0.0f, &velSpread) != 0)) ||
+        ((argc >= 6) && (MmwDemo_CLIParseFloat(argv[5], 0.0f, &rangeTol) != 0)) ||
+        ((argc == 7) && (MmwDemo_CLIParseFloat(argv[6], 0.0f, &holdDurationSec) != 0)))
+    {
+        CLI_write("Error: surfaceMotionCfg <subFrameIdx|-1> <0 mobile|1 fixed> "
+                  "[minMovingSpeedMps] [clusterVelSpreadMps] [clusterRangeTolM] [holdDurationSec]\n");
+        return -1;
+    }
+
+    memset((void *)&surfaceCfg, 0, sizeof(MmwDemo_SurfaceMotionCfg));
+    surfaceCfg.motionMode = (uint8_t)mode;
+    surfaceCfg.isConfigured = 1U;
+    surfaceCfg.minMovingSpeedMps = minSpeed;
+    surfaceCfg.clusterVelSpreadMps = velSpread;
+    surfaceCfg.clusterRangeTolM = rangeTol;
+    surfaceCfg.holdDurationSec = holdDurationSec;
+
+    MmwDemo_CfgUpdate((void *)&surfaceCfg, MMWDEMO_SURFACEMOTIONCFG_OFFSET,
+        sizeof(MmwDemo_SurfaceMotionCfg), (int8_t)sf);
 
     return 0;
 }
@@ -1308,6 +1461,7 @@ static int32_t MmwDemo_CLIConfigDataPort (int32_t argc, char* argv[])
     }
 
     gMmwMssMCB.loggingUartHandle = gUartHandle[CONFIG_UART1];
+    gMmwMssMCB.cfg.platformCfg.loggingBaudRate = gUartParams[CONFIG_UART1].baudRate;
 
     /* regardless of baud rate update, ack back to the host over this UART
        port if handle is valid and user has requested the ack back */
@@ -1889,8 +2043,13 @@ void MmwDemo_CLIInit (uint8_t taskPriority)
     cnt++;
 
     cliCfg.tableEntry[cnt].cmd            = "guiMonitor";
-    cliCfg.tableEntry[cnt].helpString     = "<subFrameIdx> <detectedObjects> <logMagRange> <noiseProfile> <rangeAzimuthHeatMap> <rangeDopplerHeatMap> <statsInfo>";
+    cliCfg.tableEntry[cnt].helpString     = "<subFrameIdx> <detectedObjects> <logMagRange> <noiseProfile> <rangeAzimuthHeatMap> <rangeDopplerHeatMap> <statsInfo> [radarCube] [customObstacles]";
     cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLIGuiMonSel;
+    cnt++;
+
+    cliCfg.tableEntry[cnt].cmd            = "surfaceMotionCfg";
+    cliCfg.tableEntry[cnt].helpString     = "<subFrameIdx|-1> <0 mobile|1 fixed> [minMovingSpeedMps] [clusterVelSpreadMps] [clusterRangeTolM] [holdDurationSec]";
+    cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLISurfaceMotionCfg;
     cnt++;
 
     cliCfg.tableEntry[cnt].cmd            = "cfarCfg";

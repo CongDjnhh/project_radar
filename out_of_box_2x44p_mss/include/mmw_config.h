@@ -82,7 +82,41 @@ typedef struct MmwDemo_GuiMonSel_t
 
     /*! @brief   Send stats */
     uint8_t        statsInfo;
+
+    /*! @brief   Send the raw DPIF radar cube over the data UART */
+    uint8_t        radarCube;
+
+    /*! @brief   Send 3D clustered obstacles (TLV 20, 21, 22) */
+    uint8_t        customObstacles;
 } MmwDemo_GuiMonSel;
+
+/**
+ * @brief
+ *  3D obstacle clustering and temporal hold motion configuration (CLI surfaceMotionCfg).
+ */
+typedef struct MmwDemo_SurfaceMotionCfg_t
+{
+    /*! @brief   Motion mode: 0 = mobile, 1 = fixed */
+    uint8_t        motionMode;
+
+    /*! @brief   Non-zero when configured via surfaceMotionCfg CLI */
+    uint8_t        isConfigured;
+
+    /*! @brief   Reserved alignment padding */
+    uint8_t        reserved[2];
+
+    /*! @brief   Minimum moving speed threshold [m/s] (0 = derive from dopplerResolution) */
+    float          minMovingSpeedMps;
+
+    /*! @brief   Doppler velocity DBSCAN spread [m/s] (0 = derive from dopplerResolution) */
+    float          clusterVelSpreadMps;
+
+    /*! @brief   Radial range DBSCAN tolerance [m] (0 = derive from rangeResolution) */
+    float          clusterRangeTolM;
+
+    /*! @brief   Temporal hold duration [s] (0 = disable temporal hold) */
+    float          holdDurationSec;
+} MmwDemo_SurfaceMotionCfg;
 
 /**
  * @brief

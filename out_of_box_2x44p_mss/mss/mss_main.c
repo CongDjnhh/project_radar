@@ -769,19 +769,30 @@
 #include <ti/utils/testlogger/logger.h>
 
 /* Demo Include Files */
-#include <ti/demo/awr2x44P/mmw_ddm/include/mmw_config.h>
-#include <ti/demo/utils/mmwdemo_rfparser.h>
+#include "include/mmw_config.h"
+#include "include/mmwdemo_rfparser.h"
 #include <ti/demo/utils/mmwdemo_adcconfig.h>
 #include <ti/demo/utils/mmwdemo_monitor.h>
 #include <ti/demo/utils/enet_stream.h>
-#include <ti/demo/awr2x44P/mmw_ddm/mmw_resDDM.h>
+#include "mmw_ddm/mmw_resDDM.h"
 #include <ti/demo/awr2x44P/mmw_ddm/mmw_common.c>
-#include <ti/demo/awr2x44P/mmw_ddm/mss/mmw_mss.h>
-#include <ti/demo/awr2x44P/mmw_ddm/include/mmw_output.h>
+#include "mss/mmw_mss.h"
+#include "include/mmw_output.h"
+#include "mss/surface_cluster_3d.h"
 #include <ti/board/antenna_geometry.h>
 #include <ti/demo/utils/mmwdemo_flash.h>
 /* Profiler Include Files */
 #include <kernel/dpl/CycleCounterP.h>
+
+_Static_assert(sizeof(ObstacleBox) == sizeof(SurfaceCluster_Box), "Box ABI size mismatch");
+_Static_assert(sizeof(MmwDemo_SurfaceStatus) == sizeof(SurfaceCluster_Status), "Status ABI size mismatch");
+_Static_assert(sizeof(MmwDemo_DerivedPhysicsParams) == sizeof(SurfaceCluster_Physics), "Physics ABI size mismatch");
+_Static_assert(sizeof(DPIF_PointCloudCartesian) == sizeof(SurfaceCluster_InputPoint), "PointCloud ABI size mismatch");
+_Static_assert(sizeof(DPIF_PointCloudSideInfo) == sizeof(SurfaceCluster_SideInfo), "SideInfo ABI size mismatch");
+_Static_assert(offsetof(MmwDemo_DerivedPhysicsParams, elevationBeamwidthRad) ==
+               offsetof(SurfaceCluster_Physics, elevationBeamwidthRad), "Physics layout mismatch");
+_Static_assert(offsetof(MmwDemo_SurfaceStatus, previousExportFrameNumber) ==
+               offsetof(SurfaceCluster_Status, previousExportFrameNumber), "Status layout mismatch");
 
 /**
  * @brief Task Priority settings:
@@ -877,7 +888,45 @@ static void MmwDemo_checkEdmaErrors(void);
 
 extern void MmwDemo_CLIInit(uint8_t taskPriority);
 extern MmwDemo_RFParserHwAttr MmwDemo_RFParserHwCfg;
+extern UART_Params gUartParams[CONFIG_UART_NUM_INSTANCES];
 DPC_ObjectDetection_ElevEstCfg gElevEstCfg = {0};
+
+/**
+ * @brief Private MSS_L2 (.bss) snapshot of DPC outputs captured before M4 DPM_send()
+ *        to eliminate cross-core overwrites during UART clustering/export.
+ */
+typedef struct MmwDemo_UartExportSnapshot_t
+{
+    DPIF_PointCloudCartesian  objOut[MMWDEMO_SURFACE_MAX_POINTS];
+    DPIF_PointCloudSideInfo   objOutSideInfo[MMWDEMO_SURFACE_MAX_POINTS];
+    DPC_ObjectDetection_Stats stats;
+    void                     *detMatrixData;
+    void                     *compRxChanBiasMeasurement;
+    uint32_t                  dopNumObjOut;
+    uint32_t                  numObjOut;
+    uint8_t                   subFrameIdx;
+    uint8_t                   valid;
+    uint8_t                   reserved[2];
+} MmwDemo_UartExportSnapshot;
+
+typedef struct MmwDemo_SurfaceTimingState_t
+{
+    uint32_t maxProcessingUs;
+    uint32_t prevExportUs;
+    uint32_t prevExportFrameNumber;
+    uint8_t  prevExportValid;
+    uint8_t  prevDeadlineExceeded;
+    uint8_t  reserved[2];
+} MmwDemo_SurfaceTimingState;
+
+static MmwDemo_UartExportSnapshot gUartExportSnapshot __attribute__((aligned(32)));
+static SurfaceCluster_State       gSurfaceClusterState __attribute__((aligned(32)));
+static ObstacleBox                gDynamicBoxes[MMWDEMO_SURFACE_MAX_BOXES] __attribute__((aligned(32)));
+static ObstacleBox                gStaticBoxes[MMWDEMO_SURFACE_MAX_BOXES] __attribute__((aligned(32)));
+static MmwDemo_SurfaceStatus      gSurfaceStatus __attribute__((aligned(32)));
+static uint16_t                   gNumDynBoxesToSend = 0U;
+static uint16_t                   gNumStatBoxesToSend = 0U;
+static MmwDemo_SurfaceTimingState gSurfaceTimingState = {0};
 
 /**************************************************************************
  ************************* Millimeter Wave Demo Functions prototype *************
@@ -892,9 +941,9 @@ void MmwDemo_DPC_ObjectDetection_reportFxn(void *data,  uint16_t dataLen);
 
 static void MmwDemo_transmitProcessedOutput
 (
-    UART_Handle     uartHandle,
-    DPC_ObjectDetection_ExecuteResult   *result,
-    MmwDemo_output_message_stats        *timingInfo
+    UART_Handle                       uartHandle,
+    const MmwDemo_UartExportSnapshot *snap,
+    MmwDemo_output_message_stats     *timingInfo
 );
 
 static void MmwDemo_measurementResultOutput(void* compRxChanCfg);
@@ -960,6 +1009,7 @@ static void MmwDemo_setSubFramePendingState(MmwDemo_SubFrameCfg *subFrameCfg, ui
     switch (offset)
     {
         case MMWDEMO_GUIMONSEL_OFFSET:
+        case MMWDEMO_SURFACEMOTIONCFG_OFFSET:
             // Do nothing
         break;
         case MMWDEMO_CFARDOPPLERCFG_OFFSET:
@@ -1120,107 +1170,324 @@ static void MmwDemo_measurementResultOutput(void *compRxChanCfg)
 *   @param[in] result       Pointer to result from object detection DPC processing
 *   @param[in] timingInfo   Pointer to timing information provided from core that runs data path
 */
+/** @brief Degree-to-radian conversion factor. */
+#define MMWDEMO_DEG_TO_RAD ((float)(3.14159265358979323846 / 180.0))
+
+/** @brief Compute contiguous bit-index span (maxBit - minBit + 1) of a 64-bit antenna mask. */
+static uint16_t MmwDemo_computeMaskSpan(uint64_t mask)
+{
+    uint32_t bit;
+    uint32_t minBit = 64U;
+    uint32_t maxBit = 0U;
+
+    if (mask == 0ULL)
+    {
+        return 0U;
+    }
+    for (bit = 0U; bit < 64U; bit++)
+    {
+        if (((mask >> bit) & 0x1ULL) != 0ULL)
+        {
+            if (bit < minBit)
+            {
+                minBit = bit;
+            }
+            maxBit = bit;
+        }
+    }
+    return (uint16_t)(maxBit - minBit + 1U);
+}
+
+/** @brief Populate MmwDemo_DerivedPhysicsParams dynamically from RF parser and active geometry. */
+static void MmwDemo_populateSubFramePhysics(
+    MmwDemo_SubFrameCfg *subFrameCfg,
+    const MmwDemo_RFParserOutParams *rfParams)
+{
+    MmwDemo_DerivedPhysicsParams *phys = &subFrameCfg->physics;
+    const DPC_ObjectDetection_PreStartCommonCfg *commonCfg = &gMmwMssMCB.objDetCommonCfg.preStartCommonCfg;
+    const DPC_ObjectDetection_FovAoaCfg *aoaFov = &subFrameCfg->datapathStaticCfg.aoaFovCfg;
+    uint64_t azimMask = commonCfg->zeroInsrtMaskCfg.zeroInsrtMaskAzim;
+    uint64_t elevMask = commonCfg->zeroInsrtMaskCfg.zeroInsrtMaskElev;
+    float xSpace = commonCfg->antennaSpacing.xSpacingByLambda;
+    float zSpace = commonCfg->antennaSpacing.zSpacingByLambda;
+    uint16_t azimSpan = MmwDemo_computeMaskSpan(azimMask);
+    float effAzimLambda;
+
+    memset((void *)phys, 0, sizeof(*phys));
+    phys->rangeStep         = rfParams->rangeStep;
+    phys->dopplerStep       = rfParams->dopplerStep;
+    phys->rangeResolution   = rfParams->rangeResolution;
+    phys->dopplerResolution = rfParams->dopplerResolution;
+    phys->centerFreq        = rfParams->centerFreq;
+    phys->bandwidth         = rfParams->bandwidth;
+    phys->wavelength        = (rfParams->centerFreq > 0.0f) ?
+        ((float)MMWDEMO_RFPARSER_SPEED_OF_LIGHT_IN_METERS_PER_SEC / rfParams->centerFreq) : 0.0f;
+    phys->chirpInterval     = rfParams->chirpInterval;
+    phys->framePeriodSec    = rfParams->framePeriod * 1.0e-3f;
+    phys->vMax              = 0.5f * (float)rfParams->numDopplerBins * rfParams->dopplerStep;
+    phys->rMax              = (float)subFrameCfg->numRangeBins * rfParams->rangeStep;
+    phys->numVirtualAntAzim = (uint16_t)rfParams->numVirtualAntAzim;
+    phys->numVirtualAntElev = (uint16_t)rfParams->numVirtualAntElev;
+
+    /* Require valid antenna geometry and nonzero aperture (zero silent defaults). */
+    effAzimLambda = ((azimSpan > 0U) && (xSpace > 0.0f)) ? ((float)azimSpan * xSpace) : 0.0f;
+    phys->azimuthBeamwidthRad = (effAzimLambda > 0.0f) ? (1.0f / effAzimLambda) : 0.0f;
+
+    if ((phys->numVirtualAntElev > 0U) && (elevMask != 0ULL) && (zSpace > 0.0f))
+    {
+        /* AWR2944P DDMA uses 2 virtual elevation rows separated by zSpacingByLambda. */
+        phys->elevationBeamwidthRad = 1.0f / (2.0f * zSpace);
+    }
+    else
+    {
+        float sinMinEl = sinf(aoaFov->minElevationDeg * MMWDEMO_DEG_TO_RAD);
+        float sinMaxEl = sinf(aoaFov->maxElevationDeg * MMWDEMO_DEG_TO_RAD);
+        phys->elevationBeamwidthRad = (sinMaxEl > sinMinEl) ? (sinMaxEl - sinMinEl) : 0.0f;
+    }
+
+    if ((phys->rangeStep <= 0.0f) || (phys->dopplerStep <= 0.0f) ||
+        (phys->wavelength <= 0.0f) || (phys->framePeriodSec <= 0.0f) ||
+        (SurfaceCluster_validatePhysics((const SurfaceCluster_Physics *)phys) != SURFACE_CLUSTER_OK))
+    {
+        DebugP_log("Error: Invalid derived physics params (check profileCfg/frameCfg/antGeometryCfg)\n");
+        DebugP_assert(0);
+    }
+}
+
+/** @brief Reset 3D clustering state, temporal hold history, and export timing telemetry. */
+static void MmwDemo_resetSurfacePipeline(void)
+{
+    int32_t retVal = SurfaceCluster_init(&gSurfaceClusterState);
+    DebugP_assert(retVal == SURFACE_CLUSTER_OK);
+    memset((void *)&gSurfaceTimingState, 0, sizeof(gSurfaceTimingState));
+    memset((void *)&gSurfaceStatus, 0, sizeof(gSurfaceStatus));
+    gNumDynBoxesToSend = 0U;
+    gNumStatBoxesToSend = 0U;
+}
+
+/** @brief Helper to cache-flush and synchronously write one buffer over UART. */
+static void MmwDemo_uartWriteCached(UART_Handle uartHandle, void *buf, uint32_t count)
+{
+    UART_Transaction trans;
+
+    if ((buf == NULL) || (count == 0U))
+    {
+        return;
+    }
+    CacheP_wbInv(buf, count, CacheP_TYPE_ALLD);
+    UART_Transaction_init(&trans);
+    trans.buf   = buf;
+    trans.count = count;
+    UART_write(uartHandle, &trans);
+}
+
+/** @brief Transmits detection data and optional 3D obstacle TLVs (20/21/22) over UART. */
 static void MmwDemo_transmitProcessedOutput
 (
-    UART_Handle     uartHandle,
-    DPC_ObjectDetection_ExecuteResult   *result,
-    MmwDemo_output_message_stats        *timingInfo
+    UART_Handle                       uartHandle,
+    const MmwDemo_UartExportSnapshot *snap,
+    MmwDemo_output_message_stats     *timingInfo
 )
 {
     MmwDemo_output_message_header header;
-    MmwDemo_GuiMonSel   *pGuiMonSel;
-    MmwDemo_SubFrameCfg *subFrameCfg;
-    uint32_t tlvIdx = 0;
-    uint32_t index;
-    uint32_t numPaddingBytes;
-    uint32_t packetLen;
-    uint8_t padding[MMWDEMO_OUTPUT_MSG_SEGMENT_LEN];
-    MmwDemo_output_message_tl   tl[MMWDEMO_OUTPUT_MSG_MAX];
-    uint16_t *detMatrix = (uint16_t *)result->detMatrix.data;
-    DPIF_PointCloudCartesian *objOut;
-    DPIF_PointCloudSideInfo *objOutSideInfo;
-    DPC_ObjectDetection_Stats *stats;
-    UART_Transaction trans;
+    MmwDemo_GuiMonSel             guiMonSel;
+    MmwDemo_GuiMonSel            *pGuiMonSel;
+    MmwDemo_SubFrameCfg          *subFrameCfg;
+    uint32_t                      tlvIdx = 0U;
+    uint32_t                      index;
+    uint32_t                      numPaddingBytes;
+    uint32_t                      packetLen;
+    uint32_t                      basePacketBytes;
+    uint16_t                      dynCount = 0U;
+    uint16_t                      statCount = 0U;
+    uint8_t                       padding[MMWDEMO_OUTPUT_MSG_SEGMENT_LEN];
+    MmwDemo_output_message_tl     tl[MMWDEMO_OUTPUT_MSG_MAX];
+    uint16_t                     *detMatrix = NULL;
+    UART_Transaction              trans;
 
     UART_Transaction_init(&trans);
+    DebugP_assert(snap->subFrameIdx < RL_MAX_SUBFRAMES);
 
     /* Get subframe configuration */
-    subFrameCfg = &gMmwMssMCB.subFrameCfg[result->subFrameIdx];
-    uint8_t txAntMask     = gMmwMssMCB.cfg.openCfg.chCfg.txChannelEn;
-    uint8_t numTxAnt      = mathUtils_countSetBits(txAntMask);
+    subFrameCfg = &gMmwMssMCB.subFrameCfg[snap->subFrameIdx];
+    uint8_t  txAntMask        = gMmwMssMCB.cfg.openCfg.chCfg.txChannelEn;
+    uint8_t  numTxAnt         = mathUtils_countSetBits(txAntMask);
     uint16_t numDopFFTSubBins = subFrameCfg->numDopplerBins / (numTxAnt + gMmwMssMCB.numEmptySubBands);
 
-    /* Get Gui Monitor configuration */
-    pGuiMonSel = &subFrameCfg->guiMonSel;
+    /* Snapshot GUI Monitor configuration once so header and TX phases cannot drift */
+    guiMonSel  = subFrameCfg->guiMonSel;
+    pGuiMonSel = &guiMonSel;
 
-    /* Clear message header */
     memset((void *)&header, 0, sizeof(MmwDemo_output_message_header));
+    memset((void *)padding, 0, sizeof(padding));
 
-    /******************************************************************
-       Send out data that is enabled, Since processing results are from DSP,
-       address translation is needed for buffer pointers
-    *******************************************************************/
+    if ((pGuiMonSel->logMagRange != 0U) ||
+        (pGuiMonSel->noiseProfile != 0U) ||
+        (pGuiMonSel->rangeDopplerHeatMap != 0U))
     {
-        detMatrix = (uint16_t *) AddrTranslateP_getLocalAddr((uint32_t)detMatrix);
-
-        objOut = (DPIF_PointCloudCartesian *) AddrTranslateP_getLocalAddr((uint32_t)result->objOut);
-
-        objOutSideInfo = (DPIF_PointCloudSideInfo *) AddrTranslateP_getLocalAddr((uint32_t)result->objOutSideInfo);
-
-        stats = (DPC_ObjectDetection_Stats *) AddrTranslateP_getLocalAddr((uint32_t)result->stats);
+        detMatrix = (uint16_t *)AddrTranslateP_getLocalAddr((uint32_t)snap->detMatrixData);
     }
 
-    /* Header: */
-    header.platform =  0x2944;
-    header.magicWord[0] = 0x0102;
-    header.magicWord[1] = 0x0304;
-    header.magicWord[2] = 0x0506;
-    header.magicWord[3] = 0x0708;
-    header.numDetectedObj = result->numObjOut;
-    header.version =    MMWAVE_SDK_VERSION_BUILD |
-                        (MMWAVE_SDK_VERSION_BUGFIX << 8) |
-                        (MMWAVE_SDK_VERSION_MINOR << 16) |
-                        (MMWAVE_SDK_VERSION_MAJOR << 24);
+    /* Header: keep numDetectedObj equal to raw point cloud count for parser parity */
+    header.platform       = 0x2944;
+    header.magicWord[0]   = 0x0102;
+    header.magicWord[1]   = 0x0304;
+    header.magicWord[2]   = 0x0506;
+    header.magicWord[3]   = 0x0708;
+    header.numDetectedObj = snap->numObjOut;
+    header.version        = MMWAVE_SDK_VERSION_BUILD |
+                            (MMWAVE_SDK_VERSION_BUGFIX << 8) |
+                            (MMWAVE_SDK_VERSION_MINOR << 16) |
+                            (MMWAVE_SDK_VERSION_MAJOR << 24);
+
+    /* Calculate mandatory base packet byte length before obstacle box capping */
+    basePacketBytes = sizeof(MmwDemo_output_message_header);
+    if (((pGuiMonSel->detectedObjects == 1U) || (pGuiMonSel->detectedObjects == 2U)) &&
+        (snap->numObjOut > 0U))
+    {
+        basePacketBytes += sizeof(MmwDemo_output_message_tl) +
+                           (sizeof(DPIF_PointCloudCartesian) * snap->numObjOut);
+    }
+    if ((pGuiMonSel->detectedObjects == 1U) && (snap->numObjOut > 0U))
+    {
+        basePacketBytes += sizeof(MmwDemo_output_message_tl) +
+                           (sizeof(DPIF_PointCloudSideInfo) * snap->numObjOut);
+    }
+    if (pGuiMonSel->customObstacles == 1U)
+    {
+        basePacketBytes += sizeof(MmwDemo_output_message_tl) + sizeof(MmwDemo_SurfaceStatus);
+    }
+    if (pGuiMonSel->logMagRange != 0U)
+    {
+        basePacketBytes += sizeof(MmwDemo_output_message_tl) +
+                           (sizeof(uint16_t) * subFrameCfg->numRangeBins);
+    }
+    if (pGuiMonSel->noiseProfile != 0U)
+    {
+        basePacketBytes += sizeof(MmwDemo_output_message_tl) +
+                           (sizeof(uint16_t) * subFrameCfg->numRangeBins);
+    }
+    if (pGuiMonSel->rangeDopplerHeatMap != 0U)
+    {
+        basePacketBytes += sizeof(MmwDemo_output_message_tl) +
+                           (subFrameCfg->numRangeBins * numDopFFTSubBins * sizeof(uint16_t));
+    }
+    if (pGuiMonSel->statsInfo != 0U)
+    {
+        basePacketBytes += sizeof(MmwDemo_output_message_tl) + sizeof(MmwDemo_output_message_stats);
+        basePacketBytes += sizeof(MmwDemo_output_message_tl) + sizeof(MmwDemo_temperatureStats);
+    }
+
+    if (pGuiMonSel->customObstacles == 1U)
+    {
+        uint32_t baudRate = gMmwMssMCB.cfg.platformCfg.loggingBaudRate;
+        uint32_t framePeriodUs = gSurfaceStatus.framePeriodUs;
+        uint32_t alignedBaseBytes = basePacketBytes + (MMWDEMO_OUTPUT_MSG_SEGMENT_LEN - 1U);
+        uint32_t targetBudgetUs;
+        uint32_t availTxUs;
+        uint32_t maxFrameBytes;
+        uint32_t remBytes;
+
+        DebugP_assert(baudRate > 0U);
+        dynCount  = gNumDynBoxesToSend;
+        statCount = gNumStatBoxesToSend;
+
+        if (framePeriodUs > 0U)
+        {
+            targetBudgetUs = (framePeriodUs * 4U) / 5U; /* 80% total deadline margin */
+            availTxUs = (targetBudgetUs > gSurfaceStatus.processingUs) ?
+                        (targetBudgetUs - gSurfaceStatus.processingUs) : 0U;
+            maxFrameBytes = (uint32_t)(((uint64_t)availTxUs * (uint64_t)baudRate) / 10000000ULL);
+            remBytes = (maxFrameBytes > alignedBaseBytes) ? (maxFrameBytes - alignedBaseBytes) : 0U;
+
+            if (dynCount > 0U)
+            {
+                uint32_t fitDyn = (remBytes >= sizeof(MmwDemo_output_message_tl)) ?
+                                  ((remBytes - sizeof(MmwDemo_output_message_tl)) / sizeof(ObstacleBox)) : 0U;
+                if (fitDyn < dynCount)
+                {
+                    dynCount = (uint16_t)fitDyn;
+                    gSurfaceStatus.flags |= MMWDEMO_SURFACE_UART_LIMIT;
+                }
+                if (dynCount > 0U)
+                {
+                    remBytes -= sizeof(MmwDemo_output_message_tl) +
+                                ((uint32_t)dynCount * sizeof(ObstacleBox));
+                }
+            }
+            if (statCount > 0U)
+            {
+                uint32_t fitStat = (remBytes >= sizeof(MmwDemo_output_message_tl)) ?
+                                   ((remBytes - sizeof(MmwDemo_output_message_tl)) / sizeof(ObstacleBox)) : 0U;
+                if (fitStat < statCount)
+                {
+                    statCount = (uint16_t)fitStat;
+                    gSurfaceStatus.flags |= MMWDEMO_SURFACE_UART_LIMIT;
+                }
+            }
+        }
+        gSurfaceStatus.boxCount = (uint16_t)(dynCount + statCount);
+    }
 
     packetLen = sizeof(MmwDemo_output_message_header);
-    if (((pGuiMonSel->detectedObjects == 1) || (pGuiMonSel->detectedObjects == 2)) &&
-         (result->numObjOut > 0))
+    if (((pGuiMonSel->detectedObjects == 1U) || (pGuiMonSel->detectedObjects == 2U)) &&
+        (snap->numObjOut > 0U))
     {
         tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_DETECTED_POINTS;
-        tl[tlvIdx].length = sizeof(DPIF_PointCloudCartesian) * result->numObjOut;
+        tl[tlvIdx].length = sizeof(DPIF_PointCloudCartesian) * snap->numObjOut;
         packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
         tlvIdx++;
     }
-    /* Side info */
-    if ((pGuiMonSel->detectedObjects == 1) && (result->numObjOut > 0))
+    if ((pGuiMonSel->detectedObjects == 1U) && (snap->numObjOut > 0U))
     {
         tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_DETECTED_POINTS_SIDE_INFO;
-        tl[tlvIdx].length = sizeof(DPIF_PointCloudSideInfo) * result->numObjOut;
+        tl[tlvIdx].length = sizeof(DPIF_PointCloudSideInfo) * snap->numObjOut;
         packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
         tlvIdx++;
     }
-    if (pGuiMonSel->logMagRange)
+    if ((pGuiMonSel->customObstacles == 1U) && (dynCount > 0U))
+    {
+        tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_CUSTOM_OBSTACLES;
+        tl[tlvIdx].length = sizeof(ObstacleBox) * dynCount;
+        packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
+        tlvIdx++;
+    }
+    if ((pGuiMonSel->customObstacles == 1U) && (statCount > 0U))
+    {
+        tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_STATIC_OBSTACLES;
+        tl[tlvIdx].length = sizeof(ObstacleBox) * statCount;
+        packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
+        tlvIdx++;
+    }
+    if (pGuiMonSel->customObstacles == 1U)
+    {
+        tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_SURFACE_STATUS;
+        tl[tlvIdx].length = sizeof(MmwDemo_SurfaceStatus);
+        packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
+        tlvIdx++;
+    }
+    if (pGuiMonSel->logMagRange != 0U)
     {
         tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_RANGE_PROFILE;
         tl[tlvIdx].length = sizeof(uint16_t) * subFrameCfg->numRangeBins;
         packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
         tlvIdx++;
     }
-    if (pGuiMonSel->noiseProfile)
+    if (pGuiMonSel->noiseProfile != 0U)
     {
         tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_NOISE_PROFILE;
         tl[tlvIdx].length = sizeof(uint16_t) * subFrameCfg->numRangeBins;
         packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
         tlvIdx++;
     }
-    if (pGuiMonSel->rangeDopplerHeatMap)
+    if (pGuiMonSel->rangeDopplerHeatMap != 0U)
     {
         tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_RANGE_DOPPLER_HEAT_MAP;
         tl[tlvIdx].length = subFrameCfg->numRangeBins * numDopFFTSubBins * sizeof(uint16_t);
         packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
         tlvIdx++;
     }
-    if (pGuiMonSel->statsInfo)
+    if (pGuiMonSel->statsInfo != 0U)
     {
         tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_STATS;
         tl[tlvIdx].length = sizeof(MmwDemo_output_message_stats);
@@ -1234,68 +1501,122 @@ static void MmwDemo_transmitProcessedOutput
         tlvIdx++;
     }
 
+    DebugP_assert(tlvIdx <= MMWDEMO_OUTPUT_MSG_MAX);
     header.numTLVs = tlvIdx;
     /* Round up packet length to multiple of MMWDEMO_OUTPUT_MSG_SEGMENT_LEN */
     header.totalPacketLen = MMWDEMO_OUTPUT_MSG_SEGMENT_LEN *
-            ((packetLen + (MMWDEMO_OUTPUT_MSG_SEGMENT_LEN-1))/MMWDEMO_OUTPUT_MSG_SEGMENT_LEN);
-    header.timeCpuCycles = 0; //Pmu_getCount(0);
-    header.frameNumber = stats->frameStartIntCounter;
-    header.subFrameNumber = result->subFrameIdx;
+            ((packetLen + (MMWDEMO_OUTPUT_MSG_SEGMENT_LEN - 1U)) / MMWDEMO_OUTPUT_MSG_SEGMENT_LEN);
+    header.timeCpuCycles  = 0;
+    header.frameNumber    = snap->stats.frameStartIntCounter;
+    header.subFrameNumber = snap->subFrameIdx;
 
-    DebugP_logInfo("Platform = %d, Version = %d, NumObj = %d, numTLVs = %d", header.platform, header.version, header.numDetectedObj, header.numTLVs);
+    if (pGuiMonSel->customObstacles == 1U)
+    {
+        uint32_t baudRate = gMmwMssMCB.cfg.platformCfg.loggingBaudRate;
+        gSurfaceStatus.uartEstimatedUs = (uint32_t)(
+            ((uint64_t)header.totalPacketLen * 10000000ULL + (uint64_t)baudRate - 1ULL) /
+            (uint64_t)baudRate);
+        if ((gSurfaceStatus.framePeriodUs != 0U) &&
+            (gSurfaceStatus.uartEstimatedUs >= gSurfaceStatus.framePeriodUs))
+        {
+            gSurfaceStatus.flags |= MMWDEMO_SURFACE_UART_LIMIT;
+        }
+        if ((gSurfaceStatus.framePeriodUs != 0U) &&
+            (((uint64_t)gSurfaceStatus.processingUs + (uint64_t)gSurfaceStatus.uartEstimatedUs) * 5ULL >
+             (uint64_t)gSurfaceStatus.framePeriodUs * 4ULL))
+        {
+            gSurfaceStatus.flags |= MMWDEMO_SURFACE_BUDGET_EXCEEDED;
+        }
+    }
 
-    CacheP_wbInv((void *)&header, sizeof(MmwDemo_output_message_header), CacheP_TYPE_ALLD);
-    UART_Transaction_init(&trans);
-    trans.buf   = (uint8_t*)&header;
-    trans.count = sizeof(MmwDemo_output_message_header);
-    UART_write(uartHandle, &trans);
+    DebugP_logInfo("Platform = %d, Version = %d, NumObj = %d, numTLVs = %d",
+                   header.platform, header.version, header.numDetectedObj, header.numTLVs);
 
-    tlvIdx = 0;
+    MmwDemo_uartWriteCached(uartHandle, (void *)&header, sizeof(MmwDemo_output_message_header));
+    if (tlvIdx > 0U)
+    {
+        CacheP_wbInv((void *)&tl[0], sizeof(MmwDemo_output_message_tl) * tlvIdx, CacheP_TYPE_ALLD);
+    }
+
+    tlvIdx = 0U;
     /* Send detected Objects */
-    if (((pGuiMonSel->detectedObjects == 1) || (pGuiMonSel->detectedObjects == 2)) &&
-        (result->numObjOut > 0))
+    if (((pGuiMonSel->detectedObjects == 1U) || (pGuiMonSel->detectedObjects == 2U)) &&
+        (snap->numObjOut > 0U))
     {
         UART_Transaction_init(&trans);
-        trans.buf   = (uint8_t*)&tl[tlvIdx];
+        trans.buf   = (void *)&tl[tlvIdx];
         trans.count = sizeof(MmwDemo_output_message_tl);
         UART_write(uartHandle, &trans);
 
-        /*Send array of objects */
-        UART_Transaction_init(&trans);
-        trans.buf   = (uint8_t*)objOut;
-        trans.count = sizeof(DPIF_PointCloudCartesian) * result->numObjOut;
-        UART_write(uartHandle, &trans);
+        MmwDemo_uartWriteCached(uartHandle, (void *)&snap->objOut[0],
+                                sizeof(DPIF_PointCloudCartesian) * snap->numObjOut);
         tlvIdx++;
     }
 
     /* Send detected Objects Side Info */
-    if ((pGuiMonSel->detectedObjects == 1) && (result->numObjOut > 0))
+    if ((pGuiMonSel->detectedObjects == 1U) && (snap->numObjOut > 0U))
     {
-
         UART_Transaction_init(&trans);
-        trans.buf   = (uint8_t*)&tl[tlvIdx];
+        trans.buf   = (void *)&tl[tlvIdx];
         trans.count = sizeof(MmwDemo_output_message_tl);
         UART_write(uartHandle, &trans);
 
+        MmwDemo_uartWriteCached(uartHandle, (void *)&snap->objOutSideInfo[0],
+                                sizeof(DPIF_PointCloudSideInfo) * snap->numObjOut);
+        tlvIdx++;
+    }
+
+    /* Send Custom Dynamic Obstacles TLV 20 */
+    if ((pGuiMonSel->customObstacles == 1U) && (dynCount > 0U))
+    {
         UART_Transaction_init(&trans);
-        trans.buf   = (uint8_t*)objOutSideInfo;
-        trans.count = sizeof(DPIF_PointCloudSideInfo) * result->numObjOut;
+        trans.buf   = (void *)&tl[tlvIdx];
+        trans.count = sizeof(MmwDemo_output_message_tl);
         UART_write(uartHandle, &trans);
+
+        MmwDemo_uartWriteCached(uartHandle, (void *)&gDynamicBoxes[0],
+                                sizeof(ObstacleBox) * dynCount);
+        tlvIdx++;
+    }
+
+    /* Send Custom Static Obstacles TLV 22 */
+    if ((pGuiMonSel->customObstacles == 1U) && (statCount > 0U))
+    {
+        UART_Transaction_init(&trans);
+        trans.buf   = (void *)&tl[tlvIdx];
+        trans.count = sizeof(MmwDemo_output_message_tl);
+        UART_write(uartHandle, &trans);
+
+        MmwDemo_uartWriteCached(uartHandle, (void *)&gStaticBoxes[0],
+                                sizeof(ObstacleBox) * statCount);
+        tlvIdx++;
+    }
+
+    /* Send 3D Surface Clustering Telemetry Status TLV 21 */
+    if (pGuiMonSel->customObstacles == 1U)
+    {
+        UART_Transaction_init(&trans);
+        trans.buf   = (void *)&tl[tlvIdx];
+        trans.count = sizeof(MmwDemo_output_message_tl);
+        UART_write(uartHandle, &trans);
+
+        MmwDemo_uartWriteCached(uartHandle, (void *)&gSurfaceStatus,
+                                sizeof(MmwDemo_SurfaceStatus));
         tlvIdx++;
     }
 
     /* Send Range profile */
-    if (pGuiMonSel->logMagRange)
+    if (pGuiMonSel->logMagRange != 0U)
     {
         UART_Transaction_init(&trans);
-        trans.buf   = (uint8_t*)&tl[tlvIdx];
+        trans.buf   = (void *)&tl[tlvIdx];
         trans.count = sizeof(MmwDemo_output_message_tl);
         UART_write(uartHandle, &trans);
 
-        for(index = 0; index < subFrameCfg->numRangeBins; index++)
+        for (index = 0U; index < subFrameCfg->numRangeBins; index++)
         {
             UART_Transaction_init(&trans);
-            trans.buf   = (uint8_t*)&detMatrix[index * numDopFFTSubBins];
+            trans.buf   = (void *)&detMatrix[index * numDopFFTSubBins];
             trans.count = sizeof(uint16_t);
             UART_write(uartHandle, &trans);
         }
@@ -1303,18 +1624,18 @@ static void MmwDemo_transmitProcessedOutput
     }
 
     /* Send noise profile */
-    if (pGuiMonSel->noiseProfile)
+    if (pGuiMonSel->noiseProfile != 0U)
     {
-        uint32_t maxDopIdx = subFrameCfg->numDopplerBins/2 -1;
+        uint32_t maxDopIdx = subFrameCfg->numDopplerBins / 2U - 1U;
         UART_Transaction_init(&trans);
-        trans.buf   = (uint8_t*)&tl[tlvIdx];
+        trans.buf   = (void *)&tl[tlvIdx];
         trans.count = sizeof(MmwDemo_output_message_tl);
         UART_write(uartHandle, &trans);
 
-        for(index = 0; index < subFrameCfg->numRangeBins; index++)
+        for (index = 0U; index < subFrameCfg->numRangeBins; index++)
         {
             UART_Transaction_init(&trans);
-            trans.buf   = (uint8_t*)&detMatrix[index*subFrameCfg->numDopplerBins + maxDopIdx];
+            trans.buf   = (void *)&detMatrix[index * subFrameCfg->numDopplerBins + maxDopIdx];
             trans.count = sizeof(uint16_t);
             UART_write(uartHandle, &trans);
         }
@@ -1322,55 +1643,46 @@ static void MmwDemo_transmitProcessedOutput
     }
 
     /* Send data for range/Doppler heatmap */
-    if (pGuiMonSel->rangeDopplerHeatMap == 1)
+    if (pGuiMonSel->rangeDopplerHeatMap == 1U)
     {
         UART_Transaction_init(&trans);
-        trans.buf   = (uint8_t*)&tl[tlvIdx];
+        trans.buf   = (void *)&tl[tlvIdx];
         trans.count = sizeof(MmwDemo_output_message_tl);
         UART_write(uartHandle, &trans);
 
         UART_Transaction_init(&trans);
-        trans.buf   = (uint8_t*)detMatrix;
+        trans.buf   = (void *)detMatrix;
         trans.count = tl[tlvIdx].length;
         UART_write(uartHandle, &trans);
         tlvIdx++;
     }
 
     /* Send stats information */
-    if (pGuiMonSel->statsInfo == 1)
+    if (pGuiMonSel->statsInfo == 1U)
     {
         UART_Transaction_init(&trans);
-        trans.buf   = (uint8_t*)&tl[tlvIdx];
+        trans.buf   = (void *)&tl[tlvIdx];
         trans.count = sizeof(MmwDemo_output_message_tl);
         UART_write(uartHandle, &trans);
 
-        /* Address translation is done when buffer is received*/
-        UART_Transaction_init(&trans);
-        trans.buf   = (uint8_t*)timingInfo;
-        trans.count = tl[tlvIdx].length;
-        UART_write(uartHandle, &trans);
+        MmwDemo_uartWriteCached(uartHandle, (void *)timingInfo, tl[tlvIdx].length);
         tlvIdx++;
+
         UART_Transaction_init(&trans);
-        trans.buf   = (uint8_t*)&tl[tlvIdx];
+        trans.buf   = (void *)&tl[tlvIdx];
         trans.count = sizeof(MmwDemo_output_message_tl);
         UART_write(uartHandle, &trans);
-        UART_Transaction_init(&trans);
-        trans.buf   = (uint8_t*)&gMmwMssMCB.temperatureStats;
-        trans.count = tl[tlvIdx].length;
-        UART_write(uartHandle, &trans);
+
+        MmwDemo_uartWriteCached(uartHandle, (void *)&gMmwMssMCB.temperatureStats, tl[tlvIdx].length);
         tlvIdx++;
     }
 
-    /* Send padding bytes */
-    numPaddingBytes = MMWDEMO_OUTPUT_MSG_SEGMENT_LEN - (packetLen & (MMWDEMO_OUTPUT_MSG_SEGMENT_LEN-1));
-    if (numPaddingBytes<MMWDEMO_OUTPUT_MSG_SEGMENT_LEN)
+    /* Send zero-initialized padding bytes */
+    numPaddingBytes = MMWDEMO_OUTPUT_MSG_SEGMENT_LEN - (packetLen & (MMWDEMO_OUTPUT_MSG_SEGMENT_LEN - 1U));
+    if (numPaddingBytes < MMWDEMO_OUTPUT_MSG_SEGMENT_LEN)
     {
-        UART_Transaction_init(&trans);
-        trans.buf   = (uint8_t*)padding;
-        trans.count = numPaddingBytes;
-        UART_write(uartHandle, &trans);
+        MmwDemo_uartWriteCached(uartHandle, (void *)padding, numPaddingBytes);
     }
-
 }
 
 /**************************************************************************
@@ -1737,6 +2049,9 @@ static int32_t MmwDemo_dataPathConfig (void)
     objDetCommonCfg = &gMmwMssMCB.objDetCommonCfg;
     staticCfg = &objDetPreStartCfg.staticCfg;
 
+    /* Clear temporal hold and prior export timing across sensor reconfigs */
+    MmwDemo_resetSurfacePipeline();
+
     gMmwMssMCB.objDetCommonCfg.preStartCommonCfg.numSubFrames =
         MmwDemo_RFParser_getNumSubFrames(ptrCtrlCfg);
 
@@ -1838,6 +2153,9 @@ static int32_t MmwDemo_dataPathConfig (void)
         subFrameCfg->numAdcSamples = RFparserOutParams.numAdcSamples;
         subFrameCfg->numChirpsPerSubFrame = RFparserOutParams.numChirpsPerFrame;
         subFrameCfg->numVirtualAntennas = RFparserOutParams.numVirtualAntennas;
+
+        /* Derive physics parameters dynamically from RF config & antenna geometry (Rule 7 SSoT) */
+        MmwDemo_populateSubFramePhysics(subFrameCfg, &RFparserOutParams);
 
         /* Power Opt Config */
         staticCfg->powerOptCfg.isHwaDynamicClkGate    = gMmwMssMCB.powerOptCfg.isHwaDynamicClkGate;
@@ -2356,75 +2674,180 @@ static int32_t MmwDemo_registerChirpStartInterrupt(void)
  */
 void MmwDemo_handleObjectDetResult(void)
 {
-    DPC_ObjectDetection_ExecuteResult        *dpcResults;
+    MmwDemo_UartExportSnapshot              *snap = &gUartExportSnapshot;
     volatile uint32_t                        startTime;
+    uint32_t                                 cpuMHz;
+    uint32_t                                 exportStartCycles;
     uint8_t                                  nextSubFrameIdx;
     uint8_t                                  numSubFrames;
     uint8_t                                  currSubFrameIdx;
+    MmwDemo_SubFrameCfg                     *currSubFrameCfg;
     MmwDemo_SubFrameStats                    currSubFrameStats;
 
     static uint32_t prevInterFrameEndTimeStamp = 0U;
 
     /*****************************************************************
-     * datapath has finished frame processing, results are reported
+     * Operate solely on MSS_L2 snapshot captured prior to M4 DPM_send
      *****************************************************************/
-    dpcResults = gElevEstCfg.commonCfg.result;
+    DebugP_assert(snap->valid != 0U);
+    memset((void *)&currSubFrameStats, 0, sizeof(currSubFrameStats));
 
     numSubFrames = gMmwMssMCB.objDetCommonCfg.preStartCommonCfg.numSubFrames;
-    currSubFrameIdx = dpcResults->subFrameIdx;
+    currSubFrameIdx = snap->subFrameIdx;
+    DebugP_assert(currSubFrameIdx < RL_MAX_SUBFRAMES);
+    currSubFrameCfg = &gMmwMssMCB.subFrameCfg[currSubFrameIdx];
+
+    cpuMHz = SOC_getSelfCpuClk() / 1000000U;
+    DebugP_assert(cpuMHz > 0U);
 
     /*****************************************************************
-     * Transmit results
+     * Transmit / post-process results
      *****************************************************************/
     startTime = CycleCounterP_getCount32();
-
 
     /* Send out of CLI the range bias and phase config measurement if it was enabled. */
     if (gMmwMssMCB.objDetCommonCfg.preStartCommonCfg.measureRxChannelBiasCfg.enabled == 1)
     {
-        if(dpcResults->compRxChanBiasMeasurement != NULL)
+        if (snap->compRxChanBiasMeasurement != NULL)
         {
-            dpcResults->compRxChanBiasMeasurement = (Measure_compRxChannelBiasCfg *) AddrTranslateP_getLocalAddr((uint32_t)dpcResults->compRxChanBiasMeasurement);
-            MmwDemo_measurementResultOutput((void*)dpcResults->compRxChanBiasMeasurement);
-        }
-        else
-        {
-            /* DPC is not ready to ship the measurement results */
+            Measure_compRxChannelBiasCfg *compBias =
+                (Measure_compRxChannelBiasCfg *)AddrTranslateP_getLocalAddr((uint32_t)snap->compRxChanBiasMeasurement);
+            MmwDemo_measurementResultOutput((void *)compBias);
         }
     }
 
     /* DSS_CM4 CPU load is not computed as it is a nortos application. */
     currSubFrameStats.outputStats.interFrameCPULoad = 0;
-    currSubFrameStats.outputStats.activeFrameCPULoad= 0;
-    /* Update current frame stats */
-    currSubFrameStats.outputStats.interChirpProcessingMargin = dpcResults->stats->interChirpProcessingMargin;
-    currSubFrameStats.outputStats.interFrameProcessingTime = (dpcResults->stats->interFrameEndTimeStamp - dpcResults->stats->interFrameStartTimeStamp)/CM4_CLOCK_MHZ;
-    currSubFrameStats.outputStats.interFrameProcessingMargin = (dpcResults->stats->frameStartTimeStamp - prevInterFrameEndTimeStamp)/CM4_CLOCK_MHZ;
-    prevInterFrameEndTimeStamp = dpcResults->stats->interFrameEndTimeStamp;
+    currSubFrameStats.outputStats.activeFrameCPULoad = 0;
+    /* Update current frame stats from snapshot */
+    currSubFrameStats.outputStats.interChirpProcessingMargin = snap->stats.interChirpProcessingMargin;
+    currSubFrameStats.outputStats.interFrameProcessingTime   = (snap->stats.interFrameEndTimeStamp - snap->stats.interFrameStartTimeStamp) / CM4_CLOCK_MHZ;
+    currSubFrameStats.outputStats.interFrameProcessingMargin = (snap->stats.frameStartTimeStamp - prevInterFrameEndTimeStamp) / CM4_CLOCK_MHZ;
+    prevInterFrameEndTimeStamp = snap->stats.interFrameEndTimeStamp;
+
+    /* Run 3D adaptive DBSCAN + ObstacleBox + SurfaceStatus generation if enabled */
+    if (currSubFrameCfg->guiMonSel.customObstacles == 1U)
+    {
+        SurfaceCluster_Config clusterCfg;
+        SurfaceCluster_Output clusterOut;
+        uint32_t procStartCycles;
+        uint32_t procUs;
+        int32_t clusterRet;
+        uint16_t rawDopCount;
+
+        memset((void *)&clusterCfg, 0, sizeof(clusterCfg));
+        clusterCfg.minRangeMeters      = 0.0f;
+        clusterCfg.maxRangeMeters      = currSubFrameCfg->physics.rMax;
+        clusterCfg.minMovingSpeedMps   = currSubFrameCfg->surfaceMotionCfg.minMovingSpeedMps;
+        clusterCfg.clusterVelSpreadMps = currSubFrameCfg->surfaceMotionCfg.clusterVelSpreadMps;
+        clusterCfg.clusterRangeTolM    = currSubFrameCfg->surfaceMotionCfg.clusterRangeTolM;
+        clusterCfg.holdDurationSec     = currSubFrameCfg->surfaceMotionCfg.holdDurationSec;
+        clusterCfg.maxBoxes            = MMWDEMO_SURFACE_MAX_BOXES;
+        clusterCfg.minClusterPts       = SURFACE_CLUSTER_DEFAULT_MIN_PTS;
+        clusterCfg.motionMode          = currSubFrameCfg->surfaceMotionCfg.motionMode;
+
+        memset((void *)&gSurfaceStatus, 0, sizeof(gSurfaceStatus));
+        memset((void *)&clusterOut, 0, sizeof(clusterOut));
+        clusterOut.dynBoxes  = (SurfaceCluster_Box *)&gDynamicBoxes[0];
+        clusterOut.dynCap    = MMWDEMO_SURFACE_MAX_BOXES;
+        clusterOut.statBoxes = (SurfaceCluster_Box *)&gStaticBoxes[0];
+        clusterOut.statCap   = MMWDEMO_SURFACE_MAX_BOXES;
+        clusterOut.status    = (SurfaceCluster_Status *)&gSurfaceStatus;
+
+        rawDopCount = (snap->dopNumObjOut > 0xFFFFU) ? 0xFFFFU : (uint16_t)snap->dopNumObjOut;
+
+        procStartCycles = CycleCounterP_getCount32();
+        clusterRet = SurfaceCluster_process(
+            &gSurfaceClusterState,
+            &clusterCfg,
+            (const SurfaceCluster_Physics *)&currSubFrameCfg->physics,
+            (const void *)&snap->objOut[0],
+            sizeof(DPIF_PointCloudCartesian),
+            (const void *)&snap->objOutSideInfo[0],
+            sizeof(DPIF_PointCloudSideInfo),
+            (uint16_t)snap->numObjOut,
+            rawDopCount,
+            currSubFrameIdx,
+            &clusterOut);
+        procUs = (CycleCounterP_getCount32() - procStartCycles) / cpuMHz;
+
+        if (clusterRet == SURFACE_CLUSTER_OK)
+        {
+            gNumDynBoxesToSend  = clusterOut.numDynBoxes;
+            gNumStatBoxesToSend = clusterOut.numStatBoxes;
+        }
+        else
+        {
+            gNumDynBoxesToSend = 0U;
+            gNumStatBoxesToSend = 0U;
+            memset((void *)&gSurfaceStatus, 0, sizeof(gSurfaceStatus));
+            gSurfaceStatus.version       = MMWDEMO_SURFACE_STATUS_VERSION;
+            gSurfaceStatus.size          = sizeof(MmwDemo_SurfaceStatus);
+            gSurfaceStatus.framePeriodUs = (uint32_t)(currSubFrameCfg->physics.framePeriodSec * 1.0e6f + 0.5f);
+            gSurfaceStatus.flags         = MMWDEMO_SURFACE_PROCESS_ERROR;
+        }
+
+        gSurfaceStatus.processingUs = procUs;
+        if (procUs > gSurfaceTimingState.maxProcessingUs)
+        {
+            gSurfaceTimingState.maxProcessingUs = procUs;
+        }
+        gSurfaceStatus.maxProcessingUs = gSurfaceTimingState.maxProcessingUs;
+
+        if (gSurfaceTimingState.prevExportValid == 0U)
+        {
+            gSurfaceStatus.flags |= MMWDEMO_SURFACE_TIMING_UNVALIDATED;
+            gSurfaceStatus.previousExportUs          = 0U;
+            gSurfaceStatus.previousExportFrameNumber = 0U;
+        }
+        else
+        {
+            gSurfaceStatus.previousExportUs          = gSurfaceTimingState.prevExportUs;
+            gSurfaceStatus.previousExportFrameNumber = gSurfaceTimingState.prevExportFrameNumber;
+            if (gSurfaceTimingState.prevDeadlineExceeded != 0U)
+            {
+                gSurfaceStatus.flags |= MMWDEMO_SURFACE_PREVIOUS_DEADLINE;
+            }
+        }
+    }
+    else
+    {
+        gNumDynBoxesToSend = 0U;
+        gNumStatBoxesToSend = 0U;
+    }
 
 #ifdef LVDS_STREAM
-    if (gMmwMssMCB.subFrameCfg[currSubFrameIdx].lvdsStreamCfg.dataFmt !=
+    if (currSubFrameCfg->lvdsStreamCfg.dataFmt !=
              MMW_DEMO_LVDS_STREAM_CFG_DATAFMT_DISABLED)
     {
-        /* check Edma errors (which are considered fatal) for the current sub-frame's
-         * h/w session that is expected to be completed by now */
         MmwDemo_checkEdmaErrors();
-
-        /* Pend for completion of h/w session, generally this will not wait
-         * because of time spent doing inter-frame processing is expected to
-         * be bigger than the transmission of the h/w session */
         SemaphoreP_pend(&gMmwMssMCB.lvdsStream.hwFrameDoneSemHandle, SystemP_WAIT_FOREVER);
     }
 #endif
 
     /* Transmit processing results for the frame */
-    transmitStartTime = CycleCounterP_getCount32();
+    exportStartCycles = CycleCounterP_getCount32();
+    transmitStartTime = exportStartCycles;
     MmwDemo_transmitProcessedOutput(gMmwMssMCB.loggingUartHandle,
-                                    dpcResults,
+                                    snap,
                                     &currSubFrameStats.outputStats);
 
-    /* Update current frame transmit time */
-    currSubFrameStats.outputStats.transmitOutputTime = (CycleCounterP_getCount32() - startTime)/(SOC_getSelfCpuClk()/1000000U); /* In micro seconds */
+    {
+        uint32_t exportUs = (CycleCounterP_getCount32() - exportStartCycles) / cpuMHz;
+        uint32_t totalFrameUs = (CycleCounterP_getCount32() - startTime) / cpuMHz;
+        currSubFrameStats.outputStats.transmitOutputTime = totalFrameUs;
+
+        if (currSubFrameCfg->guiMonSel.customObstacles == 1U)
+        {
+            gSurfaceTimingState.prevExportUs          = exportUs;
+            gSurfaceTimingState.prevExportFrameNumber = snap->stats.frameStartIntCounter;
+            gSurfaceTimingState.prevDeadlineExceeded  =
+                ((gSurfaceStatus.framePeriodUs > 0U) && (totalFrameUs > gSurfaceStatus.framePeriodUs)) ? 1U : 0U;
+            gSurfaceTimingState.prevExportValid       = 1U;
+        }
+    }
+
+    snap->valid = 0U;
 
     nextSubFrameIdx = MmwDemo_getNextSubFrameIndx(currSubFrameIdx,   numSubFrames);
 
@@ -2478,12 +2901,17 @@ void mmwDemo_mssUartDataExportTask(void* args)
 
     while (1)
     {
+        DPC_ObjectDetection_ExecuteResult *result;
+        const DPIF_PointCloudCartesian    *srcObj;
+        const DPIF_PointCloudSideInfo     *srcSide;
+        const DPC_ObjectDetection_Stats   *srcStats;
+
         /* Export the Data: */
         SemaphoreP_pend(&gMmwMssMCB.UartExportSemHandle, SystemP_WAIT_FOREVER);
 
 #if MSS_AOA_ENABLED
         /* Perform the elevation estimation */
-        DPC_ObjectDetection_ExecuteResult *result = gElevEstCfg.commonCfg.result;
+        result = gElevEstCfg.commonCfg.result;
         DetObjParams *detObjList = (DetObjParams*)SOC_phyToVirt((uint32_t)result->detObjList);
         DPC_ObjDet_estimateXYZ(&gElevEstCfg, detObjList, result->objOut,
                                     result->dopNumObjOut,
@@ -2491,21 +2919,48 @@ void mmwDemo_mssUartDataExportTask(void* args)
 
         /* This is required to flush out L2. */
         CacheP_wbInvAll(CacheP_TYPE_ALLD);
+#else
+        result = gElevEstCfg.commonCfg.result;
 #endif
 
-        /* This is to ensure that AoA happens only in parallel with Range Proc and do not exceed after that. */
+        /* Snapshot CM4-shared results into private MSS_L2 buffer BEFORE releasing CM4 via DPM_send */
+        DebugP_assert(result != NULL);
+        DebugP_assert(result->subFrameIdx < RL_MAX_SUBFRAMES);
+        DebugP_assert(result->numObjOut <= MMWDEMO_SURFACE_MAX_POINTS);
+
+        srcObj   = (const DPIF_PointCloudCartesian *)AddrTranslateP_getLocalAddr((uint32_t)result->objOut);
+        srcSide  = (const DPIF_PointCloudSideInfo *)AddrTranslateP_getLocalAddr((uint32_t)result->objOutSideInfo);
+        srcStats = (const DPC_ObjectDetection_Stats *)AddrTranslateP_getLocalAddr((uint32_t)result->stats);
+
+        gUartExportSnapshot.subFrameIdx               = result->subFrameIdx;
+        gUartExportSnapshot.dopNumObjOut              = result->dopNumObjOut;
+        gUartExportSnapshot.numObjOut                 = result->numObjOut;
+        gUartExportSnapshot.detMatrixData             = result->detMatrix.data;
+        gUartExportSnapshot.compRxChanBiasMeasurement = result->compRxChanBiasMeasurement;
+        memcpy((void *)&gUartExportSnapshot.stats, (const void *)srcStats, sizeof(DPC_ObjectDetection_Stats));
+        if (gUartExportSnapshot.numObjOut > 0U)
+        {
+            memcpy((void *)&gUartExportSnapshot.objOut[0], (const void *)srcObj,
+                   sizeof(DPIF_PointCloudCartesian) * gUartExportSnapshot.numObjOut);
+            memcpy((void *)&gUartExportSnapshot.objOutSideInfo[0], (const void *)srcSide,
+                   sizeof(DPIF_PointCloudSideInfo) * gUartExportSnapshot.numObjOut);
+        }
+        gUartExportSnapshot.valid = 1U;
+
+        /* Release CM4 to run next frame only after MSS snapshot is complete */
         retVal = DPM_send(gMmwMssMCB.objDetDpmHandle, (void*)(&msg), sizeof(uint32_t), CSL_CORE_ID_M4SS0_1);
         DebugP_assert(0U == retVal);
 
 #ifdef ENET_STREAM
         if(gMmwMssMCB.enetCfg.streamEnable) {
 
-            gEnetStreamObjData.numObj = gElevEstCfg.commonCfg.result->numObjOut;
+            gEnetStreamObjData.numObj = gUartExportSnapshot.numObjOut;
             gEnetStreamObjData.dummy  = 0x0U;
 
-            gEnetStreamObjData.objData = (uint8_t*)(gElevEstCfg.commonCfg.result->objOut);
+            gEnetStreamObjData.objData = (uint8_t*)(&gUartExportSnapshot.objOut[0]);
             SemaphoreP_post(&objDataSemaphoreHandle);
 
+            gUartExportSnapshot.valid = 0U;
             gMmwMssMCB.stats.isLastFrameDataProcessed = true;
         }
 #else
@@ -2989,6 +3444,8 @@ void MmwDemo_stopSensor(void)
     /* Wait until DPM_stop is completed */
     SemaphoreP_pend(&gMmwMssMCB.DPMstopSemHandle, SystemP_WAIT_FOREVER);
 
+    MmwDemo_resetSurfacePipeline();
+
 #ifdef LVDS_STREAM
     /* Delete any active streaming session */
     if(gMmwMssMCB.lvdsStream.hwSessionHandle != NULL)
@@ -3056,7 +3513,7 @@ static void MmwDemo_platformInit(MmwDemo_platformCfg *config)
 {
     /* Initialize the DEMO configuration: */
     config->sysClockFrequency   = MSS_SYS_VCLK;
-    config->loggingBaudRate     = 892857;
+    config->loggingBaudRate     = gUartParams[CONFIG_UART1].baudRate;
     config->commandBaudRate     = 115200;
 
 }
@@ -3309,6 +3766,13 @@ static void MmwDemo_initTask(void* args)
 
     /* Platform specific configuration */
     MmwDemo_platformInit(&gMmwMssMCB.cfg.platformCfg);
+
+    for (i = 0; i < (int32_t)RL_MAX_SUBFRAMES; i++)
+    {
+        gMmwMssMCB.subFrameCfg[i].surfaceMotionCfg.motionMode      = MMWDEMO_SURFACE_MOTION_MOBILE;
+        gMmwMssMCB.subFrameCfg[i].surfaceMotionCfg.holdDurationSec = 0.2f;
+    }
+    MmwDemo_resetSurfacePipeline();
 
     /* Workaround for Errata ANA#46: Spurs caused due to data transfer activity */
     if (MmwDemo_registerChirpStartInterrupt() != 0)

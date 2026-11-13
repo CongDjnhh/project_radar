@@ -59,7 +59,7 @@
 #if MMWDEMO_TDM
 #include <ti/demo/awr2x44P/mmw_tdm/mss/mmw_mss.h>
 #else
-#include <ti/demo/awr2x44P/mmw_ddm/mss/mmw_mss.h>
+#include "mss/mmw_mss.h"
 #endif
 #elif SOC_AWR294X
 #include <ti/demo/awr294x/mmw/mss/mmw_mss.h>
