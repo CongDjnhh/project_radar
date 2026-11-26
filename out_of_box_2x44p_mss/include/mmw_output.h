@@ -96,6 +96,12 @@ typedef enum MmwDemo_output_message_type_e
     /*! @brief   Static 3D obstacle bounding boxes (ObstacleBox[]) */
     MMWDEMO_OUTPUT_MSG_STATIC_OBSTACLES = 22,
 
+    /*! @brief   Stage-2 detection selection A/B telemetry (MmwDemo_DetSelStats) */
+    MMWDEMO_OUTPUT_MSG_DETSEL_STATS = 23,
+
+    /*! @brief   Per-point Stage-2 grid & provenance metadata (DetSel_PointMeta[]) */
+    MMWDEMO_OUTPUT_MSG_DETSEL_META = 24,
+
     MMWDEMO_OUTPUT_MSG_MAX
 } MmwDemo_output_message_type;
 
@@ -326,6 +332,51 @@ typedef struct MmwDemo_DerivedPhysicsParams_t
 } MmwDemo_DerivedPhysicsParams;
 
 _Static_assert(sizeof(MmwDemo_DerivedPhysicsParams) == 60U, "MmwDemo_DerivedPhysicsParams ABI size mismatch");
+
+/**
+ * @brief Stage-2 Detection Selection (DetSel) A/B telemetry & per-point metadata (TLV 23 / TLV 24).
+ */
+#define MMWDEMO_DETSEL_STATS_VERSION      (1U)
+#define MMWDEMO_DETSEL_BUDGET_US          (300U)
+
+#define DETSEL_FLAG_TRUNCATED_793         (1U << 0)
+#define DETSEL_FLAG_CAP_GATE_HIT          (1U << 1)
+#define DETSEL_FLAG_UART_BOX_DROP         (1U << 2)
+#define DETSEL_FLAG_SEL_OVER_BUDGET       (1U << 3)
+
+/*! @brief TLV 23 v1, little-endian <HBB14H> (32 bytes). */
+typedef struct MmwDemo_DetSelStats_t
+{
+    uint16_t version;           /*!< = 1U */
+    uint8_t  mode;              /*!< 0: Baseline, 1: CandDump, 2: RegionGrow */
+    uint8_t  flags;             /*!< DETSEL_FLAG_* */
+    uint16_t stage1Cand;        /*!< Total Stage-1 candidates (outDopplerProc.numObjOut) */
+    uint16_t capHitGates;       /*!< Range gates hitting Stage-1 candidate storage cap */
+    uint16_t rangeCfarHitPre;   /*!< Candidates matching RangeCFAR pre-FoV */
+    uint16_t baselinePre;       /*!< Exact TI Baseline candidates pre-FoV */
+    uint16_t seedPre;           /*!< SEED count pre-FoV */
+    uint16_t grownPre;          /*!< GROWN count pre-FoV */
+    uint16_t finalPre;          /*!< Total candidates passed to estimateXYZ (result->dopNumObjOut) */
+    uint16_t baselinePost;      /*!< Exact TI Baseline points surviving AoA FoV (in TLV 1) */
+    uint16_t grownPost;         /*!< GROWN points surviving AoA FoV (in TLV 1) */
+    uint16_t finalPost;         /*!< Total points exported in TLV 1 (result->numObjOut) */
+    uint16_t cm4SelUs;          /*!< Stage-2 selector execution time on Cortex-M4F [us] */
+    uint16_t reserved[3];       /*!< Explicit padding to 32 bytes */
+} MmwDemo_DetSelStats;
+
+_Static_assert(sizeof(MmwDemo_DetSelStats) == 32U, "MmwDemo_DetSelStats ABI mismatch");
+
+/*! @brief TLV 24 per-point grid & provenance metadata aligned 1:1 with TLV 1 (8 bytes/point). */
+typedef struct DetSel_PointMeta_t
+{
+    uint16_t rangeIdx;
+    uint16_t dopIdxActual;
+    uint8_t  azimIdx;
+    uint8_t  tag;               /*!< DETSEL_TAG_* of corresponding point in TLV 1 */
+    uint16_t reserved;
+} DetSel_PointMeta;
+
+_Static_assert(sizeof(DetSel_PointMeta) == 8U, "DetSel_PointMeta ABI mismatch");
 
 #ifdef __cplusplus
 }

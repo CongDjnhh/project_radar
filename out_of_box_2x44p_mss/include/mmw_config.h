@@ -44,6 +44,7 @@
 #include <ti/control/mmwave/mmwave.h>
 #include <ti/common/syscommon.h>
 #include <ti/datapath/dpc/objectdetection/objdethwaDDMA/objectdetection.h>
+#include "include/detsel_common.h"
 
 #ifdef __cplusplus
 extern "C" {

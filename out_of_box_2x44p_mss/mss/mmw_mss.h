@@ -94,6 +94,7 @@ extern "C" {
  */
 #define MMWDEMO_GUIMONSEL_OFFSET                 (offsetof(MmwDemo_SubFrameCfg, guiMonSel))
 #define MMWDEMO_SURFACEMOTIONCFG_OFFSET          (offsetof(MmwDemo_SubFrameCfg, surfaceMotionCfg))
+#define MMWDEMO_DETSELCFG_OFFSET                 (offsetof(MmwDemo_SubFrameCfg, detSelCfg))
 #define MMWDEMO_ADCBUFCFG_OFFSET                 (offsetof(MmwDemo_SubFrameCfg, adcBufCfg))
 #ifdef LVDS_STREAM
 #define MMWDEMO_LVDSSTREAMCFG_OFFSET             (offsetof(MmwDemo_SubFrameCfg, lvdsStreamCfg))
@@ -203,6 +204,9 @@ typedef struct MmwDemo_SubFrameCfg_t
 
     /*! @brief 3D obstacle clustering motion and hold configuration from CLI */
     MmwDemo_SurfaceMotionCfg surfaceMotionCfg;
+
+    /*! @brief Stage-2 detection selection (Baseline / CandDump / RegionGrow) config from CLI */
+    DetSel_Cfg detSelCfg;
 
     /*! @brief Derived physical radar parameters populated by MmwDemo_dataPathConfig */
     MmwDemo_DerivedPhysicsParams physics;

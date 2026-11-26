@@ -889,6 +889,7 @@ static void MmwDemo_checkEdmaErrors(void);
 extern void MmwDemo_CLIInit(uint8_t taskPriority);
 extern MmwDemo_RFParserHwAttr MmwDemo_RFParserHwCfg;
 extern UART_Params gUartParams[CONFIG_UART_NUM_INSTANCES];
+extern DetSel_PointMeta gDetSelPointMeta[MMWDEMO_SURFACE_MAX_POINTS];
 DPC_ObjectDetection_ElevEstCfg gElevEstCfg = {0};
 
 /**
@@ -899,6 +900,8 @@ typedef struct MmwDemo_UartExportSnapshot_t
 {
     DPIF_PointCloudCartesian  objOut[MMWDEMO_SURFACE_MAX_POINTS];
     DPIF_PointCloudSideInfo   objOutSideInfo[MMWDEMO_SURFACE_MAX_POINTS];
+    DetSel_PointMeta          pointMeta[MMWDEMO_SURFACE_MAX_POINTS];
+    MmwDemo_DetSelStats       detSelStats;
     DPC_ObjectDetection_Stats stats;
     void                     *detMatrixData;
     void                     *compRxChanBiasMeasurement;
@@ -1010,6 +1013,7 @@ static void MmwDemo_setSubFramePendingState(MmwDemo_SubFrameCfg *subFrameCfg, ui
     {
         case MMWDEMO_GUIMONSEL_OFFSET:
         case MMWDEMO_SURFACEMOTIONCFG_OFFSET:
+        case MMWDEMO_DETSELCFG_OFFSET:
             // Do nothing
         break;
         case MMWDEMO_CFARDOPPLERCFG_OFFSET:
@@ -1300,6 +1304,9 @@ static void MmwDemo_transmitProcessedOutput
     uint32_t                      basePacketBytes;
     uint16_t                      dynCount = 0U;
     uint16_t                      statCount = 0U;
+    bool                          sendDetSelStats;
+    bool                          sendDetSelMeta;
+    MmwDemo_DetSelStats           detSelStatsOut;
     uint8_t                       padding[MMWDEMO_OUTPUT_MSG_SEGMENT_LEN];
     MmwDemo_output_message_tl     tl[MMWDEMO_OUTPUT_MSG_MAX];
     uint16_t                     *detMatrix = NULL;
@@ -1315,8 +1322,13 @@ static void MmwDemo_transmitProcessedOutput
     uint16_t numDopFFTSubBins = subFrameCfg->numDopplerBins / (numTxAnt + gMmwMssMCB.numEmptySubBands);
 
     /* Snapshot GUI Monitor configuration once so header and TX phases cannot drift */
-    guiMonSel  = subFrameCfg->guiMonSel;
-    pGuiMonSel = &guiMonSel;
+    guiMonSel       = subFrameCfg->guiMonSel;
+    pGuiMonSel      = &guiMonSel;
+    detSelStatsOut  = snap->detSelStats;
+    sendDetSelStats = (pGuiMonSel->customObstacles == 1U) ||
+                      (subFrameCfg->detSelCfg.mode != DETSEL_MODE_TI_BASELINE);
+    sendDetSelMeta  = (subFrameCfg->detSelCfg.mode != DETSEL_MODE_TI_BASELINE) &&
+                      (snap->numObjOut > 0U);
 
     memset((void *)&header, 0, sizeof(MmwDemo_output_message_header));
     memset((void *)padding, 0, sizeof(padding));
@@ -1356,6 +1368,15 @@ static void MmwDemo_transmitProcessedOutput
     if (pGuiMonSel->customObstacles == 1U)
     {
         basePacketBytes += sizeof(MmwDemo_output_message_tl) + sizeof(MmwDemo_SurfaceStatus);
+    }
+    if (sendDetSelStats)
+    {
+        basePacketBytes += sizeof(MmwDemo_output_message_tl) + sizeof(MmwDemo_DetSelStats);
+    }
+    if (sendDetSelMeta)
+    {
+        basePacketBytes += sizeof(MmwDemo_output_message_tl) +
+                           (sizeof(DetSel_PointMeta) * snap->numObjOut);
     }
     if (pGuiMonSel->logMagRange != 0U)
     {
@@ -1408,6 +1429,7 @@ static void MmwDemo_transmitProcessedOutput
                 {
                     dynCount = (uint16_t)fitDyn;
                     gSurfaceStatus.flags |= MMWDEMO_SURFACE_UART_LIMIT;
+                    detSelStatsOut.flags |= DETSEL_FLAG_UART_BOX_DROP;
                 }
                 if (dynCount > 0U)
                 {
@@ -1423,6 +1445,7 @@ static void MmwDemo_transmitProcessedOutput
                 {
                     statCount = (uint16_t)fitStat;
                     gSurfaceStatus.flags |= MMWDEMO_SURFACE_UART_LIMIT;
+                    detSelStatsOut.flags |= DETSEL_FLAG_UART_BOX_DROP;
                 }
             }
         }
@@ -1463,6 +1486,20 @@ static void MmwDemo_transmitProcessedOutput
     {
         tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_SURFACE_STATUS;
         tl[tlvIdx].length = sizeof(MmwDemo_SurfaceStatus);
+        packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
+        tlvIdx++;
+    }
+    if (sendDetSelStats)
+    {
+        tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_DETSEL_STATS;
+        tl[tlvIdx].length = sizeof(MmwDemo_DetSelStats);
+        packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
+        tlvIdx++;
+    }
+    if (sendDetSelMeta)
+    {
+        tl[tlvIdx].type = MMWDEMO_OUTPUT_MSG_DETSEL_META;
+        tl[tlvIdx].length = sizeof(DetSel_PointMeta) * snap->numObjOut;
         packetLen += sizeof(MmwDemo_output_message_tl) + tl[tlvIdx].length;
         tlvIdx++;
     }
@@ -1602,6 +1639,32 @@ static void MmwDemo_transmitProcessedOutput
 
         MmwDemo_uartWriteCached(uartHandle, (void *)&gSurfaceStatus,
                                 sizeof(MmwDemo_SurfaceStatus));
+        tlvIdx++;
+    }
+
+    /* Send Stage-2 Detection Selection Telemetry TLV 23 */
+    if (sendDetSelStats)
+    {
+        UART_Transaction_init(&trans);
+        trans.buf   = (void *)&tl[tlvIdx];
+        trans.count = sizeof(MmwDemo_output_message_tl);
+        UART_write(uartHandle, &trans);
+
+        MmwDemo_uartWriteCached(uartHandle, (void *)&detSelStatsOut,
+                                sizeof(MmwDemo_DetSelStats));
+        tlvIdx++;
+    }
+
+    /* Send Per-Point Stage-2 Grid & Provenance Metadata TLV 24 */
+    if (sendDetSelMeta)
+    {
+        UART_Transaction_init(&trans);
+        trans.buf   = (void *)&tl[tlvIdx];
+        trans.count = sizeof(MmwDemo_output_message_tl);
+        UART_write(uartHandle, &trans);
+
+        MmwDemo_uartWriteCached(uartHandle, (void *)&snap->pointMeta[0],
+                                sizeof(DetSel_PointMeta) * snap->numObjOut);
         tlvIdx++;
     }
 
@@ -1780,6 +1843,7 @@ static int32_t MmwDemo_DPM_ioctl_blocking
     {
         case DPC_OBJDET_IOCTL__STATIC_PRE_START_COMMON_CFG:
         case DPC_OBJDET_IOCTL__STATIC_PRE_START_CFG:
+        case DPC_OBJDET_IOCTL__CUSTOM_DETSEL_CFG:
             retVal = DPM_send(handle, (void *)arg, (uint16_t)argLen, CSL_CORE_ID_M4SS0_1);
             break;
         case DPC_OBJDET_IOCTL__STATIC_PRE_START_ELEVEST_CFG:
@@ -2273,6 +2337,34 @@ static int32_t MmwDemo_dataPathConfig (void)
             /* Copy out the DPC Static cfg params */
 
             staticCfg->cfarCfg.subFrameNum = subFrameIndx;
+
+            /* Send Stage-2 DetSel configuration to CM4 BEFORE in-place Doppler CFAR Q11 conversion */
+            {
+                DetSel_Cfg detCfgMsg = subFrameCfg->detSelCfg;
+                float stage1DopplerDb = (float)subFrameCfg->datapathStaticCfg.cfarCfg.cfg.thresholdScale /
+                                        (float)MMWDEMO_CFAR_THRESHOLD_ENCODING_FACTOR;
+                detCfgMsg.subFrameIdx = (uint8_t)subFrameIndx;
+                if (detCfgMsg.baselineThrDb <= 0.0f)
+                {
+                    detCfgMsg.baselineThrDb = stage1DopplerDb;
+                }
+                if ((detCfgMsg.mode != DETSEL_MODE_TI_BASELINE) &&
+                    (subFrameCfg->datapathStaticCfg.rangeCfarCfg.cfg.isEnabled == 0U))
+                {
+                    DebugP_log("Error: detSelectCfg mode %u requires Range CFAR enabled\n",
+                               (uint32_t)detCfgMsg.mode);
+                    MmwDemo_debugAssert(0);
+                }
+                errCode = MmwDemo_DPM_ioctl_blocking(gMmwMssMCB.objDetDpmHandle,
+                                                     DPC_OBJDET_IOCTL__CUSTOM_DETSEL_CFG,
+                                                     &detCfgMsg,
+                                                     sizeof(DetSel_Cfg));
+                if (errCode < 0)
+                {
+                    DebugP_log("Error: Unable to send DPC_OBJDET_IOCTL__CUSTOM_DETSEL_CFG [Error:%d]\n", errCode);
+                    goto exit;
+                }
+            }
 
             subFrameCfg->datapathStaticCfg.cfarCfg.cfg.thresholdScale =
                 MmwDemo_convertDopplerCfarToThresh(subFrameCfg->datapathStaticCfg.cfarCfg.cfg.thresholdScale); //staticCfg->numVirtualAntennas);
@@ -2910,9 +3002,35 @@ void mmwDemo_mssUartDataExportTask(void* args)
         SemaphoreP_pend(&gMmwMssMCB.UartExportSemHandle, SystemP_WAIT_FOREVER);
 
 #if MSS_AOA_ENABLED
+        uint16_t rangeCfarHitPre = 0U;
+        uint16_t baselinePre     = 0U;
+        uint16_t seedPre         = 0U;
+        uint16_t grownPre        = 0U;
+        uint16_t baselinePost    = 0U;
+        uint16_t grownPost       = 0U;
+        uint32_t objIdx;
+
         /* Perform the elevation estimation */
         result = gElevEstCfg.commonCfg.result;
+        DebugP_assert(result != NULL);
+        CacheP_inv((void *)result, sizeof(DPC_ObjectDetection_ExecuteResult), CacheP_TYPE_ALLD);
         DetObjParams *detObjList = (DetObjParams*)SOC_phyToVirt((uint32_t)result->detObjList);
+        if (result->dopNumObjOut > 0U)
+        {
+            CacheP_inv((void *)detObjList,
+                       result->dopNumObjOut * sizeof(DetObjParams),
+                       CacheP_TYPE_ALLD);
+        }
+
+        for (objIdx = 0U; objIdx < result->dopNumObjOut; objIdx++)
+        {
+            uint8_t tag = (uint8_t)((detObjList[objIdx].dopIdx >> DETSEL_TAG_SHIFT) & 0xFFUL);
+            if ((tag & DETSEL_TAG_RANGECFAR_HIT) != 0U) { rangeCfarHitPre++; }
+            if ((tag & DETSEL_TAG_BASELINE) != 0U)      { baselinePre++; }
+            if ((tag & DETSEL_TAG_SEED) != 0U)          { seedPre++; }
+            if ((tag & DETSEL_TAG_GROWN) != 0U)         { grownPre++; }
+        }
+
         DPC_ObjDet_estimateXYZ(&gElevEstCfg, detObjList, result->objOut,
                                     result->dopNumObjOut,
                                     &result->numObjOut);
@@ -2920,6 +3038,13 @@ void mmwDemo_mssUartDataExportTask(void* args)
         /* This is required to flush out L2. */
         CacheP_wbInvAll(CacheP_TYPE_ALLD);
 #else
+        uint16_t rangeCfarHitPre = 0U;
+        uint16_t baselinePre     = 0U;
+        uint16_t seedPre         = 0U;
+        uint16_t grownPre        = 0U;
+        uint16_t baselinePost    = 0U;
+        uint16_t grownPost       = 0U;
+        uint32_t objIdx;
         result = gElevEstCfg.commonCfg.result;
 #endif
 
@@ -2931,6 +3056,7 @@ void mmwDemo_mssUartDataExportTask(void* args)
         srcObj   = (const DPIF_PointCloudCartesian *)AddrTranslateP_getLocalAddr((uint32_t)result->objOut);
         srcSide  = (const DPIF_PointCloudSideInfo *)AddrTranslateP_getLocalAddr((uint32_t)result->objOutSideInfo);
         srcStats = (const DPC_ObjectDetection_Stats *)AddrTranslateP_getLocalAddr((uint32_t)result->stats);
+        CacheP_inv((void *)srcStats, sizeof(DPC_ObjectDetection_Stats), CacheP_TYPE_ALLD);
 
         gUartExportSnapshot.subFrameIdx               = result->subFrameIdx;
         gUartExportSnapshot.dopNumObjOut              = result->dopNumObjOut;
@@ -2944,6 +3070,49 @@ void mmwDemo_mssUartDataExportTask(void* args)
                    sizeof(DPIF_PointCloudCartesian) * gUartExportSnapshot.numObjOut);
             memcpy((void *)&gUartExportSnapshot.objOutSideInfo[0], (const void *)srcSide,
                    sizeof(DPIF_PointCloudSideInfo) * gUartExportSnapshot.numObjOut);
+#if MSS_AOA_ENABLED
+            memcpy((void *)&gUartExportSnapshot.pointMeta[0], (const void *)&gDetSelPointMeta[0],
+                   sizeof(DetSel_PointMeta) * gUartExportSnapshot.numObjOut);
+            for (objIdx = 0U; objIdx < gUartExportSnapshot.numObjOut; objIdx++)
+            {
+                uint8_t tag = gUartExportSnapshot.pointMeta[objIdx].tag;
+                if ((tag & DETSEL_TAG_BASELINE) != 0U) { baselinePost++; }
+                if ((tag & DETSEL_TAG_GROWN) != 0U)    { grownPost++; }
+            }
+#endif
+        }
+
+        /* Unpack CM4 Stage-2 telemetry from interChirpProcessingMargin and restore TLV 6 field to 0 */
+        {
+            uint32_t packedCm4  = gUartExportSnapshot.stats.interChirpProcessingMargin;
+            uint16_t stage1Cand = DETSEL_UNPACK_STAGE1_CNT(packedCm4);
+            uint16_t capGates   = DETSEL_UNPACK_CAP_GATES(packedCm4);
+            uint16_t cm4SelUs   = DETSEL_UNPACK_SEL_US(packedCm4);
+            uint8_t  truncFlag  = DETSEL_UNPACK_TRUNC_FLAG(packedCm4);
+            uint8_t  selFlags   = 0U;
+
+            gUartExportSnapshot.stats.interChirpProcessingMargin = 0U;
+
+            if (truncFlag != 0U)                    { selFlags |= DETSEL_FLAG_TRUNCATED_793; }
+            if (capGates > 0U)                      { selFlags |= DETSEL_FLAG_CAP_GATE_HIT; }
+            if (cm4SelUs > MMWDEMO_DETSEL_BUDGET_US){ selFlags |= DETSEL_FLAG_SEL_OVER_BUDGET; }
+
+            memset((void *)&gUartExportSnapshot.detSelStats, 0, sizeof(MmwDemo_DetSelStats));
+            gUartExportSnapshot.detSelStats.version         = MMWDEMO_DETSEL_STATS_VERSION;
+            gUartExportSnapshot.detSelStats.mode            = gMmwMssMCB.subFrameCfg[result->subFrameIdx].detSelCfg.mode;
+            gUartExportSnapshot.detSelStats.flags           = selFlags;
+            gUartExportSnapshot.detSelStats.stage1Cand      = stage1Cand;
+            gUartExportSnapshot.detSelStats.capHitGates     = capGates;
+            gUartExportSnapshot.detSelStats.rangeCfarHitPre = rangeCfarHitPre;
+            gUartExportSnapshot.detSelStats.baselinePre     = baselinePre;
+            gUartExportSnapshot.detSelStats.seedPre         = seedPre;
+            gUartExportSnapshot.detSelStats.grownPre        = grownPre;
+            gUartExportSnapshot.detSelStats.finalPre        = (result->dopNumObjOut > 0xFFFFUL) ?
+                                                              0xFFFFU : (uint16_t)result->dopNumObjOut;
+            gUartExportSnapshot.detSelStats.baselinePost    = baselinePost;
+            gUartExportSnapshot.detSelStats.grownPost       = grownPost;
+            gUartExportSnapshot.detSelStats.finalPost       = (uint16_t)gUartExportSnapshot.numObjOut;
+            gUartExportSnapshot.detSelStats.cm4SelUs        = cm4SelUs;
         }
         gUartExportSnapshot.valid = 1U;
 

@@ -83,6 +83,7 @@ static int32_t MmwDemo_CLISensorStart (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLISensorStop (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLIGuiMonSel (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLISurfaceMotionCfg (int32_t argc, char* argv[]);
+static int32_t MmwDemo_CLIDetSelectCfg (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLIADCBufCfg (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLIAoAFovCfg (int32_t argc, char* argv[]);
 static int32_t MmwDemo_CLICompressionCfg (int32_t argc, char* argv[]);
@@ -565,6 +566,90 @@ static int32_t MmwDemo_CLISurfaceMotionCfg (int32_t argc, char* argv[])
 
     MmwDemo_CfgUpdate((void *)&surfaceCfg, MMWDEMO_SURFACEMOTIONCFG_OFFSET,
         sizeof(MmwDemo_SurfaceMotionCfg), (int8_t)sf);
+
+    return 0;
+}
+
+/**
+ *  @b Description
+ *  @n
+ *      CLI handler for Stage-2 detection selection configuration:
+ *      detSelectCfg <subFrameIdx|-1> <mode 0|1|2> <baselineThrDb>
+ *                   [growThrDb sidelobeGuardDb growRangeM growDopplerMps growAzimBeams maxGrowHops]
+ */
+static int32_t MmwDemo_CLIDetSelectCfg (int32_t argc, char* argv[])
+{
+    DetSel_Cfg detCfg;
+    int32_t sf = 0;
+    int32_t mode = 0;
+    int32_t maxHops = 3;
+    float baseThrDb = 24.0f;
+    float growThrDb = 15.0f;
+    float sidelobeDb = 18.0f;
+    float growRangeM = 0.20f;
+    float growDopplerMps = 0.25f;
+    float growAzimBeams = 1.0f;
+
+    if (gMmwMssMCB.sensorState == MmwDemo_SensorState_STARTED)
+    {
+        CLI_write("Error: detSelectCfg requires sensorStop\n");
+        return -1;
+    }
+
+    if (((argc != 4) && (argc != 10)) ||
+        (MmwDemo_CLIParseInt32(argv[1], MMWDEMO_SUBFRAME_NUM_FRAME_LEVEL_CONFIG, (int32_t)RL_MAX_SUBFRAMES - 1, &sf) != 0) ||
+        (MmwDemo_CLIParseInt32(argv[2], 0, (int32_t)DETSEL_MODE_REGION_GROW, &mode) != 0) ||
+        (MmwDemo_CLIParseFloat(argv[3], 0.01f, &baseThrDb) != 0) ||
+        (baseThrDb > 100.0f))
+    {
+        CLI_write("Error: detSelectCfg <subFrameIdx|-1> <mode 0|1|2> <baselineThrDb> "
+                  "<growThrDb> <sidelobeGuardDb> <growRangeM> <growDopplerMps> <growAzimBeams> <maxGrowHops>\n");
+        return -1;
+    }
+
+    if (argc == 10)
+    {
+        if ((MmwDemo_CLIParseFloat(argv[4], 0.0f, &growThrDb) != 0) ||
+            (MmwDemo_CLIParseFloat(argv[5], 0.0f, &sidelobeDb) != 0) ||
+            (MmwDemo_CLIParseFloat(argv[6], 0.0f, &growRangeM) != 0) ||
+            (MmwDemo_CLIParseFloat(argv[7], 0.0f, &growDopplerMps) != 0) ||
+            (MmwDemo_CLIParseFloat(argv[8], 0.0f, &growAzimBeams) != 0) ||
+            (MmwDemo_CLIParseInt32(argv[9], 0, 1024, &maxHops) != 0) ||
+            (sidelobeDb > 100.0f))
+        {
+            CLI_write("Error: Invalid detSelectCfg numeric parameters\n");
+            return -1;
+        }
+    }
+    else if (mode == (int32_t)DETSEL_MODE_REGION_GROW)
+    {
+        CLI_write("Error: detSelectCfg mode 2 (RegionGrow) requires all 9 arguments\n");
+        return -1;
+    }
+
+    if (mode == (int32_t)DETSEL_MODE_REGION_GROW)
+    {
+        if ((growThrDb <= 0.0f) || (growThrDb > baseThrDb) ||
+            (growRangeM <= 0.0f) || (growDopplerMps <= 0.0f) ||
+            (growAzimBeams <= 0.0f) || (maxHops < 1))
+        {
+            CLI_write("Error: Mode 2 requires 0 < growThrDb <= baselineThrDb, positive radii, and maxGrowHops >= 1\n");
+            return -1;
+        }
+    }
+
+    memset((void *)&detCfg, 0, sizeof(DetSel_Cfg));
+    detCfg.mode            = (uint8_t)mode;
+    detCfg.baselineThrDb   = baseThrDb;
+    detCfg.growThrDb       = growThrDb;
+    detCfg.sidelobeGuardDb = sidelobeDb;
+    detCfg.growRangeM      = growRangeM;
+    detCfg.growDopplerMps  = growDopplerMps;
+    detCfg.growAzimBeams   = growAzimBeams;
+    detCfg.maxGrowHops     = (uint16_t)maxHops;
+
+    MmwDemo_CfgUpdate((void *)&detCfg, MMWDEMO_DETSELCFG_OFFSET,
+        sizeof(DetSel_Cfg), (int8_t)sf);
 
     return 0;
 }
@@ -2050,6 +2135,11 @@ void MmwDemo_CLIInit (uint8_t taskPriority)
     cliCfg.tableEntry[cnt].cmd            = "surfaceMotionCfg";
     cliCfg.tableEntry[cnt].helpString     = "<subFrameIdx|-1> <0 mobile|1 fixed> [minMovingSpeedMps] [clusterVelSpreadMps] [clusterRangeTolM] [holdDurationSec]";
     cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLISurfaceMotionCfg;
+    cnt++;
+
+    cliCfg.tableEntry[cnt].cmd            = "detSelectCfg";
+    cliCfg.tableEntry[cnt].helpString     = "<subFrameIdx|-1> <mode> <baselineThrDb> <growThrDb> <sidelobeGuardDb> <growRangeM> <growDopplerMps> <growAzimBeams> <maxGrowHops>";
+    cliCfg.tableEntry[cnt].cmdHandlerFxn  = MmwDemo_CLIDetSelectCfg;
     cnt++;
 
     cliCfg.tableEntry[cnt].cmd            = "cfarCfg";

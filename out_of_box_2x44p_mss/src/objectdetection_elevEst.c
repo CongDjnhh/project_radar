@@ -72,7 +72,11 @@
 
 #ifdef SUBSYS_MSS
 #include <kernel/dpl/CacheP.h>
+#include "include/mmw_output.h"
+#include "include/detsel_common.h"
 #define divsp(x,y) ((x)/(y))
+
+DetSel_PointMeta gDetSelPointMeta[MMWDEMO_SURFACE_MAX_POINTS] __attribute__((aligned(8)));
 #endif
 /*! @brief  Complex data type, natural for C66x complex
  * multiplication instructions. */
@@ -1013,6 +1017,16 @@ extern int32_t DPC_ObjDet_estimateXYZ(DPC_ObjectDetection_ElevEstCfg * restrict 
 
                     result->objOutSideInfo[ValidObjIdx].snr = 10 * (int16_t)snrdB;
                     result->objOutSideInfo[ValidObjIdx].noise = 10 * (int16_t)noisedB;
+
+                    if (ValidObjIdx < MMWDEMO_SURFACE_MAX_POINTS)
+                    {
+                        gDetSelPointMeta[ValidObjIdx].rangeIdx     = (uint16_t)detObjList[objIdx].rangeIdx;
+                        gDetSelPointMeta[ValidObjIdx].dopIdxActual = (uint16_t)detObjList[objIdx].dopIdxActual;
+                        gDetSelPointMeta[ValidObjIdx].azimIdx      = (uint8_t)detObjList[objIdx].azimIdx;
+                        gDetSelPointMeta[ValidObjIdx].tag          =
+                            (uint8_t)((detObjList[objIdx].dopIdx >> DETSEL_TAG_SHIFT) & 0xFFUL);
+                        gDetSelPointMeta[ValidObjIdx].reserved     = 0U;
+                    }
 
                     /* Increment output list index */
                     ValidObjIdx++;

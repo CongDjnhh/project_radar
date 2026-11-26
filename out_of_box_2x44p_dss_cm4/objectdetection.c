@@ -88,6 +88,12 @@
 /* Obj Det instance etc */
 #include <ti/datapath/dpc/objectdetection/objdethwaDDMA/include/objectdetectioninternal.h>
 #include <ti/datapath/dpc/objectdetection/objdethwaDDMA/objectdetection.h>
+#include "detsel_common.h"
+#include "detsel_region_grow.h"
+
+#ifndef CM4_CLOCK_MHZ
+#define CM4_CLOCK_MHZ (200U)
+#endif
 
 /* Power Optimization configurations */
 #if defined(SOC_AWR2X44P)
@@ -182,6 +188,11 @@ timingInfo gTimingInfo;
 
 /* CFAR Threshold LUT programmed by Common Config based on the maximum number of range bins acrosss frames */
 static uint32_t *gCfarThreshScaleLUT = NULL;
+
+/* Stage-2 Detection Selection per-subframe config & DSS_L3 scratch buffers */
+static DetSel_Cfg         gDetSelCfg[RL_MAX_SUBFRAMES];
+static DetSel_ScratchBuf *gDetSelScratch[RL_MAX_SUBFRAMES];
+static uint32_t           gDetSelLastPackedStats = 0U;
 
 ObjDetObj gObjDetObj __attribute__((aligned(HeapP_BYTE_ALIGNMENT))) 
 #if SUBSYS_M4
@@ -1667,10 +1678,16 @@ static int32_t DPC_ObjDet_intersectDopAndRangeCFAR(
     uint32_t *finalNumDetObjs
 )
 {
-    int32_t retVal=0;
+    int32_t retVal = 0;
     uint16_t valSubBinObj, cfarListStartIdx;
-    uint32_t isValidObj, objIdx, dopIdx, finalNumObjs = 0;
-    uint16_t * rangeCfarObjPerDopList;
+    uint32_t isValidObj, objIdx, dopIdx, finalNumObjs = 0U;
+    uint16_t *rangeCfarObjPerDopList;
+    uint32_t selStartCycles = CycleCounterP_getCount32();
+    uint32_t capGates = 0U;
+    uint8_t  truncFlag = 0U;
+    uint8_t  subFrameIdx = objDetObj->subFrameIndx;
+    const DetSel_Cfg *detCfg;
+    DetSel_ScratchBuf *scratch;
     uint32_t baseAddr = EDMA_getBaseAddr(objDetObj->edmaHandle[0]);
     uint32_t edmaSrcAddr, edmaDstAddr, edmaTrigReg, edmaIntrStatusReg, edmaClrIntrStatusReg, channelMask;
     edmaSrcAddr = baseAddr + EDMA_TPCC_OPT(objDetObj->edmaDetObjs.channel) + 0x4U;
@@ -1680,84 +1697,255 @@ static int32_t DPC_ObjDet_intersectDopAndRangeCFAR(
     edmaClrIntrStatusReg = baseAddr + EDMA_TPCC_ICR_RN(0U);
     channelMask = (uint32_t)1U << objDetObj->edmaDetObjs.channel;
 
-    /* As the detected object list is written on radar cube, find the intersection of range-cfar
-       and doppler proc stage here, and copy the result to Local Scratch Buf before triggering range proc.
-       As range processing will result in overwritten of detObjList by the radar cube.
-       This step is required as Elev Estimation has to happen in parallel with Range Proc. */
-    if(subFrmObj->staticCfg.rangeCfarCfg.cfg.isEnabled)
+    DebugP_assert(subFrameIdx < RL_MAX_SUBFRAMES);
+    detCfg  = &gDetSelCfg[subFrameIdx];
+    scratch = gDetSelScratch[subFrameIdx];
+
+    /* As the detected object list is written on radar cube, find the Stage-2 selection
+       (TI RangeCFAR intersection, Candidate Dump, or Azimuth-Guided Hysteresis Region Growing)
+       and copy the selected objects to finalDetObjList before triggering next-frame RangeProc. */
+    if (subFrmObj->staticCfg.rangeCfarCfg.cfg.isEnabled)
     {
-        rangeCfarObjPerDopList = (uint16_t *)subFrmObj->dpuCfg.rangeCfarCfg.res.rangeCfarNumObjPerDopplerBinBuf;
-        for (objIdx = 0; objIdx < dopNumObjOut; objIdx++)
+        uint16_t maxFinal = (subFrmObj->dpuCfg.dopplerCfg.hwRes.finalMaxNumDetObjs > DETSEL_FINAL_MAX_OBJS) ?
+                            DETSEL_FINAL_MAX_OBJS :
+                            (uint16_t)subFrmObj->dpuCfg.dopplerCfg.hwRes.finalMaxNumDetObjs;
+
+        if (dopNumObjOut > 0U)
         {
-            dopIdx = detObjList[objIdx].dopIdx;
+            int16_t  baseThrQ11 = (detCfg->baselineThrDb > 0.0f) ?
+                                  DetSel_dbToQ11(detCfg->baselineThrDb) :
+                                  (int16_t)subFrmObj->staticCfg.cfarCfg.cfg.thresholdScale;
+            uint32_t prevRangeIdx = detObjList[0].rangeIdx;
+            uint32_t gateStartObjIdx = 0U;
+            uint32_t cntInGate = 0U;
+            uint32_t k;
 
-            if (dopIdx > 0U)
-            {
-                /* Obtain the number of objects for a sub bin in the Range CFAR list by
-                * subtracting two consecutive elements from the cummulative distribution */
-                valSubBinObj = rangeCfarObjPerDopList[dopIdx] - rangeCfarObjPerDopList[dopIdx - 1U];
-                cfarListStartIdx = rangeCfarObjPerDopList[dopIdx - 1U];
-            }
-            else
-            {
-                /* For the 0th sub bin, do not perform a subtraction */
-                valSubBinObj = rangeCfarObjPerDopList[dopIdx];
-                cfarListStartIdx = 0;
-            }
+            DebugP_assert(scratch != NULL);
+            DebugP_assert(dopNumObjOut <= DETSEL_MAX_CANDIDATES);
 
-            /* If the sub bin has valid objects in the range CFAR list, check whether the
-            * object currently being looked at (from the Doppler CFAR list), is also available
-            * in the range CFAR list. cfarListStartIdx tells us where to start searching for in
-            * the range CFAR list, and valSubBinObj tells us how many elements to search in.
-            * This saves computation time. */
-            if (valSubBinObj)
-            {
-                isValidObj = isObjInRangeAndDopplerList((uint32_t)detObjList[objIdx].rangeIdx,
-                                                        detObjList[objIdx].dopIdx,
-                                                        (RangeCfarListObj *)&subFrmObj->dpuCfg.rangeCfarCfg.res.rangeCfarList[cfarListStartIdx],
-                                                        valSubBinObj);
+            rangeCfarObjPerDopList = (uint16_t *)subFrmObj->dpuCfg.rangeCfarCfg.res.rangeCfarNumObjPerDopplerBinBuf;
 
-                if(isValidObj)
+            /* Phase 1a: Classify Stage-1 candidates & count per-range-gate cap hits */
+            for (objIdx = 0U; objIdx < dopNumObjOut; objIdx++)
+            {
+                uint32_t curRangeIdx = detObjList[objIdx].rangeIdx;
+                int32_t  lutOff = 0;
+                int32_t  rawMargin;
+                int16_t  marginQ11;
+                uint8_t  initTag = 0U;
+
+                if (curRangeIdx != prevRangeIdx)
                 {
-                    /* Check the completion of previous transfer before triggering the next. */
-                    if(finalNumObjs > 0U)
+                    uint32_t availBytes = subFrmObj->dpuCfg.dopplerCfg.hwRes.maxObjListPerRGateSize * (prevRangeIdx + 1U);
+                    uint32_t usedBefore = gateStartObjIdx * (uint32_t)sizeof(DetObjParams);
+                    uint32_t gateCap    = (availBytes > usedBefore) ?
+                                          ((availBytes - usedBefore) / (uint32_t)sizeof(DetObjParams)) : 0U;
+                    if (gateCap > (uint32_t)MAX_NUM_OBJ_PER_RANGE_BIN)
                     {
-                        while(((*(volatile uint32_t*)((uint32_t)edmaIntrStatusReg)) & (channelMask)) != (channelMask))
-                        {
-                            /* wait */
-                        }
-                        *(volatile uint32_t*)((uint32_t)edmaClrIntrStatusReg) = channelMask;
+                        gateCap = (uint32_t)MAX_NUM_OBJ_PER_RANGE_BIN;
                     }
-
-
-                    /* EDMA this obj to L2 for further processing */
-
-                    /* update src address */
-                    *(volatile uint32_t*)((uint32_t)edmaSrcAddr) = (uint32_t)SOC_virtToPhy((void*)&subFrmObj->dpuCfg.dopplerCfg.hwRes.detObjList[objIdx]);
-
-                    /* update dst address */
-                    *(volatile uint32_t*)((uint32_t)edmaDstAddr) = (uint32_t)SOC_virtToPhy((void*)&subFrmObj->dpuCfg.dopplerCfg.hwRes.finalDetObjList[finalNumObjs]);
-
-                    /* trigger */
-                    *(volatile uint32_t*)((uint32_t)edmaTrigReg) = channelMask;
-
-                    finalNumObjs++;
-                    if(finalNumObjs >= subFrmObj->dpuCfg.dopplerCfg.hwRes.finalMaxNumDetObjs)
+                    if ((cntInGate > 0U) && (cntInGate >= gateCap))
                     {
-                        break;
+                        capGates++;
+                    }
+                    prevRangeIdx    = curRangeIdx;
+                    gateStartObjIdx = objIdx;
+                    cntInGate       = 0U;
+                }
+                cntInGate++;
+
+                dopIdx = detObjList[objIdx].dopIdx & DETSEL_DOPIDX_MASK;
+                if (dopIdx > 0U)
+                {
+                    valSubBinObj     = rangeCfarObjPerDopList[dopIdx] - rangeCfarObjPerDopList[dopIdx - 1U];
+                    cfarListStartIdx = rangeCfarObjPerDopList[dopIdx - 1U];
+                }
+                else
+                {
+                    valSubBinObj     = rangeCfarObjPerDopList[0U];
+                    cfarListStartIdx = 0U;
+                }
+
+                isValidObj = 0U;
+                if (valSubBinObj != 0U)
+                {
+                    isValidObj = isObjInRangeAndDopplerList(
+                        curRangeIdx,
+                        dopIdx,
+                        (RangeCfarListObj *)&subFrmObj->dpuCfg.rangeCfarCfg.res.rangeCfarList[cfarListStartIdx],
+                        valSubBinObj);
+                }
+
+#ifndef ENABLE_HISTOGRAM_BASED_DOP_AZIM_DETECTION
+                if ((subFrmObj->staticCfg.cfarCfg.cfg.variableThresholdMode != 0U) &&
+                    (subFrmObj->dpuCfg.dopplerCfg.hwRes.cfarThreshScaleLUT != NULL) &&
+                    (curRangeIdx < subFrmObj->staticCfg.numRangeBins))
+                {
+                    lutOff = (int32_t)subFrmObj->dpuCfg.dopplerCfg.hwRes.cfarThreshScaleLUT[curRangeIdx];
+                }
+#endif
+                rawMargin = (int32_t)detObjList[objIdx].azimPeakSamples[1] -
+                            (int32_t)detObjList[objIdx].dopCfarNoise - lutOff;
+                if (rawMargin > 32767)
+                {
+                    marginQ11 = 32767;
+                }
+                else if (rawMargin < -32768)
+                {
+                    marginQ11 = -32768;
+                }
+                else
+                {
+                    marginQ11 = (int16_t)rawMargin;
+                }
+
+                if (isValidObj != 0U)
+                {
+                    initTag |= DETSEL_TAG_RANGECFAR_HIT;
+                    if (marginQ11 >= baseThrQ11)
+                    {
+                        initTag |= DETSEL_TAG_BASELINE;
+                    }
+                }
+
+                scratch->cand[objIdx].rangeIdx     = (uint16_t)curRangeIdx;
+                scratch->cand[objIdx].dopIdxActual = (uint16_t)detObjList[objIdx].dopIdxActual;
+                scratch->cand[objIdx].azimIdx      = (uint8_t)detObjList[objIdx].azimIdx;
+                scratch->cand[objIdx].initTag      = initTag;
+                scratch->cand[objIdx].marginQ11    = marginQ11;
+                scratch->cand[objIdx].peakQ11      = (detObjList[objIdx].azimPeakSamples[1] > 0xFFFFUL) ?
+                                                     0xFFFFU : (uint16_t)detObjList[objIdx].azimPeakSamples[1];
+                scratch->cand[objIdx].origObjIdx   = (uint16_t)objIdx;
+            }
+
+            /* Finalize cap check for the last occupied range gate */
+            {
+                uint32_t availBytes = subFrmObj->dpuCfg.dopplerCfg.hwRes.maxObjListPerRGateSize * (prevRangeIdx + 1U);
+                uint32_t usedBefore = gateStartObjIdx * (uint32_t)sizeof(DetObjParams);
+                uint32_t gateCap    = (availBytes > usedBefore) ?
+                                      ((availBytes - usedBefore) / (uint32_t)sizeof(DetObjParams)) : 0U;
+                if (gateCap > (uint32_t)MAX_NUM_OBJ_PER_RANGE_BIN)
+                {
+                    gateCap = (uint32_t)MAX_NUM_OBJ_PER_RANGE_BIN;
+                }
+                if ((cntInGate > 0U) && (cntInGate >= gateCap))
+                {
+                    capGates++;
+                }
+            }
+
+            /* Phase 1b: Mode-dependent candidate selection */
+            if (detCfg->mode == DETSEL_MODE_TI_BASELINE)
+            {
+                for (objIdx = 0U; objIdx < dopNumObjOut; objIdx++)
+                {
+                    uint8_t t = scratch->cand[objIdx].initTag;
+                    if ((t & DETSEL_TAG_BASELINE) != 0U)
+                    {
+                        t |= DETSEL_TAG_SEED;
+                    }
+                    scratch->tag[objIdx] = t;
+                    if ((t & DETSEL_TAG_RANGECFAR_HIT) != 0U)
+                    {
+                        if (finalNumObjs < (uint32_t)maxFinal)
+                        {
+                            scratch->selIdx[finalNumObjs++] = (uint16_t)objIdx;
+                        }
+                        else
+                        {
+                            truncFlag = 1U;
+                        }
                     }
                 }
             }
-        }
-
-        /* Monitor the completion of last transfer here. */
-        if(finalNumObjs > 0U)
-        {
-            while(((*(volatile uint32_t*)((uint32_t)edmaIntrStatusReg)) & (channelMask)) != (channelMask))
+            else if (detCfg->mode == DETSEL_MODE_CAND_DUMP)
             {
-                /* wait */
+                for (objIdx = 0U; objIdx < dopNumObjOut; objIdx++)
+                {
+                    uint8_t t = scratch->cand[objIdx].initTag;
+                    if ((t & DETSEL_TAG_BASELINE) != 0U)
+                    {
+                        t |= DETSEL_TAG_SEED;
+                    }
+                    else
+                    {
+                        t |= DETSEL_TAG_STAGE1_ONLY;
+                    }
+                    scratch->tag[objIdx] = t;
+                }
+                finalNumObjs = (uint32_t)DetSel_selectIndices(
+                    scratch->cand,
+                    scratch->tag,
+                    (uint16_t)dopNumObjOut,
+                    DETSEL_TAG_BASELINE,
+                    DETSEL_TAG_STAGE1_ONLY,
+                    maxFinal,
+                    scratch->bfsQueue,
+                    scratch->selIdx,
+                    &truncFlag);
             }
-            *(volatile uint32_t*)((uint32_t)edmaClrIntrStatusReg) = channelMask;
+            else
+            {
+                DetSel_Physics  phys;
+                DetSel_OutStats rgStats;
+
+                phys.rangeStep         = subFrmObj->staticCfg.rangeStep;
+                phys.dopplerStep       = subFrmObj->staticCfg.dopplerStep;
+                phys.numRangeBins      = subFrmObj->staticCfg.numRangeBins;
+                phys.numDopplerBins    = subFrmObj->staticCfg.numDopplerBins;
+                phys.numAzimFFTBins    = subFrmObj->dpuCfg.dopplerCfg.staticCfg.numAzimFFTBins;
+                phys.numVirtualAntAzim = subFrmObj->staticCfg.numVirtualAntAzim;
+
+                retVal = DetSel_regionGrow(&phys, detCfg, (uint16_t)dopNumObjOut, scratch, &rgStats);
+                if (retVal != DETSEL_OK)
+                {
+                    return retVal;
+                }
+                finalNumObjs = (uint32_t)DetSel_selectIndices(
+                    scratch->cand,
+                    scratch->tag,
+                    (uint16_t)dopNumObjOut,
+                    DETSEL_TAG_SEED,
+                    DETSEL_TAG_GROWN,
+                    maxFinal,
+                    scratch->bfsQueue,
+                    scratch->selIdx,
+                    &truncFlag);
+            }
+
+            /* Phase 2: Pack tag into dopIdx[31:16] & EDMA selected objects to finalDetObjList */
+            for (k = 0U; k < finalNumObjs; k++)
+            {
+                uint32_t selObjIdx = (uint32_t)scratch->selIdx[k];
+
+                detObjList[selObjIdx].dopIdx =
+                    (((uint32_t)scratch->tag[selObjIdx] << DETSEL_TAG_SHIFT) |
+                     (detObjList[selObjIdx].dopIdx & DETSEL_DOPIDX_MASK));
+
+                if (k > 0U)
+                {
+                    while (((*(volatile uint32_t *)((uint32_t)edmaIntrStatusReg)) & channelMask) != channelMask)
+                    {
+                        /* wait */
+                    }
+                    *(volatile uint32_t *)((uint32_t)edmaClrIntrStatusReg) = channelMask;
+                }
+
+                *(volatile uint32_t *)((uint32_t)edmaSrcAddr) =
+                    (uint32_t)SOC_virtToPhy((void *)&subFrmObj->dpuCfg.dopplerCfg.hwRes.detObjList[selObjIdx]);
+                *(volatile uint32_t *)((uint32_t)edmaDstAddr) =
+                    (uint32_t)SOC_virtToPhy((void *)&subFrmObj->dpuCfg.dopplerCfg.hwRes.finalDetObjList[k]);
+                *(volatile uint32_t *)((uint32_t)edmaTrigReg) = channelMask;
+            }
+
+            if (finalNumObjs > 0U)
+            {
+                while (((*(volatile uint32_t *)((uint32_t)edmaIntrStatusReg)) & channelMask) != channelMask)
+                {
+                    /* wait */
+                }
+                *(volatile uint32_t *)((uint32_t)edmaClrIntrStatusReg) = channelMask;
+            }
         }
     }
     else
@@ -1790,6 +1978,11 @@ static int32_t DPC_ObjDet_intersectDopAndRangeCFAR(
     }
 
     *finalNumDetObjs = finalNumObjs;
+
+    {
+        uint32_t selUs = (CycleCounterP_getCount32() - selStartCycles) / CM4_CLOCK_MHZ;
+        gDetSelLastPackedStats = DetSel_packCm4Stats(dopNumObjOut, capGates, selUs, truncFlag);
+    }
 
     return retVal;
 }
@@ -2042,8 +2235,8 @@ int32_t DPC_ObjectDetection_execute(
         result->compRxChanBiasMeasurement = NULL;
     }
 
-    /* For rangeProcHwa, interChirpProcessingMargin is not available */
-    objDetObj->stats.interChirpProcessingMargin = 0;
+    /* Repurpose unused DDMA interChirpProcessingMargin word to carry CM4 DetSel telemetry to MSS */
+    objDetObj->stats.interChirpProcessingMargin = gDetSelLastPackedStats;
 
     objDetObj->stats.interFrameEndTimeStamp = CycleCounterP_getCount32();
     result->stats = (DPC_ObjectDetection_Stats *)((uint32_t)SOC_virtToPhy((void*)&objDetObj->stats));
@@ -3443,6 +3636,19 @@ static int32_t DPC_ObjDet_preStartConfig(SubFrameObj *obj,
         {
             goto exit;
         }
+
+        {
+            uint8_t sfIdx = (uint8_t)(obj - &ptrObjDetObj->subFrameObj[0]);
+            void *detSelMem = DPC_ObjDet_BiDirMemPoolAlloc(
+                L3ramObj, sizeof(DetSel_ScratchBuf), (uint8_t)sizeof(uint32_t), false);
+            if (detSelMem == NULL)
+            {
+                retVal = DPC_OBJECTDETECTION_ENOMEM__OBJ_PARAMS_RAM_RANGE_CFAR_BUF;
+                goto exit;
+            }
+            DebugP_assert(sfIdx < RL_MAX_SUBFRAMES);
+            gDetSelScratch[sfIdx] = (DetSel_ScratchBuf *)detSelMem;
+        }
     }
 
     /* Rewind to the scratch beginning */
@@ -3628,10 +3834,24 @@ int32_t DPC_ObjectDetection_ioctl(
         /* First argument is sub-frame number */
         DebugP_assert(arg != NULL);
         subFrameNum = *(uint8_t *)arg;
+        DebugP_assert(subFrameNum < RL_MAX_SUBFRAMES);
         subFrmObj = &objDetObj->subFrameObj[subFrameNum];
 
         switch (cmd)
         {
+            case DPC_OBJDET_IOCTL__CUSTOM_DETSEL_CFG:
+            {
+                const DetSel_Cfg *inCfg = (const DetSel_Cfg *)arg;
+                DebugP_assert(argLen == sizeof(DetSel_Cfg));
+                if (DetSel_validateCfg(inCfg) != DETSEL_OK)
+                {
+                    retVal = DPC_OBJECTDETECTION_EINVAL;
+                    goto exit;
+                }
+                gDetSelCfg[subFrameNum] = *inCfg;
+                break;
+            }
+
             /* Related to pre-start configuration */
             case DPC_OBJDET_IOCTL__STATIC_PRE_START_CFG:
             {
@@ -3772,6 +3992,9 @@ DPM_DPCHandle DPC_ObjectDetection_init(
 
     /* Initialize memory */
     (void)memset((void *)objDetObj, 0, sizeof(ObjDetObj));
+    (void)memset((void *)gDetSelCfg, 0, sizeof(gDetSelCfg));
+    (void)memset((void *)gDetSelScratch, 0, sizeof(gDetSelScratch));
+    gDetSelLastPackedStats = 0U;
 
 #ifdef INCLUDE_DPM
     /* Copy over the DPM configuration: */

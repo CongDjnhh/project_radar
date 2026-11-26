@@ -66,6 +66,10 @@
 /* Demo Include Files */
 #include <ti/demo/awr2x44P/mmw_ddm/include/mmw_config.h>
 #include <ti/demo/awr2x44P/mmw_ddm/dss_cm4/mmw_dss_cm4.h>
+#include "detsel_common.h"
+
+_Static_assert(sizeof(DetSel_Cfg) != sizeof(DPC_ObjectDetection_PreStartCfg),
+               "DetSel_Cfg size must not collide with DPC_ObjectDetection_PreStartCfg");
 
 
 /**************************************************************************
@@ -121,6 +125,7 @@ HwiP_Object MMwDemo_FrameStartHwiObject;
 SemaphoreP_Object gDPCStateSemHandle;
 
 uint8_t gMsgBuf[DPM_BUFFER_MAX_SIZE] = {0};
+static volatile uint16_t gLastMsgLen = 0U;
 
 /**
  * @brief
@@ -194,6 +199,8 @@ static void MmwDemo_sensorStopEpilog(void)
  */
 void MmwDemo_DPC_ObjectDetection_reportFxn(void *data, uint16_t dataLen)
 {
+    DebugP_assert(dataLen <= DPM_BUFFER_MAX_SIZE);
+    gLastMsgLen = dataLen;
     memcpy((void*)gMsgBuf, (void*)data, dataLen);
     SemaphoreP_post(&gDPCStateSemHandle);
 }
@@ -255,8 +262,24 @@ void MmwDemo_DPC_ObjectDetection(void)
 
             case MMWDEMO_DPC_CFG:
             {
-                /* Wait for the preStart Cfg to be available */
+                /* Wait for the preStart Cfg (or custom DetSel_Cfg) to be available */
                 SemaphoreP_pend(&gDPCStateSemHandle, SystemP_WAIT_FOREVER);
+                if (gLastMsgLen == (uint16_t)sizeof(DetSel_Cfg))
+                {
+                    uint32_t ackMsg = MMWDEMO_DPC_COMMONCFG;
+                    retVal = DPC_ObjectDetection_ioctl(gMmwDssCM4MCB.dataPathObj.objDetDpcHandle,
+                                DPC_OBJDET_IOCTL__CUSTOM_DETSEL_CFG,
+                                gMsgBuf, sizeof(DetSel_Cfg));
+                    if (retVal < 0)
+                    {
+                        DebugP_log("DPC DetSel Cfg Error:%d\n", retVal);
+                        DebugP_assert(0);
+                    }
+                    retVal = DPM_send(gMmwDssCM4MCB.dataPathObj.objDetDpmHandle,
+                                      (void *)(&ackMsg), sizeof(uint32_t), CSL_CORE_ID_R5FSS0_0);
+                    DebugP_assert(0 == retVal);
+                    break;
+                }
                 retVal = DPC_ObjectDetection_ioctl( gMmwDssCM4MCB.dataPathObj.objDetDpcHandle,
                             DPC_OBJDET_IOCTL__STATIC_PRE_START_CFG,
                             gMsgBuf, sizeof(DPC_ObjectDetection_PreStartCfg));
