@@ -38,7 +38,7 @@ typedef struct DetSel_Cand_t
     uint16_t origObjIdx;     /* Original index in detObjList[0..dopNumObjOut-1] */
 } DetSel_Cand;
 
-_Static_assert(sizeof(DetSel_Cand) == 12U, "DetSel_Cand size mismatch");
+DETSEL_STATIC_ASSERT(sizeof(DetSel_Cand) == 12U, DetSel_Cand_size_mismatch);
 
 /**
  * @brief Active waveform & antenna array physics used to derive discrete bin windows.

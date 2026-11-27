@@ -15,6 +15,13 @@
 extern "C" {
 #endif
 
+#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L) && !defined(__TINYC__)
+#define DETSEL_STATIC_ASSERT(cond, name) _Static_assert((cond), #name)
+#else
+#define DETSEL_STATIC_ASSERT(cond, name) \
+    typedef char detsel_static_assert_##name[(cond) ? 1 : -1]
+#endif
+
 /** @brief Stage-2 selection modes */
 #define DETSEL_MODE_TI_BASELINE      (0U) /* Exact TI RangeCFAR intersection */
 #define DETSEL_MODE_CAND_DUMP        (1U) /* Export tagged Stage-1 candidates for G1 gate & offline RG */
@@ -60,7 +67,7 @@ typedef struct DetSel_Cfg_t
     uint16_t reserved1;
 } DetSel_Cfg;
 
-_Static_assert(sizeof(DetSel_Cfg) == 32U, "DetSel_Cfg ABI size mismatch");
+DETSEL_STATIC_ASSERT(sizeof(DetSel_Cfg) == 32U, DetSel_Cfg_ABI_size_mismatch);
 
 /**
  * @brief Pack CM4 per-frame Stage-2 telemetry into stats.interChirpProcessingMargin (32-bit):
